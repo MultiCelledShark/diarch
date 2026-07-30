@@ -1,0 +1,170 @@
+use chrono::Utc;
+use diarch_core::{ReadingProgress, ReadingStatus, Work};
+use diarch_db::Db;
+use tempfile::tempdir;
+use uuid::Uuid;
+
+async fn fresh_db() -> (tempfile::TempDir, Db) {
+    let dir = tempdir().unwrap();
+    let db = Db::connect(&dir.path().join("t.db")).await.unwrap();
+    let seed = include_str!("../../../taxonomy/seed.json");
+    db.seed_taxonomy(seed).await.unwrap();
+    (dir, db)
+}
+
+fn sample_work(created_by: Option<Uuid>, status: ReadingStatus) -> Work {
+    let now = Utc::now();
+    Work {
+        id: Uuid::new_v4(),
+        title: "Test Book".into(),
+        authors: "Author".into(),
+        isbn: Some("9780000000000".into()),
+        description: None,
+        status,
+        primary_code: Some(8201),
+        year_list: None,
+        rating: None,
+        review: None,
+        reading_direction: "ltr".into(),
+        is_manga: false,
+        needs_review: false,
+        needs_cover: true,
+        needs_tts: false,
+        needs_audio: false,
+        needs_transcription: false,
+        sg_review_dirty: false,
+        sg_needs_add: false,
+        sg_audio_only_remote: false,
+        sg_matched: false,
+        sg_book_id: None,
+        created_by,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+#[tokio::test]
+async fn admin_bootstrap_and_password_verify() {
+    let (_dir, db) = fresh_db().await;
+    let admin = db.ensure_admin("admin", "secret").await.unwrap();
+    assert!(admin.is_admin);
+    let again = db.ensure_admin("admin", "other").await.unwrap();
+    assert_eq!(admin.id, again.id);
+    let hash = db.get_password_hash("admin").await.unwrap().unwrap();
+    assert!(Db::verify_password("secret", &hash).unwrap());
+    assert!(!Db::verify_password("wrong", &hash).unwrap());
+}
+
+#[tokio::test]
+async fn sessions_expire_lookup() {
+    let (_dir, db) = fresh_db().await;
+    let user = db.create_user("u1", "pw", false).await.unwrap();
+    let token = db.create_session(user.id, 1).await.unwrap();
+    let found = db.user_for_session(&token).await.unwrap().unwrap();
+    assert_eq!(found.username, "u1");
+    db.delete_session(&token).await.unwrap();
+    assert!(db.user_for_session(&token).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn acl_hides_ungranted_works() {
+    let (_dir, db) = fresh_db().await;
+    let admin = db.create_user("admin", "pw", true).await.unwrap();
+    let reader = db.create_user("reader", "pw", false).await.unwrap();
+
+    let secret = sample_work(Some(admin.id), ReadingStatus::Unread);
+    db.create_work(&secret, &[8201], None).await.unwrap();
+
+    let shared = sample_work(Some(admin.id), ReadingStatus::Wishlist);
+    let mut shared = shared;
+    shared.title = "Shared".into();
+    db.create_work(&shared, &[8201, 8940], Some(reader.id))
+        .await
+        .unwrap();
+
+    let reader_works = db.list_works_for_user(&reader, None, None).await.unwrap();
+    assert_eq!(reader_works.len(), 1);
+    assert_eq!(reader_works[0].title, "Shared");
+    assert!(!db.user_can_access(&reader, secret.id).await.unwrap());
+    assert!(db.user_can_access(&reader, shared.id).await.unwrap());
+    assert!(db.user_can_access(&admin, secret.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn multi_codes_and_attention_filters() {
+    let (_dir, db) = fresh_db().await;
+    let admin = db.create_user("admin", "pw", true).await.unwrap();
+    let mut work = sample_work(Some(admin.id), ReadingStatus::Unread);
+    work.needs_tts = true;
+    work.sg_review_dirty = true;
+    db.create_work(&work, &[8201, 8940], Some(admin.id))
+        .await
+        .unwrap();
+    let codes = db.work_codes(work.id).await.unwrap();
+    assert_eq!(codes, vec![8201, 8940]);
+
+    db.set_work_codes(work.id, &[8403]).await.unwrap();
+    assert_eq!(db.work_codes(work.id).await.unwrap(), vec![8403]);
+
+    let tts = db
+        .list_works_for_user(&admin, None, Some("needs_tts"))
+        .await
+        .unwrap();
+    assert_eq!(tts.len(), 1);
+    let dirty = db
+        .list_works_for_user(&admin, None, Some("sg_review_dirty"))
+        .await
+        .unwrap();
+    assert_eq!(dirty.len(), 1);
+}
+
+#[tokio::test]
+async fn reading_progress_upsert() {
+    let (_dir, db) = fresh_db().await;
+    let user = db.create_user("u", "pw", false).await.unwrap();
+    let work = sample_work(Some(user.id), ReadingStatus::Reading);
+    db.create_work(&work, &[], Some(user.id)).await.unwrap();
+    let p = ReadingProgress {
+        user_id: user.id,
+        work_id: work.id,
+        mode: "epub".into(),
+        position: "epubcfi(/6/2)".into(),
+        percent: 12.5,
+        updated_at: Utc::now(),
+    };
+    db.upsert_progress(&p).await.unwrap();
+    let mut p2 = p.clone();
+    p2.percent = 50.0;
+    p2.position = "epubcfi(/6/4)".into();
+    db.upsert_progress(&p2).await.unwrap();
+    let got = db.get_progress(user.id, work.id, "epub").await.unwrap().unwrap();
+    assert_eq!(got.percent, 50.0);
+}
+
+#[tokio::test]
+async fn jobs_and_integration_health() {
+    let (_dir, db) = fresh_db().await;
+    let job = db.create_job("import", None).await.unwrap();
+    assert_eq!(job.status, "pending");
+    let next = db.next_pending_job().await.unwrap().unwrap();
+    assert_eq!(next.id, job.id);
+    db.update_job(job.id, "done", Some("ok")).await.unwrap();
+    assert!(db.next_pending_job().await.unwrap().is_none());
+
+    db.set_integration_health("pandoc", "ok", None, true)
+        .await
+        .unwrap();
+    let health = db.list_integration_health().await.unwrap();
+    assert!(health.iter().any(|h| h.name == "pandoc" && h.status == "ok"));
+}
+
+#[tokio::test]
+async fn created_by_grants_owner_access_without_explicit_grant() {
+    let (_dir, db) = fresh_db().await;
+    let user = db.create_user("owner", "pw", false).await.unwrap();
+    let work = sample_work(Some(user.id), ReadingStatus::Wishlist);
+    db.create_work(&work, &[9000], None).await.unwrap();
+    assert!(db.user_can_access(&user, work.id).await.unwrap());
+    let listed = db.list_works_for_user(&user, Some("wishlist"), None).await.unwrap();
+    assert_eq!(listed.len(), 1);
+}

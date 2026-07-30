@@ -263,3 +263,75 @@ pub fn infer_manga(primary_code: Option<i32>, codes: &[i32], is_manga_flag: bool
         .chain(primary_code)
         .any(|c| (8900..=8939).contains(&c))
 }
+
+/// Normalize titles for fuzzy matching (ISBN-less StoryGraph sync).
+pub fn normalize_title(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+pub fn titles_match(a: &str, b: &str) -> bool {
+    normalize_title(a) == normalize_title(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_paths() {
+        let c = Config {
+            data_dir: "/var/lib/diarch".into(),
+            ..Config::default()
+        };
+        assert_eq!(c.db_path(), std::path::PathBuf::from("/var/lib/diarch/diarch.db"));
+        assert_eq!(
+            c.library_dir(),
+            std::path::PathBuf::from("/var/lib/diarch/library")
+        );
+    }
+
+    #[test]
+    fn config_show_audio_gaps_env() {
+        std::env::set_var("DIARCH_SHOW_AUDIO_GAPS", "off");
+        let c = Config::from_env();
+        assert!(!c.show_audio_gaps);
+        std::env::remove_var("DIARCH_SHOW_AUDIO_GAPS");
+    }
+
+    #[test]
+    fn reading_status_roundtrip() {
+        for s in ["unread", "reading", "read", "wishlist"] {
+            let st = ReadingStatus::parse(s).unwrap();
+            assert_eq!(st.as_str(), s);
+        }
+        assert!(ReadingStatus::parse("nope").is_none());
+    }
+
+    #[test]
+    fn asset_kind_roundtrip() {
+        for s in ["epub", "markdown", "audio", "cover", "media"] {
+            assert_eq!(AssetKind::parse(s).unwrap().as_str(), s);
+        }
+    }
+
+    #[test]
+    fn infer_manga_from_codes_and_flag() {
+        assert!(infer_manga(None, &[8920], false));
+        assert!(infer_manga(Some(8920), &[], false));
+        assert!(!infer_manga(Some(8201), &[8940], false));
+        assert!(infer_manga(None, &[], true));
+        assert!(!infer_manga(None, &[8899], false));
+    }
+
+    #[test]
+    fn title_matching_ignores_punctuation_and_case() {
+        assert!(titles_match("The Eye of the World!", "the eye of the world"));
+        assert!(!titles_match("Dune", "Dune Messiah"));
+    }
+}

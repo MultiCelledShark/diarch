@@ -168,17 +168,7 @@ pub struct SyncReport {
 }
 
 fn titles_match(a: &str, b: &str) -> bool {
-    normalize(a) == normalize(b)
-}
-
-fn normalize(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase()
+    diarch_core::titles_match(a, b)
 }
 
 async fn list_all_works(db: &diarch_db::Db) -> Result<Vec<diarch_core::Work>> {

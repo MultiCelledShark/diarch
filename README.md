@@ -56,12 +56,17 @@ See [deploy/debian/README.md](deploy/debian/README.md).
 - `android/` — thin client notes / stub
 - `docs/TODO-ebook2audiobook-watcher.md` — desktop TTS watcher (out of scope here)
 
-## Features by phase
+## Tests
 
-1. Auth, works, taxonomy (multi-code + primary), ACL grants, wishlist
-2. Import EPUB/PDF → MD; confirm MD → EPUB; downloads
-3. EPUB reader (epub.js), Markdown infinite scroll, manga RTL
-4. ISBN / LoC metadata, barcode wishlist, LocalAI covers
-5. M4A upload + Range streaming
-6. StoryGraph sync flags, reMarkable via rmapi, integration fixer
-7. Android client notes + KOReader sync notes
+```bash
+cargo test --workspace
+```
+
+Coverage includes:
+
+- **diarch-core** — taxonomy seed, primary-code suggestion, manga inference, title matching
+- **diarch-db** — auth/sessions, ACL grants, multi-code works, attention filters, jobs
+- **diarch-import** — markdown ingest, zip export, TTS queue copy; pandoc confirm when installed
+- **diarch-server** — HTTP API regression (auth, ACL, wishlist, flags, progress, settings, import jobs)
+
+Pandoc-dependent cases skip cleanly if `pandoc` is missing.
