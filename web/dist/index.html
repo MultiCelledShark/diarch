@@ -42,7 +42,6 @@
         <div id="view-library" class="view">
           <div class="toolbar">
             <h2 class="view-heading">Library</h2>
-            <button id="btn-new-work">New work</button>
             <select id="filter-status">
               <option value="">All statuses</option>
               <option value="unread">Unread</option>
@@ -50,7 +49,24 @@
               <option value="read">Read</option>
               <option value="wishlist">Wishlist</option>
             </select>
+            <button type="button" id="btn-new-work">New listing</button>
           </div>
+
+          <div id="import-box" class="import-box">
+            <strong>Import ebook</strong>
+            <p>Drop an EPUB here, or choose a file. PDF/Markdown also accepted (review before EPUB export).</p>
+            <div class="row">
+              <label class="btn-file primary">
+                Choose EPUB…
+                <input type="file" id="library-import-file" accept=".epub,.pdf,.md,.markdown,application/epub+zip" hidden />
+              </label>
+              <label>Primary code
+                <input type="number" id="import-primary" placeholder="e.g. 8201" />
+              </label>
+            </div>
+            <p id="import-status" class="muted" aria-live="polite"></p>
+          </div>
+
           <div id="work-list" class="cards"></div>
         </div>
 
@@ -72,6 +88,7 @@
 
         <div id="view-attention" class="view" hidden>
           <div class="toolbar">
+            <h2 class="view-heading">Attention</h2>
             <select id="attention-filter">
               <option value="needs_review">Needs review</option>
               <option value="needs_cover">Needs cover</option>
@@ -115,7 +132,7 @@
         </div>
 
         <div id="view-detail" class="view" hidden>
-          <button id="back-library">← Back</button>
+          <button id="back-library">← Library</button>
           <div id="detail" class="detail"></div>
         </div>
 

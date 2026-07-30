@@ -45,8 +45,8 @@ Default admin: `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` (defaults `admin` / `ad
 | Phase | Claim | Reality |
 |-------|--------|---------|
 | **0 Bootstrap** | Done | Repo, workspace, seed, deploy notes |
-| **1 Auth + works + ACL + web shell** | API/MVP done | Login, nav (Library / Wishlist / Attention / Admin / Settings), works API, grants. **UI is skeletal** — empty library needs an explicit empty state + New work / Wishlist |
-| **2 Import** | API/MVP done | Jobs + pandoc for EPUB/PDF/MD; confirm MD→EPUB; downloads. Not battle-tested on messy PDFs |
+| **1 Auth + works + ACL + web shell + EPUB import** | **Complete** | Login, Library with import dropzone, metadata editor (status / taxonomy / year list), grants by username, wishlist, admin users. EPUB import extracts title/author and lands the book in the library. |
+| **2 Import polish** | API/MVP | PDF→MD review path, MD zip download; deeper PDF/OCR polish still open |
 | **3 Readers** | API/MVP done | epub.js + MD scroll + manga RTL in web. No polish (TOC chrome, themes) |
 | **4 Metadata / covers / wishlist** | API/MVP done | Open Library + LoC search, barcode wishlist, placeholder / LocalAI hooks. Cover gen needs LocalAI/Hermes configured |
 | **5 Audio** | API/MVP done | M4A upload + Range stream. No Audible/transcription wiring yet |
@@ -57,10 +57,11 @@ Default admin: `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` (defaults `admin` / `ad
 ### What you should see after login
 
 1. Top bar: **Diarch** · Library · Wishlist · Attention · Admin · Settings · username · Logout  
-2. **Library** heading, **New work** button, status filter  
-3. Book cards **or** an empty-state message pointing you to New work / Wishlist  
+2. **Library** with an **Import ebook** dropzone (EPUB primary)  
+3. Book cards after import, or empty-state guidance  
+4. Work detail: editable title/authors/status/taxonomy/year list; grant by username (admin)
 
-If you only see a blank page after login, hard-refresh (`Ctrl+Shift+R`) so the browser picks up updated `app.js` / CSS from the running server (restart `cargo run` after UI changes so `web/dist` is what the binary embeds — or we sync dist; see below).
+Restart `cargo run -p diarch-server` after pulling UI changes (assets are embedded at compile time), then hard-refresh the browser.
 
 ---
 

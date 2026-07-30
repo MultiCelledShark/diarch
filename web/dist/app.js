@@ -1,6 +1,8 @@
 const state = {
   user: null,
   settings: null,
+  taxonomy: [],
+  users: [],
   currentWork: null,
   book: null,
   rendition: null,
@@ -34,6 +36,19 @@ function show(view) {
   });
 }
 
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function taxonomyLabel(code) {
+  const n = state.taxonomy.find((t) => t.code === code);
+  return n ? `${code} — ${n.name}` : String(code ?? "—");
+}
+
 async function boot() {
   try {
     state.user = await api("/api/auth/me");
@@ -52,16 +67,26 @@ async function enterApp() {
   show("library");
   try {
     state.settings = await api("/api/settings");
-  } catch (e) {
-    console.warn("settings load failed", e);
+  } catch {
     state.settings = { show_audio_gaps: true, reader_infinite_scroll: false };
+  }
+  try {
+    state.taxonomy = await api("/api/taxonomy");
+  } catch {
+    state.taxonomy = [];
+  }
+  if (state.user.is_admin) {
+    try {
+      state.users = await api("/api/users");
+    } catch {
+      state.users = [];
+    }
   }
   try {
     await loadWorks();
   } catch (e) {
-    console.error("library load failed", e);
-    const el = document.getElementById("work-list");
-    el.innerHTML = `<p class="empty error">Could not load library: ${escapeHtml(e.message || String(e))}</p>`;
+    document.getElementById("work-list").innerHTML =
+      `<p class="empty error">Could not load library: ${escapeHtml(e.message || String(e))}</p>`;
   }
 }
 
@@ -77,7 +102,7 @@ document.getElementById("login-form").addEventListener("submit", async (e) => {
     });
     state.user = data.user;
     await enterApp();
-  } catch (ex) {
+  } catch {
     err.textContent = "Login failed";
     err.hidden = false;
     document.getElementById("login-view").hidden = false;
@@ -108,7 +133,7 @@ async function loadWorks() {
   const works = await api(`/api/works${q}`);
   renderCards(document.getElementById("work-list"), works, {
     emptyTitle: "Your library is empty",
-    emptyHint: "Use New work to add a book, or open Wishlist to add by ISBN / title.",
+    emptyHint: "Import an EPUB above, or create a listing / wishlist item.",
   });
 }
 
@@ -127,7 +152,7 @@ async function loadAttention() {
   const works = await api(`/api/works?attention=${encodeURIComponent(att)}`);
   renderCards(document.getElementById("attention-list"), works, {
     emptyTitle: "Nothing in this attention queue",
-    emptyHint: "Flags appear here when reviews need StoryGraph updates, covers are missing, etc.",
+    emptyHint: "Flags appear here for review, covers, StoryGraph, audio gaps, etc.",
   });
 }
 
@@ -146,49 +171,118 @@ function renderCards(el, works, empty = {}) {
     const card = document.createElement("div");
     card.className = "card";
     const badges = [];
-    if (w.status === "wishlist") badges.push("wishlist");
-    if (w.primary_code) badges.push(`#${w.primary_code}`);
+    if (w.status && w.status !== "unread") badges.push(w.status);
+    if (w.primary_code) badges.push(taxonomyLabel(w.primary_code).split(" — ")[1] || `#${w.primary_code}`);
     if (w.needs_review) badges.push("review");
     if (state.settings?.show_audio_gaps && w.needs_audio) badges.push("no audio");
-    if (w.sg_review_dirty) badges.push("SG review");
     if (w.is_manga) badges.push("manga");
     card.innerHTML = `
       <img src="/api/works/${w.id}/cover" alt="" onerror="this.style.opacity=0.3" />
       <div class="meta">
         <strong>${escapeHtml(w.title)}</strong>
         <span>${escapeHtml(w.authors || "")}</span>
-        <div>${badges.map((b) => `<span class="badge">${b}</span>`).join("")}</div>
+        <div>${badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join("")}</div>
       </div>`;
     card.addEventListener("click", () => openDetail(w.id));
     el.appendChild(card);
   }
 }
 
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+/* —— Import box —— */
+const importBox = document.getElementById("import-box");
+const importFile = document.getElementById("library-import-file");
+const importStatus = document.getElementById("import-status");
+
+function setImportStatus(text, isError = false) {
+  importStatus.textContent = text || "";
+  importStatus.classList.toggle("error", !!isError);
 }
+
+async function importLibraryFile(file) {
+  if (!file) return;
+  setImportStatus(`Uploading ${file.name}…`);
+  const fd = new FormData();
+  fd.append("file", file);
+  const primary = document.getElementById("import-primary").value;
+  if (primary) fd.append("primary_code", primary);
+  try {
+    const res = await fetch("/api/library/import", {
+      method: "POST",
+      body: fd,
+      credentials: "include",
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const j = await res.json();
+    setImportStatus(`Importing “${j.work.title}”…`);
+    await pollJob(j.job_id, async (job) => {
+      if (job.status === "failed") {
+        setImportStatus(`Import failed: ${job.detail || "unknown error"}`, true);
+        return;
+      }
+      setImportStatus(`Imported “${j.work.title}”. Opening…`);
+      await loadWorks();
+      await openDetail(j.work.id);
+      setImportStatus("");
+    });
+  } catch (e) {
+    setImportStatus(e.message || String(e), true);
+  }
+}
+
+importFile.addEventListener("change", (e) => {
+  const file = e.target.files?.[0];
+  importLibraryFile(file);
+  e.target.value = "";
+});
+
+["dragenter", "dragover"].forEach((ev) => {
+  importBox.addEventListener(ev, (e) => {
+    e.preventDefault();
+    importBox.classList.add("drag");
+  });
+});
+["dragleave", "drop"].forEach((ev) => {
+  importBox.addEventListener(ev, (e) => {
+    e.preventDefault();
+    importBox.classList.remove("drag");
+  });
+});
+importBox.addEventListener("drop", (e) => {
+  const file = e.dataTransfer?.files?.[0];
+  if (file) importLibraryFile(file);
+});
 
 document.getElementById("btn-new-work").addEventListener("click", async () => {
   const title = prompt("Title?");
   if (!title) return;
   const authors = prompt("Author(s)?") || "";
-  const code = prompt("Primary taxonomy code? (e.g. 8201 for Epic Fantasy)") || "";
+  const code = prompt("Primary taxonomy code? (e.g. 8201)") || "";
   const codes = code ? [Number(code)] : [];
-  await api("/api/works", {
+  const work = await api("/api/works", {
     method: "POST",
-    json: {
-      title,
-      authors,
-      codes,
-      primary_code: codes[0] || null,
-    },
+    json: { title, authors, codes, primary_code: codes[0] || null },
   });
   await loadWorks();
+  await openDetail(work.id);
 });
+
+function taxonomyOptions(selected) {
+  const popular = [8201, 8403, 8920, 8940, 6100, 9200, 3100];
+  const codes = new Map(state.taxonomy.map((t) => [t.code, t]));
+  let html = `<option value="">— none —</option>`;
+  for (const c of popular) {
+    const t = codes.get(c);
+    if (t) {
+      html += `<option value="${c}" ${selected === c ? "selected" : ""}>${escapeHtml(taxonomyLabel(c))}</option>`;
+    }
+  }
+  html += `<option disabled>────────</option>`;
+  for (const t of state.taxonomy) {
+    if (popular.includes(t.code)) continue;
+    html += `<option value="${t.code}" ${selected === t.code ? "selected" : ""}>${escapeHtml(taxonomyLabel(t.code))}</option>`;
+  }
+  return html;
+}
 
 async function openDetail(id) {
   const data = await api(`/api/works/${id}`);
@@ -199,60 +293,122 @@ async function openDetail(id) {
   const hasEpub = assets.some((a) => a.kind === "epub");
   const hasMd = assets.some((a) => a.kind === "markdown");
   const audio = assets.find((a) => a.kind === "audio");
+  const codes = data.codes || [];
+
   document.getElementById("detail").innerHTML = `
-    <img src="/api/works/${w.id}/cover" alt="" />
+    <img src="/api/works/${w.id}/cover?t=${Date.now()}" alt="" />
     <div>
-      <h2>${escapeHtml(w.title)}</h2>
-      <p>${escapeHtml(w.authors || "")}</p>
-      <p class="muted">ISBN: ${escapeHtml(w.isbn || "—")} · Status: ${w.status}
-        · Primary: ${w.primary_code ?? "—"} · Codes: ${(data.codes || []).join(", ")}</p>
-      <p>${escapeHtml(w.description || "")}</p>
+      <form id="detail-form" class="form-grid detail-form">
+        <label>Title <input name="title" value="${escapeHtml(w.title)}" required /></label>
+        <label>Authors <input name="authors" value="${escapeHtml(w.authors || "")}" /></label>
+        <label>ISBN <input name="isbn" value="${escapeHtml(w.isbn || "")}" /></label>
+        <label>Status
+          <select name="status">
+            ${["unread","reading","read","wishlist"].map((s) =>
+              `<option value="${s}" ${w.status === s ? "selected" : ""}>${s}</option>`).join("")}
+          </select>
+        </label>
+        <label>Primary taxonomy
+          <select name="primary_code">${taxonomyOptions(w.primary_code)}</select>
+        </label>
+        <label>Extra codes (comma-separated)
+          <input name="extra_codes" value="${escapeHtml(codes.filter((c) => c !== w.primary_code).join(", "))}" placeholder="8940, 8212" />
+        </label>
+        <label>Year reading list
+          <input name="year_list" type="number" value="${w.year_list ?? ""}" placeholder="${new Date().getFullYear()}" />
+        </label>
+        <label class="check"><input type="checkbox" name="is_manga" ${w.is_manga ? "checked" : ""} /> Manga / RTL</label>
+        <div class="row">
+          <button type="submit">Save metadata</button>
+        </div>
+      </form>
+      <p class="muted">${hasEpub ? "EPUB ready" : "No EPUB yet"} · ${hasMd ? "Markdown ready" : "No Markdown"} · Direction: ${escapeHtml(w.reading_direction)}</p>
       <div class="actions">
-        ${hasEpub || hasMd ? `<button id="btn-read">Read</button>` : ""}
-        <label class="btn-file">Import <input type="file" id="import-file" hidden /></label>
-        ${w.needs_review ? `<button id="btn-confirm">Confirm → EPUB</button>` : ""}
+        ${hasEpub || hasMd ? `<button type="button" id="btn-read">Read</button>` : ""}
+        <label class="btn-file">Replace / import file <input type="file" id="import-file" accept=".epub,.pdf,.md,.markdown" hidden /></label>
+        ${w.needs_review ? `<button type="button" id="btn-confirm">Confirm → EPUB</button>` : ""}
         ${hasEpub ? `<a href="/api/works/${w.id}/download/epub"><button type="button">Download EPUB</button></a>` : ""}
         ${hasMd ? `<a href="/api/works/${w.id}/download/markdown"><button type="button">Download MD</button></a>` : ""}
-        <button id="btn-cover-gen">Generate cover</button>
-        <button id="btn-cover-prompt">Copy cover prompt</button>
         <label class="btn-file">Upload cover <input type="file" id="cover-file" accept="image/*" hidden /></label>
-        <label class="btn-file">Upload audio <input type="file" id="audio-file" accept="audio/*,.m4a" hidden /></label>
-        ${audio ? `<button id="btn-play-audio">Play audio</button>` : ""}
-        ${hasEpub ? `<button id="btn-remarkable">Send to reMarkable</button>` : ""}
-        ${state.user.is_admin ? `<button id="btn-grant">Grant to user…</button>` : ""}
-        <button id="btn-flag-tts">Flag needs TTS</button>
-        <button id="btn-year">Add to year list…</button>
+        ${state.user.is_admin ? `
+          <label>Grant access
+            <select id="grant-user">
+              <option value="">Select user…</option>
+              ${state.users.filter((u) => !u.is_admin).map((u) =>
+                `<option value="${escapeHtml(u.username)}">${escapeHtml(u.username)}</option>`).join("")}
+            </select>
+          </label>
+          <button type="button" id="btn-grant">Grant</button>
+        ` : ""}
       </div>
       <pre id="detail-msg"></pre>
     </div>`;
 
-  const msg = (t) => (document.getElementById("detail-msg").textContent = t || "");
+  const msg = (t, isError = false) => {
+    const el = document.getElementById("detail-msg");
+    el.textContent = t || "";
+    el.classList.toggle("error", !!isError);
+  };
+
+  document.getElementById("detail-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const primary = fd.get("primary_code") ? Number(fd.get("primary_code")) : null;
+    const extra = String(fd.get("extra_codes") || "")
+      .split(",")
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    const allCodes = [...new Set([...(primary ? [primary] : []), ...extra])];
+    const yearRaw = String(fd.get("year_list") || "").trim();
+    await api(`/api/works/${w.id}`, {
+      method: "PUT",
+      json: {
+        title: fd.get("title"),
+        authors: fd.get("authors"),
+        isbn: fd.get("isbn") || null,
+        status: fd.get("status"),
+        primary_code: primary,
+        year_list: yearRaw ? Number(yearRaw) : null,
+        is_manga: fd.get("is_manga") === "on",
+        reading_direction: fd.get("is_manga") === "on" ? "rtl" : "ltr",
+      },
+    });
+    await api(`/api/works/${w.id}/codes`, {
+      method: "PUT",
+      json: { codes: allCodes, primary_code: primary },
+    });
+    msg("Saved");
+    await openDetail(w.id);
+  });
 
   document.getElementById("btn-read")?.addEventListener("click", () => openReader(w, hasEpub, hasMd, audio));
   document.getElementById("import-file")?.addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    msg(`Importing ${file.name}…`);
     const fd = new FormData();
     fd.append("file", file);
     const res = await fetch(`/api/works/${w.id}/import`, { method: "POST", body: fd, credentials: "include" });
+    if (!res.ok) {
+      msg(await res.text(), true);
+      return;
+    }
     const j = await res.json();
-    msg(`Import job ${j.job_id}`);
-    pollJob(j.job_id, () => openDetail(w.id));
+    await pollJob(j.job_id, async (job) => {
+      if (job.status === "failed") msg(job.detail || "Import failed", true);
+      else {
+        msg("Import complete");
+        await openDetail(w.id);
+      }
+    });
   });
   document.getElementById("btn-confirm")?.addEventListener("click", async () => {
     const j = await api(`/api/works/${w.id}/confirm`, { method: "POST" });
-    msg(`Confirm job ${j.job_id}`);
-    pollJob(j.job_id, () => openDetail(w.id));
-  });
-  document.getElementById("btn-cover-gen")?.addEventListener("click", async () => {
-    const j = await api(`/api/works/${w.id}/cover/generate`, { method: "POST" });
-    msg(j.ok ? "Cover generated" : `Prompt: ${j.prompt}`);
-    if (j.ok) openDetail(w.id);
-  });
-  document.getElementById("btn-cover-prompt")?.addEventListener("click", async () => {
-    const j = await api(`/api/works/${w.id}/cover/prompt`);
-    await navigator.clipboard.writeText(j.prompt);
-    msg("Prompt copied");
+    msg("Building EPUB…");
+    await pollJob(j.job_id, async (job) => {
+      if (job.status === "failed") msg(job.detail || "Failed", true);
+      else await openDetail(w.id);
+    });
   });
   document.getElementById("cover-file")?.addEventListener("change", async (e) => {
     const file = e.target.files[0];
@@ -260,37 +416,16 @@ async function openDetail(id) {
     const fd = new FormData();
     fd.append("file", file);
     await fetch(`/api/works/${w.id}/cover`, { method: "POST", body: fd, credentials: "include" });
-    openDetail(w.id);
-  });
-  document.getElementById("audio-file")?.addEventListener("change", async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const fd = new FormData();
-    fd.append("file", file);
-    await fetch(`/api/works/${w.id}/audio`, { method: "POST", body: fd, credentials: "include" });
-    openDetail(w.id);
-  });
-  document.getElementById("btn-play-audio")?.addEventListener("click", () => {
-    openReader(w, hasEpub, hasMd, audio);
-  });
-  document.getElementById("btn-remarkable")?.addEventListener("click", async () => {
-    const j = await api(`/api/works/${w.id}/remarkable`, { method: "POST" });
-    msg(j.ok ? "Sent" : j.error);
+    await openDetail(w.id);
   });
   document.getElementById("btn-grant")?.addEventListener("click", async () => {
-    const uid = prompt("User UUID to grant?");
-    if (!uid) return;
-    await api(`/api/works/${w.id}/grants`, { method: "POST", json: { user_id: uid } });
-    msg("Granted");
-  });
-  document.getElementById("btn-flag-tts")?.addEventListener("click", async () => {
-    await api(`/api/works/${w.id}`, { method: "PUT", json: { needs_tts: true } });
-    msg("Flagged needs_tts");
-  });
-  document.getElementById("btn-year")?.addEventListener("click", async () => {
-    const y = Number(prompt("Year?", String(new Date().getFullYear())));
-    await api(`/api/works/${w.id}`, { method: "PUT", json: { year_list: y } });
-    msg(`Year list ${y}`);
+    const username = document.getElementById("grant-user").value;
+    if (!username) {
+      msg("Pick a user", true);
+      return;
+    }
+    await api(`/api/works/${w.id}/grants`, { method: "POST", json: { username } });
+    msg(`Granted to ${username}`);
   });
 }
 
@@ -300,14 +435,15 @@ document.getElementById("back-library").addEventListener("click", () => {
 });
 
 async function pollJob(id, done) {
-  for (let i = 0; i < 60; i++) {
-    await new Promise((r) => setTimeout(r, 1000));
+  for (let i = 0; i < 120; i++) {
+    await new Promise((r) => setTimeout(r, 500));
     const j = await api(`/api/jobs/${id}`);
     if (j.status === "done" || j.status === "failed") {
-      done();
-      return;
+      await done(j);
+      return j;
     }
   }
+  await done({ status: "failed", detail: "Timed out waiting for import job" });
 }
 
 async function openReader(w, hasEpub, hasMd, audio) {
@@ -329,11 +465,9 @@ async function openReader(w, hasEpub, hasMd, audio) {
     audioEl.hidden = true;
   }
 
-  if (useMd) {
-    await loadMarkdown(w.id);
-  } else if (hasEpub) {
-    await loadEpub(w);
-  } else if (hasMd) {
+  if (useMd) await loadMarkdown(w.id);
+  else if (hasEpub) await loadEpub(w);
+  else if (hasMd) {
     scrollBox.checked = true;
     document.getElementById("epub-area").hidden = true;
     document.getElementById("md-area").hidden = false;
@@ -342,8 +476,9 @@ async function openReader(w, hasEpub, hasMd, audio) {
 
   scrollBox.onchange = async () => {
     if (scrollBox.checked && hasMd) {
-      if (state.rendition) {
-        state.book?.destroy?.();
+      if (state.book) {
+        try { state.book.destroy(); } catch {}
+        state.book = null;
         state.rendition = null;
       }
       document.getElementById("epub-area").hidden = true;
@@ -359,8 +494,7 @@ async function openReader(w, hasEpub, hasMd, audio) {
 
 async function loadMarkdown(id) {
   const res = await fetch(`/api/works/${id}/content/markdown`, { credentials: "include" });
-  const text = await res.text();
-  document.getElementById("md-area").textContent = text;
+  document.getElementById("md-area").textContent = await res.text();
   const prog = await api(`/api/works/${id}/progress?mode=markdown`).catch(() => null);
   if (prog?.percent) {
     const area = document.getElementById("md-area");
@@ -368,9 +502,10 @@ async function loadMarkdown(id) {
   }
   document.getElementById("md-area").onscroll = () => {
     const area = document.getElementById("md-area");
-    const percent = area.scrollHeight <= area.clientHeight
-      ? 100
-      : (area.scrollTop / (area.scrollHeight - area.clientHeight)) * 100;
+    const percent =
+      area.scrollHeight <= area.clientHeight
+        ? 100
+        : (area.scrollTop / (area.scrollHeight - area.clientHeight)) * 100;
     api(`/api/works/${id}/progress`, {
       method: "PUT",
       json: { mode: "markdown", position: String(area.scrollTop), percent },
@@ -393,22 +528,17 @@ async function loadEpub(w) {
     allowScriptedContent: false,
   });
   if (rtl) {
-    state.rendition.display();
     state.book.ready.then(() => {
       try { state.rendition.themes.default({ body: { direction: "rtl" } }); } catch {}
     });
   }
   const prog = await api(`/api/works/${w.id}/progress?mode=epub`).catch(() => null);
-  if (prog?.position) {
-    await state.rendition.display(prog.position);
-  } else {
-    await state.rendition.display();
-  }
+  if (prog?.position) await state.rendition.display(prog.position);
+  else await state.rendition.display();
   state.rendition.on("relocated", (loc) => {
-    const percent = loc.start.percentage * 100;
     api(`/api/works/${w.id}/progress`, {
       method: "PUT",
-      json: { mode: "epub", position: loc.start.cfi, percent },
+      json: { mode: "epub", position: loc.start.cfi, percent: loc.start.percentage * 100 },
     }).catch(() => {});
   });
 }
@@ -419,8 +549,11 @@ document.getElementById("reader-close").addEventListener("click", () => {
     state.book = null;
     state.rendition = null;
   }
-  show("detail");
   if (state.readerWorkId) openDetail(state.readerWorkId);
+  else {
+    show("library");
+    loadWorks();
+  }
 });
 
 document.getElementById("reader-prev").addEventListener("click", () => {
@@ -467,7 +600,7 @@ document.getElementById("btn-scan").addEventListener("click", async () => {
   try {
     const result = await codeReader.decodeOnceFromVideoDevice(undefined, "scan-video");
     document.getElementById("wl-isbn").value = result.text;
-  } catch (e) {
+  } catch {
     alert("Scan failed or cancelled");
   }
   stream.getTracks().forEach((t) => t.stop());
@@ -496,9 +629,14 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
 
 async function loadAdmin() {
   if (!state.user.is_admin) return;
-  const users = await api("/api/users");
+  state.users = await api("/api/users");
   const ul = document.getElementById("user-list");
-  ul.innerHTML = users.map((u) => `<li>${escapeHtml(u.username)} (${u.id})${u.is_admin ? " [admin]" : ""}</li>`).join("");
+  ul.innerHTML = state.users
+    .map(
+      (u) =>
+        `<li><strong>${escapeHtml(u.username)}</strong>${u.is_admin ? " · admin" : " · reader"}</li>`
+    )
+    .join("");
   const health = await api("/api/integrations");
   document.getElementById("integrations").textContent = JSON.stringify(health, null, 2);
 }

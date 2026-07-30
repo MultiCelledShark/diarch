@@ -176,10 +176,11 @@ async fn acl_regression_grant_required() {
         "POST",
         &format!("/api/works/{shared_id}/grants"),
         Some(&admin),
-        Some(json!({ "user_id": reader_id })),
+        Some(json!({ "username": "reader" })),
     )
     .await;
     assert_eq!(status, 204);
+    let _ = reader_id;
 
     let reader_tok = login(&app, "reader", "reader").await;
     let (status, works, _) = json_req(&app, "GET", "/api/works", Some(&reader_tok), None).await;
@@ -432,6 +433,103 @@ async fn attention_filter_endpoint() {
         json_req(&app, "GET", "/api/works?attention=needs_tts", Some(&token), None).await;
     assert_eq!(status, 200);
     assert_eq!(list.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn library_import_epub_creates_work_and_assets() {
+    let dir = tempfile::tempdir().unwrap();
+    // Minimal EPUB zip
+    let epub_path = dir.path().join("sample.epub");
+    {
+        let file = std::fs::File::create(&epub_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file("mimetype", opts).unwrap();
+        use std::io::Write;
+        zip.write_all(b"application/epub+zip").unwrap();
+        zip.start_file("META-INF/container.xml", opts).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0"?><container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#,
+        )
+        .unwrap();
+        zip.start_file("content.opf", opts).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0"?>
+<package>
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Phase One Sample</dc:title>
+    <dc:creator>Test Author</dc:creator>
+  </metadata>
+  <manifest><item id="c1" href="chap.html" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#,
+        )
+        .unwrap();
+        zip.start_file("chap.html", opts).unwrap();
+        zip.write_all(b"<html><body><p>Hello Diarch.</p></body></html>")
+            .unwrap();
+        zip.finish().unwrap();
+    }
+
+    let (_td, app, state) = test_app().await;
+    let token = login(&app, "admin", "adminpass").await;
+    let bytes = std::fs::read(&epub_path).unwrap();
+    let boundary = "----diarchboundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"sample.epub\"\r\nContent-Type: application/epub+zip\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"primary_code\"\r\n\r\n8201\r\n--{boundary}--\r\n").as_bytes());
+
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/library/import")
+        .header("cookie", format!("diarch_session={token}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), 201);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let j: Value = serde_json::from_slice(&bytes).unwrap();
+    let job_id = j["job_id"].as_str().unwrap();
+    let work_id = j["work"]["id"].as_str().unwrap();
+    assert_eq!(j["work"]["title"], "Phase One Sample");
+    assert_eq!(j["work"]["authors"], "Test Author");
+    assert_eq!(j["work"]["primary_code"], 8201);
+
+    for _ in 0..40 {
+        routes::jobs::process_one(&state).await.unwrap();
+        let job = state
+            .db
+            .get_job(uuid::Uuid::parse_str(job_id).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        if job.status == "done" || job.status == "failed" {
+            assert_eq!(job.status, "done", "{:?}", job.detail);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let (status, detail, _) =
+        json_req(&app, "GET", &format!("/api/works/{work_id}"), Some(&token), None).await;
+    assert_eq!(status, 200);
+    let kinds: Vec<_> = detail["assets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["kind"].as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"epub"), "{kinds:?}");
 }
 
 #[tokio::test]

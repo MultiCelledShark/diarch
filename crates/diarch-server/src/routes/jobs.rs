@@ -77,6 +77,20 @@ async fn run_import(state: &Arc<AppState>, job: &diarch_core::Job) -> Result<Opt
         if result.cover_path.is_some() {
             work.needs_cover = false;
         }
+        if let Some(ref t) = result.title {
+            if work.title.is_empty()
+                || work.title == "Untitled"
+                || work.title.starts_with("Import ")
+                || work.title.ends_with(".epub")
+            {
+                work.title = t.clone();
+            }
+        }
+        if let Some(ref a) = result.authors {
+            if work.authors.is_empty() {
+                work.authors = a.clone();
+            }
+        }
         if result.epub_path.is_some() && !result.needs_review {
             if work.status == diarch_core::ReadingStatus::Wishlist {
                 work.status = diarch_core::ReadingStatus::Unread;

@@ -13,6 +13,100 @@ pub struct ImportResult {
     pub markdown_path: Option<PathBuf>,
     pub cover_path: Option<PathBuf>,
     pub needs_review: bool,
+    pub title: Option<String>,
+    pub authors: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EpubMeta {
+    pub title: Option<String>,
+    pub authors: Option<String>,
+}
+
+/// Read Dublin Core title/creator from an EPUB's package OPF.
+pub fn read_epub_metadata(epub: &Path) -> Result<EpubMeta> {
+    let file = std::fs::File::open(epub)?;
+    let mut archive = ZipArchive::new(file)?;
+    let mut opf_path: Option<String> = None;
+    if let Ok(mut container) = archive.by_name("META-INF/container.xml") {
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut container, &mut xml)?;
+        if let Some(start) = xml.find("full-path=\"") {
+            let rest = &xml[start + 11..];
+            if let Some(end) = rest.find('"') {
+                opf_path = Some(rest[..end].to_string());
+            }
+        }
+    }
+    let opf_name = {
+        let mut found = opf_path;
+        if found.is_none() {
+            for i in 0..archive.len() {
+                let name = archive.by_index(i)?.name().to_string();
+                if name.ends_with(".opf") {
+                    found = Some(name);
+                    break;
+                }
+            }
+        }
+        found.unwrap_or_else(|| "content.opf".into())
+    };
+    let mut entry = archive
+        .by_name(&opf_name)
+        .map_err(|e| anyhow!("opf open {opf_name}: {e}"))?;
+    let mut opf = String::new();
+    std::io::Read::read_to_string(&mut entry, &mut opf)?;
+    Ok(EpubMeta {
+        title: dc_text(&opf, "title"),
+        authors: {
+            let mut authors = Vec::new();
+            let mut rest = opf.as_str();
+            while let Some(idx) = rest.find("<dc:creator") {
+                if let Some(t) = tag_inner(&rest[idx..], "dc:creator") {
+                    if !t.trim().is_empty() {
+                        authors.push(t.trim().to_string());
+                    }
+                }
+                rest = &rest[idx + 11..];
+            }
+            if authors.is_empty() {
+                None
+            } else {
+                Some(authors.join(", "))
+            }
+        },
+    })
+}
+
+fn dc_text(xml: &str, local: &str) -> Option<String> {
+    tag_inner(xml, &format!("dc:{local}")).or_else(|| tag_inner(xml, local))
+}
+
+fn tag_inner(xml: &str, tag: &str) -> Option<String> {
+    let open1 = format!("<{tag}");
+    let open2 = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = if let Some(i) = xml.find(&open2) {
+        i + open2.len()
+    } else if let Some(i) = xml.find(&open1) {
+        let after = xml[i..].find('>')? + i + 1;
+        after
+    } else {
+        return None;
+    };
+    let end = xml[start..].find(&close)? + start;
+    let text = xml[start..end]
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 /// Convert or store an uploaded file into the work directory.
@@ -67,6 +161,7 @@ async fn ingest_epub(library_root: &Path, work_id: Uuid, source: &Path) -> Resul
     }
 
     let cover = extract_epub_cover(&epub_dest, &work_cover_path(library_root, work_id)).await?;
+    let meta = read_epub_metadata(&epub_dest).unwrap_or_default();
 
     Ok(ImportResult {
         epub_path: Some(epub_dest),
@@ -77,6 +172,8 @@ async fn ingest_epub(library_root: &Path, work_id: Uuid, source: &Path) -> Resul
         },
         cover_path: cover,
         needs_review: false,
+        title: meta.title,
+        authors: meta.authors,
     })
 }
 
@@ -108,6 +205,8 @@ async fn ingest_pdf(library_root: &Path, work_id: Uuid, source: &Path) -> Result
         markdown_path: Some(md_dest),
         cover_path: None,
         needs_review: true,
+        title: None,
+        authors: None,
     })
 }
 
@@ -119,6 +218,8 @@ async fn ingest_markdown(library_root: &Path, work_id: Uuid, source: &Path) -> R
         markdown_path: Some(md_dest),
         cover_path: None,
         needs_review: true,
+        title: None,
+        authors: None,
     })
 }
 

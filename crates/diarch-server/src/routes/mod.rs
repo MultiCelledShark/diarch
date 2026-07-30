@@ -13,6 +13,7 @@ use diarch_core::{
 };
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
+use std::path::Path as FsPath;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -34,6 +35,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/users", get(list_users).post(create_user))
         .route("/api/taxonomy", get(list_taxonomy))
         .route("/api/works", get(list_works).post(create_work))
+        .route("/api/library/import", post(library_import))
         .route("/api/works/{id}", get(get_work).put(update_work))
         .route("/api/works/{id}/codes", put(set_codes))
         .route("/api/works/{id}/grants", get(list_grants).post(add_grant))
@@ -458,7 +460,8 @@ async fn list_grants(
 
 #[derive(Deserialize)]
 struct GrantReq {
-    user_id: Uuid,
+    user_id: Option<Uuid>,
+    username: Option<String>,
 }
 
 async fn add_grant(
@@ -467,9 +470,22 @@ async fn add_grant(
     Path(id): Path<Uuid>,
     Json(body): Json<GrantReq>,
 ) -> Result<StatusCode, StatusCode> {
+    let user_id = if let Some(uid) = body.user_id {
+        uid
+    } else if let Some(name) = body.username.as_deref() {
+        state
+            .db
+            .get_user_by_username(name)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)?
+            .id
+    } else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
     state
         .db
-        .grant_work(body.user_id, id)
+        .grant_work(user_id, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::NO_CONTENT)
@@ -523,6 +539,150 @@ async fn import_file(
         .update_job(job.id, "pending", Some(&format!("{name}|{}", path.display())))
         .await;
     Ok(Json(serde_json::json!({ "job_id": job.id })))
+}
+
+/// Create a work and queue file import in one step (primary Library → Import EPUB flow).
+async fn library_import(
+    AuthUser(user): AuthUser,
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+    let mut saved: Option<(String, Vec<u8>)> = None;
+    let mut primary_code: Option<i32> = None;
+    let mut title_override: Option<String> = None;
+    let mut authors_override: Option<String> = None;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+    {
+        let field_name = field.name().unwrap_or("").to_string();
+        if field_name == "file" || field.file_name().is_some() {
+            let name = field.file_name().unwrap_or("book.epub").to_string();
+            let data = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+            saved = Some((name, data.to_vec()));
+        } else if field_name == "primary_code" {
+            let text = field.text().await.unwrap_or_default();
+            primary_code = text.trim().parse().ok();
+        } else if field_name == "title" {
+            let text = field.text().await.unwrap_or_default();
+            if !text.trim().is_empty() {
+                title_override = Some(text.trim().to_string());
+            }
+        } else if field_name == "authors" {
+            let text = field.text().await.unwrap_or_default();
+            if !text.trim().is_empty() {
+                authors_override = Some(text.trim().to_string());
+            }
+        }
+    }
+
+    let (name, data) = saved.ok_or(StatusCode::BAD_REQUEST)?;
+    let stem = FsPath::new(&name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Untitled")
+        .replace('_', " ")
+        .replace('-', " ");
+
+    // Peek EPUB metadata before creating the work when possible
+    let tmp_peek = state
+        .config
+        .data_dir
+        .join("imports")
+        .join(format!("peek-{}", Uuid::new_v4()));
+    tokio::fs::create_dir_all(state.config.data_dir.join("imports"))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tokio::fs::write(&tmp_peek, &data)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let meta = if name.to_ascii_lowercase().ends_with(".epub") {
+        diarch_import::read_epub_metadata(&tmp_peek).unwrap_or_default()
+    } else {
+        diarch_import::EpubMeta::default()
+    };
+
+    let now = Utc::now();
+    let codes: Vec<i32> = primary_code.into_iter().collect();
+    let primary = primary_code.or_else(|| diarch_core::taxonomy::suggest_primary(&codes));
+    let is_manga = diarch_core::infer_manga(primary, &codes, false);
+    let work = Work {
+        id: Uuid::new_v4(),
+        title: title_override
+            .or(meta.title)
+            .unwrap_or(stem),
+        authors: authors_override.or(meta.authors).unwrap_or_default(),
+        isbn: None,
+        description: None,
+        status: ReadingStatus::Unread,
+        primary_code: primary,
+        year_list: None,
+        rating: None,
+        review: None,
+        reading_direction: if is_manga {
+            "rtl".into()
+        } else {
+            "ltr".into()
+        },
+        is_manga,
+        needs_review: false,
+        needs_cover: true,
+        needs_tts: false,
+        needs_audio: false,
+        needs_transcription: false,
+        sg_review_dirty: false,
+        sg_needs_add: false,
+        sg_audio_only_remote: false,
+        sg_matched: false,
+        sg_book_id: None,
+        created_by: Some(user.id),
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .create_work(&work, &codes, Some(user.id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tokio::fs::create_dir_all(state.config.work_dir(work.id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let svg = crate::metadata::placeholder_cover_svg(&work.title, &work.authors);
+    let _ = tokio::fs::write(state.config.work_dir(work.id).join("cover.svg"), svg).await;
+
+    let dest = state
+        .config
+        .data_dir
+        .join("imports")
+        .join(format!("{}-{}", work.id, name));
+    tokio::fs::write(&dest, &data)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = tokio::fs::remove_file(&tmp_peek).await;
+
+    let job = state
+        .db
+        .create_job("import", Some(work.id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = state
+        .db
+        .update_job(
+            job.id,
+            "pending",
+            Some(&format!("{name}|{}", dest.display())),
+        )
+        .await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "work": work,
+            "job_id": job.id,
+        })),
+    ))
 }
 
 async fn confirm_review(

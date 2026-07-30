@@ -84,6 +84,36 @@ button.nav.active { color: var(--accent); border-bottom: 1px solid var(--accent)
 .user { display: flex; gap: 0.75rem; align-items: center; color: var(--muted); }
 main { padding: 1.25rem; }
 .toolbar { display: flex; gap: 0.75rem; margin-bottom: 1rem; flex-wrap: wrap; align-items: center; }
+.import-box {
+  margin-bottom: 1.25rem;
+  padding: 1.25rem;
+  border: 1px dashed var(--accent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+}
+.import-box.drag {
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel));
+}
+.import-box strong { display: block; color: var(--accent); font-size: 1.05rem; }
+.import-box p { color: var(--muted); margin: 0.35rem 0 0.75rem; }
+.import-box .row { align-items: end; }
+.import-box label { margin: 0; }
+.btn-file {
+  display: inline-block;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  padding: 0.45rem 0.9rem;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.btn-file.primary {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.btn-file:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.detail-form { max-width: none; margin-bottom: 1rem; }
+.detail-form .check { display: flex; align-items: center; gap: 0.5rem; }
+.muted { color: var(--muted); }
+#detail-msg.error, .error { color: var(--danger); white-space: pre-wrap; }
 .view-heading { margin: 0; margin-right: auto; font-size: 1.35rem; color: var(--ink); }
 .empty {
   grid-column: 1 / -1;
@@ -127,7 +157,12 @@ main { padding: 1.25rem; }
 .detail img { width: 180px; border: 1px solid var(--line); }
 .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
 
-#view-reader { position: fixed; inset: 0; background: #0a100e; z-index: 20; display: flex; flex-direction: column; }
+#view-reader {
+  position: fixed; inset: 0; background: #0a100e; z-index: 20;
+  flex-direction: column;
+}
+#view-reader:not([hidden]) { display: flex; }
+#view-reader[hidden] { display: none !important; }
 .reader-bar {
   display: flex; gap: 0.75rem; align-items: center; padding: 0.5rem 1rem;
   border-bottom: 1px solid var(--line); background: #14201c;
