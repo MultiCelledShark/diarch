@@ -781,6 +781,19 @@ async fn get_cover(
         return Err(StatusCode::FORBIDDEN);
     }
     let dir = state.config.work_dir(id);
+    let jpg = dir.join("cover.jpg");
+    if !jpg.exists() {
+        let epub = dir.join("book.epub");
+        if epub.exists() {
+            if let Ok(Some(_)) = diarch_import::extract_epub_cover(&epub, &jpg).await {
+                if let Ok(Some(mut w)) = state.db.get_work(id).await {
+                    w.needs_cover = false;
+                    w.updated_at = Utc::now();
+                    let _ = state.db.update_work(&w).await;
+                }
+            }
+        }
+    }
     for name in ["cover.jpg", "cover.png", "cover.webp", "cover.svg"] {
         let p = dir.join(name);
         if p.exists() {
@@ -793,7 +806,14 @@ async fn get_cover(
                 "cover.webp" => "image/webp",
                 _ => "image/jpeg",
             };
-            return Ok(([(header::CONTENT_TYPE, ct)], data).into_response());
+            return Ok((
+                [
+                    (header::CONTENT_TYPE, ct),
+                    (header::CACHE_CONTROL, "private, max-age=300"),
+                ],
+                data,
+            )
+                .into_response());
         }
     }
     Err(StatusCode::NOT_FOUND)

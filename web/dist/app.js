@@ -177,7 +177,7 @@ function renderCards(el, works, empty = {}) {
     if (state.settings?.show_audio_gaps && w.needs_audio) badges.push("no audio");
     if (w.is_manga) badges.push("manga");
     card.innerHTML = `
-      <img src="/api/works/${w.id}/cover" alt="" onerror="this.style.opacity=0.3" />
+      <img src="/api/works/${w.id}/cover?v=${encodeURIComponent(w.updated_at || "")}" alt="" loading="lazy" onerror="this.style.opacity=0.25" />
       <div class="meta">
         <strong>${escapeHtml(w.title)}</strong>
         <span>${escapeHtml(w.authors || "")}</span>
@@ -560,10 +560,25 @@ async function loadEpub(w) {
       flow: "paginated",
       allowScriptedContent: false,
     });
+    // Dark UI: near-white text with a light orange tint (matches Diarch accent warmth).
+    const ink = "#f3e6d4";
+    const pageBg = "#0c1210";
+    try {
+      state.rendition.themes.default({
+        body: {
+          color: `${ink} !important`,
+          background: `${pageBg} !important`,
+        },
+        "p, div, span, li, td, th, h1, h2, h3, h4, h5, h6, blockquote, pre, code": {
+          color: `${ink} !important`,
+        },
+        a: { color: "#e8b87a !important" },
+      });
+    } catch {}
     const rtl = w.reading_direction === "rtl" || w.is_manga;
     if (rtl) {
       state.book.ready.then(() => {
-        try { state.rendition.themes.default({ body: { direction: "rtl" } }); } catch {}
+        try { state.rendition.themes.default({ body: { direction: "rtl", color: `${ink} !important`, background: `${pageBg} !important` } }); } catch {}
       });
     }
     await state.book.ready;

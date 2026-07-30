@@ -319,30 +319,194 @@ pub async fn confirm_markdown_to_epub(library_root: &Path, work_id: Uuid) -> Res
     Ok(epub)
 }
 
-async fn extract_epub_cover(epub: &Path, dest: &Path) -> Result<Option<PathBuf>> {
+/// Extract cover image from an EPUB into `dest` (typically `cover.jpg`).
+pub async fn extract_epub_cover(epub: &Path, dest: &Path) -> Result<Option<PathBuf>> {
+    tokio::task::spawn_blocking({
+        let epub = epub.to_path_buf();
+        let dest = dest.to_path_buf();
+        move || extract_epub_cover_sync(&epub, &dest)
+    })
+    .await
+    .context("cover extract task")?
+}
+
+/// Extract cover image from an EPUB into `dest` (typically `cover.jpg`).
+/// Resolves OPF `<meta name="cover">` / `properties="cover-image"`, then filename heuristics.
+pub fn extract_epub_cover_sync(epub: &Path, dest: &Path) -> Result<Option<PathBuf>> {
     let file = std::fs::File::open(epub)?;
     let mut archive = ZipArchive::new(file)?;
-    let mut candidates: Vec<String> = Vec::new();
-    for i in 0..archive.len() {
-        let name = archive.by_index(i)?.name().to_string();
-        let lower = name.to_ascii_lowercase();
-        if lower.contains("cover")
-            && (lower.ends_with(".jpg")
+
+    let opf_path = find_opf_path(&mut archive);
+    let mut cover_href: Option<String> = None;
+
+    if let Some(ref opf_name) = opf_path {
+        if let Ok(mut entry) = archive.by_name(opf_name) {
+            let mut opf = String::new();
+            std::io::Read::read_to_string(&mut entry, &mut opf)?;
+            let opf_dir = Path::new(opf_name)
+                .parent()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            cover_href = resolve_cover_href(&opf, &opf_dir);
+        }
+    }
+
+    // Fallback: any path with "cover" in the name
+    if cover_href.is_none() {
+        let mut candidates: Vec<String> = Vec::new();
+        for i in 0..archive.len() {
+            let name = archive.by_index(i)?.name().to_string();
+            let lower = name.to_ascii_lowercase();
+            if lower.contains("cover")
+                && (lower.ends_with(".jpg")
+                    || lower.ends_with(".jpeg")
+                    || lower.ends_with(".png")
+                    || lower.ends_with(".webp"))
+            {
+                candidates.push(name);
+            }
+        }
+        candidates.sort_by_key(|n| n.len());
+        cover_href = candidates.into_iter().next();
+    }
+
+    // Last resort: largest raster image (skip tiny logos)
+    if cover_href.is_none() {
+        let mut best: Option<(u64, String)> = None;
+        for i in 0..archive.len() {
+            let entry = archive.by_index(i)?;
+            let name = entry.name().to_string();
+            let lower = name.to_ascii_lowercase();
+            if !(lower.ends_with(".jpg")
                 || lower.ends_with(".jpeg")
                 || lower.ends_with(".png")
                 || lower.ends_with(".webp"))
-        {
-            candidates.push(name);
+            {
+                continue;
+            }
+            let size = entry.size();
+            if size < 20_000 {
+                continue;
+            }
+            if best.as_ref().map(|(s, _)| size > *s).unwrap_or(true) {
+                best = Some((size, name));
+            }
+        }
+        cover_href = best.map(|(_, n)| n);
+    }
+
+    let Some(name) = cover_href else {
+        return Ok(None);
+    };
+
+    // Re-open archive entry (borrow rules)
+    drop(archive);
+    let file = std::fs::File::open(epub)?;
+    let mut archive = ZipArchive::new(file)?;
+    let mut entry = archive
+        .by_name(&name)
+        .map_err(|e| anyhow!("cover entry {name}: {e}"))?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut out = std::fs::File::create(dest)?;
+    std::io::copy(&mut entry, &mut out)?;
+    Ok(Some(dest.to_path_buf()))
+}
+
+fn find_opf_path(archive: &mut ZipArchive<std::fs::File>) -> Option<String> {
+    if let Ok(mut container) = archive.by_name("META-INF/container.xml") {
+        let mut xml = String::new();
+        if std::io::Read::read_to_string(&mut container, &mut xml).is_ok() {
+            if let Some(start) = xml.find("full-path=\"") {
+                let rest = &xml[start + 11..];
+                if let Some(end) = rest.find('"') {
+                    return Some(rest[..end].to_string());
+                }
+            }
         }
     }
-    candidates.sort_by_key(|n| n.len());
-    if let Some(name) = candidates.into_iter().next() {
-        let mut entry = archive.by_name(&name)?;
-        let mut out = std::fs::File::create(dest)?;
-        std::io::copy(&mut entry, &mut out)?;
-        return Ok(Some(dest.to_path_buf()));
+    for i in 0..archive.len() {
+        if let Ok(e) = archive.by_index(i) {
+            let name = e.name().to_string();
+            if name.ends_with(".opf") {
+                return Some(name);
+            }
+        }
     }
-    Ok(None)
+    None
+}
+
+fn resolve_cover_href(opf: &str, opf_dir: &str) -> Option<String> {
+    // <meta name="cover" content="id"/> or content before name
+    let cover_id = {
+        let lower = opf.to_ascii_lowercase();
+        let mut id = None;
+        if let Some(idx) = lower.find("name=\"cover\"") {
+            let window = &opf[idx.saturating_sub(80)..(idx + 120).min(opf.len())];
+            if let Some(c) = attr_value(window, "content") {
+                id = Some(c);
+            }
+        }
+        if id.is_none() {
+            if let Some(idx) = lower.find("name='cover'") {
+                let window = &opf[idx.saturating_sub(80)..(idx + 120).min(opf.len())];
+                if let Some(c) = attr_value(window, "content") {
+                    id = Some(c);
+                }
+            }
+        }
+        id
+    };
+
+    if let Some(id) = cover_id {
+        if let Some(href) = find_manifest_href(opf, &id) {
+            return Some(join_opf_href(opf_dir, &href));
+        }
+    }
+
+    // EPUB3: properties="... cover-image ..."
+    let lower = opf.to_ascii_lowercase();
+    if let Some(idx) = lower.find("cover-image") {
+        let start = opf[..idx].rfind('<').unwrap_or(0);
+        let end = opf[idx..].find('>').map(|e| idx + e).unwrap_or(opf.len());
+        let tag = &opf[start..end];
+        if let Some(href) = attr_value(tag, "href") {
+            return Some(join_opf_href(opf_dir, &href));
+        }
+    }
+    None
+}
+
+fn find_manifest_href(opf: &str, id: &str) -> Option<String> {
+    let needle = format!("id=\"{id}\"");
+    let needle2 = format!("id='{id}'");
+    let idx = opf.find(&needle).or_else(|| opf.find(&needle2))?;
+    let start = opf[..idx].rfind('<')?;
+    let end = opf[idx..].find('>').map(|e| idx + e)?;
+    attr_value(&opf[start..end], "href")
+}
+
+fn attr_value(tag: &str, name: &str) -> Option<String> {
+    for q in ['"', '\''] {
+        let pat = format!("{name}={q}");
+        if let Some(i) = tag.find(&pat) {
+            let rest = &tag[i + pat.len()..];
+            if let Some(end) = rest.find(q) {
+                return Some(rest[..end].to_string());
+            }
+        }
+    }
+    None
+}
+
+fn join_opf_href(opf_dir: &str, href: &str) -> String {
+    let href = href.split('#').next().unwrap_or(href);
+    if opf_dir.is_empty() {
+        href.to_string()
+    } else {
+        format!("{opf_dir}/{href}")
+    }
 }
 
 pub fn zip_markdown_bundle(library_root: &Path, work_id: Uuid, out: &Path) -> Result<()> {
@@ -400,4 +564,40 @@ pub async fn export_needs_tts_queue(library_root: &Path, queue_dir: &Path, work_
         }
     }
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_cover_from_opf_meta() {
+        let opf = r#"
+        <metadata>
+          <meta content="main_cover_image" name="cover"/>
+        </metadata>
+        <manifest>
+          <item href="images/title.jpg" id="main_cover_image" media-type="image/jpeg"/>
+        </manifest>
+        "#;
+        assert_eq!(
+            resolve_cover_href(opf, "OEBPS"),
+            Some("OEBPS/images/title.jpg".into())
+        );
+    }
+
+    #[test]
+    fn extract_cover_from_covenant_epub_if_present() {
+        let epub = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../data/library/daf8a61c-17b4-4e4b-be0e-c9cc4aaeaba1/book.epub");
+        if !epub.exists() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("cover.jpg");
+        let out = extract_epub_cover_sync(&epub, &dest).unwrap();
+        assert!(out.is_some());
+        assert!(dest.exists());
+        assert!(dest.metadata().unwrap().len() > 50_000);
+    }
 }
