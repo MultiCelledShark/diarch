@@ -54,6 +54,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/works/{id}/content/epub", get(get_epub_file))
         .route("/api/works/{id}/remarkable", post(send_remarkable))
         .route("/api/works/{id}/flags/clear", post(clear_flags))
+        .route("/api/works/{id}/refresh-metadata", post(refresh_metadata))
         .route("/api/wishlist", post(wishlist_add))
         .route("/api/metadata/isbn/{isbn}", get(meta_isbn))
         .route("/api/metadata/search", get(meta_search))
@@ -604,18 +605,36 @@ async fn library_import(
         diarch_import::EpubMeta::default()
     };
 
+    let hint = crate::metadata::taxonomy_from_metadata(
+        &state,
+        meta.isbn.as_deref(),
+        &meta.subjects,
+    )
+    .await;
+
     let now = Utc::now();
-    let codes: Vec<i32> = primary_code.into_iter().collect();
-    let primary = primary_code.or_else(|| diarch_core::taxonomy::suggest_primary(&codes));
+    let mut codes = hint.codes.clone();
+    if let Some(p) = primary_code {
+        if !codes.contains(&p) {
+            codes.push(p);
+        }
+    }
+    let primary = primary_code
+        .or(hint.primary)
+        .or_else(|| diarch_core::taxonomy::suggest_primary(&codes));
     let is_manga = diarch_core::infer_manga(primary, &codes, false);
     let work = Work {
         id: Uuid::new_v4(),
         title: title_override
             .or(meta.title)
+            .or(hint.title)
             .unwrap_or(stem),
-        authors: authors_override.or(meta.authors).unwrap_or_default(),
-        isbn: None,
-        description: None,
+        authors: authors_override
+            .or(meta.authors)
+            .or(hint.authors)
+            .unwrap_or_default(),
+        isbn: meta.isbn.or(hint.isbn),
+        description: meta.description.or(hint.description),
         status: ReadingStatus::Unread,
         primary_code: primary,
         year_list: None,
@@ -1043,7 +1062,24 @@ async fn get_epub_file(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Response, StatusCode> {
-    download_epub(AuthUser(user), State(state), Path(id)).await
+    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let path = state.config.work_dir(id).join("book.epub");
+    let data = tokio::fs::read(&path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/epub+zip"),
+            (
+                header::CONTENT_DISPOSITION,
+                "inline; filename=\"book.epub\"",
+            ),
+        ],
+        data,
+    )
+        .into_response())
 }
 
 async fn send_remarkable(
@@ -1058,6 +1094,74 @@ async fn send_remarkable(
         Ok(()) => Ok(Json(serde_json::json!({ "ok": true }))),
         Err(e) => Ok(Json(serde_json::json!({ "ok": false, "error": e.to_string() }))),
     }
+}
+
+async fn refresh_metadata(
+    AuthUser(user): AuthUser,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Work>, StatusCode> {
+    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let mut work = state
+        .db
+        .get_work(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let epub = state.config.work_dir(id).join("book.epub");
+    let meta = if epub.exists() {
+        diarch_import::read_epub_metadata(&epub).unwrap_or_default()
+    } else {
+        diarch_import::EpubMeta::default()
+    };
+
+    let isbn = work.isbn.clone().or(meta.isbn.clone());
+    let hint = metadata::taxonomy_from_metadata(&state, isbn.as_deref(), &meta.subjects).await;
+
+    if work.isbn.is_none() {
+        work.isbn = meta.isbn.or(hint.isbn.clone());
+    }
+    if work.description.is_none() {
+        work.description = meta.description.or(hint.description.clone());
+    }
+    if work.authors.is_empty() {
+        if let Some(a) = meta.authors.or(hint.authors.clone()) {
+            work.authors = a;
+        }
+    }
+    if (work.title.is_empty() || work.title == "Untitled") && meta.title.is_some() {
+        work.title = meta.title.unwrap();
+    }
+
+    let mut codes = state.db.work_codes(id).await.unwrap_or_default();
+    for c in &hint.codes {
+        if !codes.contains(c) {
+            codes.push(*c);
+        }
+    }
+    if !codes.is_empty() {
+        state
+            .db
+            .set_work_codes(id, &codes)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    work.primary_code =
+        diarch_core::taxonomy::prefer_primary(work.primary_code, hint.primary);
+    work.is_manga = infer_manga(work.primary_code, &codes, work.is_manga);
+    if work.is_manga {
+        work.reading_direction = "rtl".into();
+    }
+    work.updated_at = Utc::now();
+    state
+        .db
+        .update_work(&work)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(work))
 }
 
 #[derive(Deserialize)]

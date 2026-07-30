@@ -15,15 +15,21 @@ pub struct ImportResult {
     pub needs_review: bool,
     pub title: Option<String>,
     pub authors: Option<String>,
+    pub isbn: Option<String>,
+    pub subjects: Vec<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct EpubMeta {
     pub title: Option<String>,
     pub authors: Option<String>,
+    pub isbn: Option<String>,
+    pub subjects: Vec<String>,
+    pub description: Option<String>,
 }
 
-/// Read Dublin Core title/creator from an EPUB's package OPF.
+/// Read Dublin Core fields from an EPUB's package OPF.
 pub fn read_epub_metadata(epub: &Path) -> Result<EpubMeta> {
     let file = std::fs::File::open(epub)?;
     let mut archive = ZipArchive::new(file)?;
@@ -56,25 +62,70 @@ pub fn read_epub_metadata(epub: &Path) -> Result<EpubMeta> {
         .map_err(|e| anyhow!("opf open {opf_name}: {e}"))?;
     let mut opf = String::new();
     std::io::Read::read_to_string(&mut entry, &mut opf)?;
+
+    let mut authors = Vec::new();
+    let mut rest = opf.as_str();
+    while let Some(idx) = rest.find("<dc:creator") {
+        if let Some(t) = tag_inner(&rest[idx..], "dc:creator") {
+            if !t.trim().is_empty() {
+                authors.push(t.trim().to_string());
+            }
+        }
+        rest = &rest[idx + 11..];
+    }
+
+    let mut subjects = Vec::new();
+    rest = opf.as_str();
+    while let Some(idx) = rest.find("<dc:subject") {
+        if let Some(t) = tag_inner(&rest[idx..], "dc:subject") {
+            if !t.trim().is_empty() {
+                subjects.push(t.trim().to_string());
+            }
+        }
+        rest = &rest[idx + 11..];
+    }
+
+    let mut isbn = None;
+    rest = opf.as_str();
+    while let Some(idx) = rest.find("<dc:identifier") {
+        if let Some(t) = tag_inner(&rest[idx..], "dc:identifier") {
+            let cleaned = t
+                .chars()
+                .filter(|c| c.is_ascii_digit() || *c == 'X' || *c == 'x')
+                .collect::<String>();
+            if cleaned.len() == 13 || cleaned.len() == 10 {
+                isbn = Some(cleaned.to_ascii_uppercase());
+                break;
+            }
+            // urn:isbn:978...
+            let lower = t.to_ascii_lowercase();
+            if let Some(pos) = lower.find("isbn") {
+                let digits: String = t[pos..]
+                    .chars()
+                    .filter(|c| c.is_ascii_digit() || *c == 'X' || *c == 'x')
+                    .collect();
+                if digits.len() == 13 || digits.len() == 10 {
+                    isbn = Some(digits.to_ascii_uppercase());
+                    break;
+                }
+            }
+        }
+        rest = &rest[idx + 14..];
+    }
+
     Ok(EpubMeta {
         title: dc_text(&opf, "title"),
-        authors: {
-            let mut authors = Vec::new();
-            let mut rest = opf.as_str();
-            while let Some(idx) = rest.find("<dc:creator") {
-                if let Some(t) = tag_inner(&rest[idx..], "dc:creator") {
-                    if !t.trim().is_empty() {
-                        authors.push(t.trim().to_string());
-                    }
-                }
-                rest = &rest[idx + 11..];
-            }
-            if authors.is_empty() {
-                None
-            } else {
-                Some(authors.join(", "))
-            }
+        authors: if authors.is_empty() {
+            None
+        } else {
+            Some(authors.join(", "))
         },
+        isbn,
+        subjects,
+        description: dc_text(&opf, "description").or_else(|| {
+            // calibre sometimes uses <description xmlns=...>
+            tag_inner(&opf, "description")
+        }),
     })
 }
 
@@ -174,6 +225,9 @@ async fn ingest_epub(library_root: &Path, work_id: Uuid, source: &Path) -> Resul
         needs_review: false,
         title: meta.title,
         authors: meta.authors,
+        isbn: meta.isbn,
+        subjects: meta.subjects,
+        description: meta.description,
     })
 }
 
@@ -207,6 +261,9 @@ async fn ingest_pdf(library_root: &Path, work_id: Uuid, source: &Path) -> Result
         needs_review: true,
         title: None,
         authors: None,
+        isbn: None,
+        subjects: vec![],
+        description: None,
     })
 }
 
@@ -220,6 +277,9 @@ async fn ingest_markdown(library_root: &Path, work_id: Uuid, source: &Path) -> R
         needs_review: true,
         title: None,
         authors: None,
+        isbn: None,
+        subjects: vec![],
+        description: None,
     })
 }
 

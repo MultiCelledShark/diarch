@@ -91,6 +91,49 @@ async fn run_import(state: &Arc<AppState>, job: &diarch_core::Job) -> Result<Opt
                 work.authors = a.clone();
             }
         }
+        if work.isbn.is_none() {
+            work.isbn = result.isbn.clone();
+        }
+        if work.description.is_none() {
+            work.description = result.description.clone();
+        }
+
+        // Taxonomy from EPUB subjects + Open Library (ISBN), unless user already set a leaf.
+        let hint = crate::metadata::taxonomy_from_metadata(
+            state,
+            work.isbn.as_deref().or(result.isbn.as_deref()),
+            &result.subjects,
+        )
+        .await;
+        if work.isbn.is_none() {
+            work.isbn = hint.isbn.clone();
+        }
+        if work.description.is_none() {
+            work.description = hint.description.clone();
+        }
+        if work.authors.is_empty() {
+            if let Some(a) = hint.authors {
+                work.authors = a;
+            }
+        }
+
+        let existing = state.db.work_codes(work_id).await.unwrap_or_default();
+        let mut codes = existing;
+        for c in &hint.codes {
+            if !codes.contains(c) {
+                codes.push(*c);
+            }
+        }
+        if !codes.is_empty() {
+            let _ = state.db.set_work_codes(work_id, &codes).await;
+        }
+        work.primary_code =
+            diarch_core::taxonomy::prefer_primary(work.primary_code, hint.primary);
+        work.is_manga = diarch_core::infer_manga(work.primary_code, &codes, work.is_manga);
+        if work.is_manga {
+            work.reading_direction = "rtl".into();
+        }
+
         if result.epub_path.is_some() && !result.needs_review {
             if work.status == diarch_core::ReadingStatus::Wishlist {
                 work.status = diarch_core::ReadingStatus::Unread;

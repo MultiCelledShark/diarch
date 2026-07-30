@@ -325,6 +325,7 @@ async function openDetail(id) {
       <p class="muted">${hasEpub ? "EPUB ready" : "No EPUB yet"} · ${hasMd ? "Markdown ready" : "No Markdown"} · Direction: ${escapeHtml(w.reading_direction)}</p>
       <div class="actions">
         ${hasEpub || hasMd ? `<button type="button" id="btn-read">Read</button>` : ""}
+        <button type="button" id="btn-refresh-meta">Refresh metadata</button>
         <label class="btn-file">Replace / import file <input type="file" id="import-file" accept=".epub,.pdf,.md,.markdown" hidden /></label>
         ${w.needs_review ? `<button type="button" id="btn-confirm">Confirm → EPUB</button>` : ""}
         ${hasEpub ? `<a href="/api/works/${w.id}/download/epub"><button type="button">Download EPUB</button></a>` : ""}
@@ -382,6 +383,16 @@ async function openDetail(id) {
   });
 
   document.getElementById("btn-read")?.addEventListener("click", () => openReader(w, hasEpub, hasMd, audio));
+  document.getElementById("btn-refresh-meta")?.addEventListener("click", async () => {
+    msg("Refreshing from EPUB / ISBN…");
+    try {
+      await api(`/api/works/${w.id}/refresh-metadata`, { method: "POST" });
+      msg("Metadata refreshed");
+      await openDetail(w.id);
+    } catch (e) {
+      msg(e.message || String(e), true);
+    }
+  });
   document.getElementById("import-file")?.addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -519,7 +530,13 @@ async function loadEpub(w) {
   if (state.book) {
     try { state.book.destroy(); } catch {}
   }
-  state.book = ePub(`/api/works/${w.id}/content/epub`);
+  const res = await fetch(`/api/works/${w.id}/content/epub`, { credentials: "include" });
+  if (!res.ok) {
+    area.textContent = `Failed to load EPUB (${res.status}). Try re-importing or downloading the file.`;
+    return;
+  }
+  const buf = await res.arrayBuffer();
+  state.book = ePub(buf);
   const rtl = w.reading_direction === "rtl" || w.is_manga;
   state.rendition = state.book.renderTo("epub-area", {
     width: "100%",
@@ -532,9 +549,14 @@ async function loadEpub(w) {
       try { state.rendition.themes.default({ body: { direction: "rtl" } }); } catch {}
     });
   }
-  const prog = await api(`/api/works/${w.id}/progress?mode=epub`).catch(() => null);
-  if (prog?.position) await state.rendition.display(prog.position);
-  else await state.rendition.display();
+  try {
+    const prog = await api(`/api/works/${w.id}/progress?mode=epub`).catch(() => null);
+    if (prog?.position) await state.rendition.display(prog.position);
+    else await state.rendition.display();
+  } catch (e) {
+    area.textContent = `EPUB render failed: ${e.message || e}`;
+    return;
+  }
   state.rendition.on("relocated", (loc) => {
     api(`/api/works/${w.id}/progress`, {
       method: "PUT",

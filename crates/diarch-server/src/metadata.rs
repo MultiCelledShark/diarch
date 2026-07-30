@@ -1,4 +1,5 @@
 use anyhow::Result;
+use diarch_core::taxonomy::map_subjects_to_codes;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -10,7 +11,21 @@ pub struct MetaHit {
     pub authors: String,
     pub isbn: Option<String>,
     pub description: Option<String>,
+    #[serde(default)]
+    pub subjects: Vec<String>,
     pub source: String,
+}
+
+/// Combined local (EPUB) + Open Library subjects mapped onto Diarch codes.
+#[derive(Debug, Clone, Default)]
+pub struct TaxonomyHint {
+    pub primary: Option<i32>,
+    pub codes: Vec<i32>,
+    pub subjects: Vec<String>,
+    pub isbn: Option<String>,
+    pub description: Option<String>,
+    pub title: Option<String>,
+    pub authors: Option<String>,
 }
 
 pub async fn lookup_isbn(state: &AppState, isbn: &str) -> Result<Option<MetaHit>> {
@@ -23,6 +38,64 @@ pub async fn lookup_isbn(state: &AppState, isbn: &str) -> Result<Option<MetaHit>
         return Ok(Some(hit));
     }
     Ok(None)
+}
+
+/// Merge EPUB subjects with Open Library (when ISBN is known) and map to taxonomy.
+pub async fn taxonomy_from_metadata(
+    state: &AppState,
+    isbn: Option<&str>,
+    local_subjects: &[String],
+) -> TaxonomyHint {
+    let mut subjects = local_subjects.to_vec();
+    let mut hint = TaxonomyHint {
+        subjects: subjects.clone(),
+        isbn: isbn.map(|s| s.replace('-', "")),
+        ..Default::default()
+    };
+
+    if let Some(isbn_v) = isbn.filter(|s| !s.is_empty()) {
+        if let Ok(Some(hit)) = lookup_isbn(state, isbn_v).await {
+            if hint.title.is_none() {
+                hint.title = Some(hit.title);
+            }
+            if hint.authors.as_ref().map(|a| a.is_empty()).unwrap_or(true) && !hit.authors.is_empty()
+            {
+                hint.authors = Some(hit.authors);
+            }
+            if hint.description.is_none() {
+                hint.description = hit.description;
+            }
+            hint.isbn = hit.isbn.or(hint.isbn);
+            for s in hit.subjects {
+                if !subjects.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
+                    subjects.push(s);
+                }
+            }
+        }
+    }
+
+    hint.subjects = subjects.clone();
+    let (primary, codes) = map_subjects_to_codes(&subjects);
+    hint.primary = primary;
+    hint.codes = codes;
+    hint
+}
+
+fn parse_ol_subjects(v: &Value) -> Vec<String> {
+    let Some(arr) = v.get("subjects").and_then(|s| s.as_array()) else {
+        return vec![];
+    };
+    arr.iter()
+        .filter_map(|item| {
+            if let Some(s) = item.as_str() {
+                return Some(s.to_string());
+            }
+            item.get("name")
+                .and_then(|n| n.as_str())
+                .map(|s| s.to_string())
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 async fn open_library(state: &AppState, isbn: &str) -> Result<Option<MetaHit>> {
@@ -44,11 +117,13 @@ async fn open_library(state: &AppState, isbn: &str) -> Result<Option<MetaHit>> {
                 .and_then(|x| x.as_str())
                 .map(|s| s.to_string())
         }));
+    let subjects = parse_ol_subjects(&v);
     Ok(Some(MetaHit {
         title,
         authors: String::new(),
         isbn: Some(isbn.to_string()),
         description,
+        subjects,
         source: "openlibrary".into(),
     }))
 }
@@ -114,6 +189,7 @@ async fn open_library_search(
             authors: d.author_name.unwrap_or_default().join(", "),
             isbn: d.isbn.and_then(|v| v.into_iter().next()),
             description: d.first_sentence.and_then(|v| v.into_iter().next()),
+            subjects: vec![],
             source: "openlibrary".into(),
         })
         .collect())
@@ -165,6 +241,7 @@ async fn loc_search(
             authors: a,
             isbn,
             description: None,
+            subjects: vec![],
             source: "loc".into(),
         });
     }
