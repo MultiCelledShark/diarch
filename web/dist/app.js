@@ -49,9 +49,20 @@ async function enterApp() {
   document.getElementById("main-view").hidden = false;
   document.getElementById("who").textContent = state.user.username;
   document.getElementById("nav-admin").hidden = !state.user.is_admin;
-  state.settings = await api("/api/settings");
   show("library");
-  await loadWorks();
+  try {
+    state.settings = await api("/api/settings");
+  } catch (e) {
+    console.warn("settings load failed", e);
+    state.settings = { show_audio_gaps: true, reader_infinite_scroll: false };
+  }
+  try {
+    await loadWorks();
+  } catch (e) {
+    console.error("library load failed", e);
+    const el = document.getElementById("work-list");
+    el.innerHTML = `<p class="empty error">Could not load library: ${escapeHtml(e.message || String(e))}</p>`;
+  }
 }
 
 document.getElementById("login-form").addEventListener("submit", async (e) => {
@@ -69,6 +80,8 @@ document.getElementById("login-form").addEventListener("submit", async (e) => {
   } catch (ex) {
     err.textContent = "Login failed";
     err.hidden = false;
+    document.getElementById("login-view").hidden = false;
+    document.getElementById("main-view").hidden = true;
   }
 });
 
@@ -93,30 +106,47 @@ async function loadWorks() {
   const status = document.getElementById("filter-status").value;
   const q = status ? `?status=${encodeURIComponent(status)}` : "";
   const works = await api(`/api/works${q}`);
-  renderCards(document.getElementById("work-list"), works.filter((w) => w.status !== "wishlist"));
+  renderCards(document.getElementById("work-list"), works, {
+    emptyTitle: "Your library is empty",
+    emptyHint: "Use New work to add a book, or open Wishlist to add by ISBN / title.",
+  });
 }
 
 document.getElementById("filter-status").addEventListener("change", loadWorks);
 
 async function loadWishlist() {
   const works = await api("/api/works?status=wishlist");
-  renderCards(document.getElementById("wishlist-list"), works);
+  renderCards(document.getElementById("wishlist-list"), works, {
+    emptyTitle: "No wishlist items",
+    emptyHint: "Add a title, ISBN, or scan a barcode above.",
+  });
 }
 
 async function loadAttention() {
   const att = document.getElementById("attention-filter").value;
   const works = await api(`/api/works?attention=${encodeURIComponent(att)}`);
-  renderCards(document.getElementById("attention-list"), works);
+  renderCards(document.getElementById("attention-list"), works, {
+    emptyTitle: "Nothing in this attention queue",
+    emptyHint: "Flags appear here when reviews need StoryGraph updates, covers are missing, etc.",
+  });
 }
 
 document.getElementById("attention-filter").addEventListener("change", loadAttention);
 
-function renderCards(el, works) {
+function renderCards(el, works, empty = {}) {
   el.innerHTML = "";
+  if (!works.length) {
+    el.innerHTML = `<div class="empty">
+      <strong>${escapeHtml(empty.emptyTitle || "Nothing here")}</strong>
+      <p>${escapeHtml(empty.emptyHint || "")}</p>
+    </div>`;
+    return;
+  }
   for (const w of works) {
     const card = document.createElement("div");
     card.className = "card";
     const badges = [];
+    if (w.status === "wishlist") badges.push("wishlist");
     if (w.primary_code) badges.push(`#${w.primary_code}`);
     if (w.needs_review) badges.push("review");
     if (state.settings?.show_audio_gaps && w.needs_audio) badges.push("no audio");

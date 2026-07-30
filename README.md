@@ -55,8 +55,11 @@ See [deploy/debian/README.md](deploy/debian/README.md).
 - `web/` — UI source (copied to `web/dist` for `rust-embed`)
 - `android/` — thin client notes / stub
 - `docs/TODO-ebook2audiobook-watcher.md` — desktop TTS watcher (out of scope here)
+- `docs/PHASED_PLAN.md` — phased roadmap and locked product rules
 
-## Tests
+## Features by phase
+
+See [docs/PHASED_PLAN.md](docs/PHASED_PLAN.md) for status and next priorities.
 
 ```bash
 cargo test --workspace
