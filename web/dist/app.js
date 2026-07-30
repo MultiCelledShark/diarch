@@ -529,40 +529,56 @@ async function loadEpub(w) {
   area.innerHTML = "";
   if (state.book) {
     try { state.book.destroy(); } catch {}
+    state.book = null;
+    state.rendition = null;
   }
-  const res = await fetch(`/api/works/${w.id}/content/epub`, { credentials: "include" });
-  if (!res.ok) {
-    area.textContent = `Failed to load EPUB (${res.status}). Try re-importing or downloading the file.`;
+  if (typeof JSZip === "undefined") {
+    area.textContent = "JSZip failed to load; cannot open EPUB.";
     return;
   }
-  const buf = await res.arrayBuffer();
-  state.book = ePub(buf);
-  const rtl = w.reading_direction === "rtl" || w.is_manga;
-  state.rendition = state.book.renderTo("epub-area", {
-    width: "100%",
-    height: "100%",
-    flow: "paginated",
-    allowScriptedContent: false,
-  });
-  if (rtl) {
-    state.book.ready.then(() => {
-      try { state.rendition.themes.default({ body: { direction: "rtl" } }); } catch {}
-    });
+  if (typeof ePub === "undefined") {
+    area.textContent = "epub.js failed to load.";
+    return;
   }
   try {
+    const res = await fetch(`/api/works/${w.id}/content/epub`, { credentials: "include" });
+    if (!res.ok) {
+      area.textContent = `Failed to load EPUB (${res.status}). Try re-importing or downloading the file.`;
+      return;
+    }
+    const buf = await res.arrayBuffer();
+    // Pass ArrayBuffer so epub.js opens as binary (blob: URLs lack .epub and are
+    // mis-detected as directories). Requires JSZip loaded before epub.js in index.html.
+    state.book = ePub(buf);
+    // Force layout after unhiding reader so flex #epub-area has real size.
+    void area.offsetHeight;
+    const width = Math.max(area.clientWidth || 0, window.innerWidth || 320);
+    const height = Math.max(area.clientHeight || 0, (window.innerHeight || 480) - 56);
+    state.rendition = state.book.renderTo(area, {
+      width,
+      height,
+      flow: "paginated",
+      allowScriptedContent: false,
+    });
+    const rtl = w.reading_direction === "rtl" || w.is_manga;
+    if (rtl) {
+      state.book.ready.then(() => {
+        try { state.rendition.themes.default({ body: { direction: "rtl" } }); } catch {}
+      });
+    }
+    await state.book.ready;
     const prog = await api(`/api/works/${w.id}/progress?mode=epub`).catch(() => null);
     if (prog?.position) await state.rendition.display(prog.position);
     else await state.rendition.display();
+    state.rendition.on("relocated", (loc) => {
+      api(`/api/works/${w.id}/progress`, {
+        method: "PUT",
+        json: { mode: "epub", position: loc.start.cfi, percent: loc.start.percentage * 100 },
+      }).catch(() => {});
+    });
   } catch (e) {
     area.textContent = `EPUB render failed: ${e.message || e}`;
-    return;
   }
-  state.rendition.on("relocated", (loc) => {
-    api(`/api/works/${w.id}/progress`, {
-      method: "PUT",
-      json: { mode: "epub", position: loc.start.cfi, percent: loc.start.percentage * 100 },
-    }).catch(() => {});
-  });
 }
 
 document.getElementById("reader-close").addEventListener("click", () => {
