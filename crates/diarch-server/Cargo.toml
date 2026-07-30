@@ -1,0 +1,33 @@
+[package]
+name = "diarch-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "diarch"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+axum-extra = { workspace = true }
+base64 = { workspace = true }
+cookie = { workspace = true }
+chrono = { workspace = true }
+diarch-core = { workspace = true }
+diarch-db = { workspace = true }
+diarch-import = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+rust-embed = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+zip = { workspace = true }

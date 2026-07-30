@@ -1,0 +1,230 @@
+[
+  {
+    "code": 1000,
+    "name": "Humanities",
+    "children": [
+      {"code": 1100, "name": "Performing arts", "children": [
+        {"code": 1110, "name": "Music"},
+        {"code": 1120, "name": "Dance"},
+        {"code": 1130, "name": "Theatre"},
+        {"code": 1140, "name": "Film"}
+      ]},
+      {"code": 1200, "name": "Visual arts", "children": [
+        {"code": 1210, "name": "Architecture"},
+        {"code": 1220, "name": "Drawing and painting"}
+      ]},
+      {"code": 1300, "name": "History", "children": [
+        {"code": 1310, "name": "Ancient history"},
+        {"code": 1320, "name": "Modern history"},
+        {"code": 1330, "name": "Regional history"}
+      ]},
+      {"code": 1400, "name": "Languages and literature", "children": [
+        {"code": 1410, "name": "Linguistics"},
+        {"code": 1420, "name": "Literary studies"}
+      ]},
+      {"code": 1500, "name": "Law"},
+      {"code": 1600, "name": "Philosophy", "children": [
+        {"code": 1610, "name": "Ethics"},
+        {"code": 1620, "name": "Epistemology"},
+        {"code": 1630, "name": "Metaphysics"},
+        {"code": 1640, "name": "Logic"}
+      ]},
+      {"code": 1700, "name": "Religious studies"},
+      {"code": 1800, "name": "Theology"}
+    ]
+  },
+  {
+    "code": 2000,
+    "name": "Social sciences",
+    "children": [
+      {"code": 2100, "name": "Anthropology"},
+      {"code": 2200, "name": "Archaeology"},
+      {"code": 2300, "name": "Business"},
+      {"code": 2400, "name": "Economics"},
+      {"code": 2500, "name": "Geography"},
+      {"code": 2600, "name": "Political science"},
+      {"code": 2700, "name": "Psychology"},
+      {"code": 2800, "name": "Sociology"},
+      {"code": 2900, "name": "Area and cultural studies"}
+    ]
+  },
+  {
+    "code": 3000,
+    "name": "Natural sciences",
+    "children": [
+      {"code": 3100, "name": "Biology", "children": [
+        {"code": 3110, "name": "Botany"},
+        {"code": 3120, "name": "Zoology"},
+        {"code": 3130, "name": "Genetics"},
+        {"code": 3140, "name": "Ecology"},
+        {"code": 3150, "name": "Neuroscience"}
+      ]},
+      {"code": 3200, "name": "Chemistry"},
+      {"code": 3300, "name": "Physics"},
+      {"code": 3400, "name": "Astronomy"},
+      {"code": 3500, "name": "Earth science"}
+    ]
+  },
+  {
+    "code": 4000,
+    "name": "Formal sciences",
+    "children": [
+      {"code": 4100, "name": "Mathematics", "children": [
+        {"code": 4110, "name": "Pure mathematics"},
+        {"code": 4120, "name": "Applied mathematics"},
+        {"code": 4130, "name": "Statistics"}
+      ]},
+      {"code": 4200, "name": "Computer science", "children": [
+        {"code": 4210, "name": "Artificial intelligence"},
+        {"code": 4220, "name": "Software engineering"},
+        {"code": 4230, "name": "Theory of computation"}
+      ]},
+      {"code": 4300, "name": "Logic"}
+    ]
+  },
+  {
+    "code": 5000,
+    "name": "Applied sciences",
+    "children": [
+      {"code": 5100, "name": "Agriculture"},
+      {"code": 5200, "name": "Medicine and health"},
+      {"code": 5300, "name": "Engineering", "children": [
+        {"code": 5310, "name": "Civil engineering"},
+        {"code": 5320, "name": "Electrical engineering"},
+        {"code": 5330, "name": "Mechanical engineering"},
+        {"code": 5340, "name": "Chemical engineering"}
+      ]},
+      {"code": 5400, "name": "Education"},
+      {"code": 5500, "name": "Architecture and design"},
+      {"code": 5600, "name": "Journalism and media"},
+      {"code": 5700, "name": "Military sciences"},
+      {"code": 5800, "name": "Public administration"},
+      {"code": 5900, "name": "Transportation"}
+    ]
+  },
+  {
+    "code": 6000,
+    "name": "Practical / Hobby / Self-help",
+    "children": [
+      {"code": 6100, "name": "Self-help"},
+      {"code": 6200, "name": "Cooking and food"},
+      {"code": 6300, "name": "Crafts and DIY"},
+      {"code": 6400, "name": "Gardening"},
+      {"code": 6500, "name": "Sports and fitness"},
+      {"code": 6600, "name": "Games and hobbies"},
+      {"code": 6700, "name": "Personal finance"},
+      {"code": 6800, "name": "Parenting"},
+      {"code": 6900, "name": "Travel guides"}
+    ]
+  },
+  {
+    "code": 7000,
+    "name": "Religion / Spirituality",
+    "children": [
+      {"code": 7100, "name": "Christianity"},
+      {"code": 7200, "name": "Islam"},
+      {"code": 7300, "name": "Judaism"},
+      {"code": 7400, "name": "Buddhism"},
+      {"code": 7500, "name": "Hinduism"},
+      {"code": 7600, "name": "Other religions"},
+      {"code": 7700, "name": "Spirituality and mysticism"},
+      {"code": 7800, "name": "Comparative religion"}
+    ]
+  },
+  {
+    "code": 8000,
+    "name": "Fiction",
+    "children": [
+      {"code": 8100, "name": "Literary fiction"},
+      {
+        "code": 8200,
+        "name": "Fantasy",
+        "children": [
+          {"code": 8201, "name": "Epic / high fantasy"},
+          {"code": 8202, "name": "Low fantasy"},
+          {"code": 8203, "name": "Urban fantasy"},
+          {"code": 8204, "name": "Dark fantasy"},
+          {"code": 8205, "name": "Grimdark"},
+          {"code": 8206, "name": "Fairy-tale / retelling"},
+          {"code": 8207, "name": "Mythic fantasy"},
+          {"code": 8208, "name": "Sword and sorcery"},
+          {"code": 8209, "name": "Portal fantasy"},
+          {"code": 8210, "name": "Gaslamp fantasy"},
+          {"code": 8211, "name": "Cozy fantasy"},
+          {"code": 8212, "name": "Romantic fantasy"},
+          {"code": 8213, "name": "Progression / LitRPG fantasy"},
+          {"code": 8214, "name": "Comic / satirical fantasy"},
+          {"code": 8215, "name": "Historical fantasy"},
+          {"code": 8216, "name": "Contemporary fantasy"},
+          {"code": 8217, "name": "Animal fantasy"},
+          {"code": 8299, "name": "Fantasy other"}
+        ]
+      },
+      {
+        "code": 8400,
+        "name": "Science fiction",
+        "children": [
+          {"code": 8401, "name": "Hard SF"},
+          {"code": 8402, "name": "Soft SF"},
+          {"code": 8403, "name": "Space opera"},
+          {"code": 8404, "name": "Military SF"},
+          {"code": 8405, "name": "Cyberpunk"},
+          {"code": 8406, "name": "Biopunk"},
+          {"code": 8407, "name": "Steampunk"},
+          {"code": 8408, "name": "Dieselpunk"},
+          {"code": 8409, "name": "Solarpunk"},
+          {"code": 8410, "name": "Dystopia / utopia"},
+          {"code": 8411, "name": "Alternate history"},
+          {"code": 8412, "name": "Time travel"},
+          {"code": 8413, "name": "First contact"},
+          {"code": 8414, "name": "Generation ship"},
+          {"code": 8415, "name": "Post-apocalyptic"},
+          {"code": 8416, "name": "Climate SF"},
+          {"code": 8417, "name": "AI / robot"},
+          {"code": 8418, "name": "Near-future"},
+          {"code": 8419, "name": "Sociological SF"},
+          {"code": 8420, "name": "Humorous SF"},
+          {"code": 8499, "name": "Science fiction other"}
+        ]
+      },
+      {"code": 8600, "name": "Horror / weird / gothic", "children": [
+        {"code": 8610, "name": "Horror"},
+        {"code": 8620, "name": "Weird fiction"},
+        {"code": 8630, "name": "Gothic"}
+      ]},
+      {"code": 8700, "name": "Mystery / crime / thriller", "children": [
+        {"code": 8710, "name": "Mystery"},
+        {"code": 8720, "name": "Crime"},
+        {"code": 8730, "name": "Thriller"}
+      ]},
+      {"code": 8800, "name": "Romance", "children": [
+        {"code": 8810, "name": "Contemporary romance"},
+        {"code": 8820, "name": "Historical romance"},
+        {"code": 8830, "name": "Romantasy"}
+      ]},
+      {"code": 8850, "name": "Historical / western / adventure", "children": [
+        {"code": 8860, "name": "Historical fiction"},
+        {"code": 8870, "name": "Western"},
+        {"code": 8880, "name": "Adventure"}
+      ]},
+      {"code": 8900, "name": "Comics / manga / graphic novels", "children": [
+        {"code": 8910, "name": "Comics"},
+        {"code": 8920, "name": "Manga"},
+        {"code": 8930, "name": "Graphic novels"}
+      ]},
+      {"code": 8940, "name": "Young adult"},
+      {"code": 8970, "name": "New adult"}
+    ]
+  },
+  {
+    "code": 9000,
+    "name": "Biography / Memoir",
+    "children": [
+      {"code": 9100, "name": "Autobiography"},
+      {"code": 9200, "name": "Memoir"},
+      {"code": 9300, "name": "Biography"},
+      {"code": 9400, "name": "Letters and diaries"},
+      {"code": 9500, "name": "Collective biography"}
+    ]
+  }
+]

@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Diarch</title>
+  <link rel="stylesheet" href="/assets/app.css" />
+  <script src="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+</head>
+<body>
+  <div id="app">
+    <section id="login-view" class="panel">
+      <h1>Diarch</h1>
+      <p class="tagline">Personal library</p>
+      <form id="login-form">
+        <label>Username <input name="username" autocomplete="username" required /></label>
+        <label>Password <input name="password" type="password" autocomplete="current-password" required /></label>
+        <button type="submit">Sign in</button>
+        <p id="login-error" class="error" hidden></p>
+      </form>
+    </section>
+
+    <section id="main-view" hidden>
+      <header class="top">
+        <div class="brand">Diarch</div>
+        <nav>
+          <button data-view="library" class="nav active">Library</button>
+          <button data-view="wishlist" class="nav">Wishlist</button>
+          <button data-view="attention" class="nav">Attention</button>
+          <button data-view="admin" class="nav" id="nav-admin" hidden>Admin</button>
+          <button data-view="settings" class="nav">Settings</button>
+        </nav>
+        <div class="user">
+          <span id="who"></span>
+          <button id="logout">Logout</button>
+        </div>
+      </header>
+
+      <main>
+        <div id="view-library" class="view">
+          <div class="toolbar">
+            <button id="btn-new-work">New work</button>
+            <select id="filter-status">
+              <option value="">All statuses</option>
+              <option value="unread">Unread</option>
+              <option value="reading">Reading</option>
+              <option value="read">Read</option>
+              <option value="wishlist">Wishlist</option>
+            </select>
+          </div>
+          <div id="work-list" class="cards"></div>
+        </div>
+
+        <div id="view-wishlist" class="view" hidden>
+          <form id="wishlist-form" class="panel form-grid">
+            <h2>Add to wishlist</h2>
+            <label>ISBN <input name="isbn" id="wl-isbn" /></label>
+            <label>Title <input name="title" id="wl-title" /></label>
+            <label>Author <input name="authors" id="wl-authors" /></label>
+            <label>Primary code <input name="primary_code" type="number" placeholder="e.g. 8201" /></label>
+            <div class="row">
+              <button type="submit">Add</button>
+              <button type="button" id="btn-scan">Scan barcode</button>
+            </div>
+            <video id="scan-video" hidden playsinline></video>
+          </form>
+          <div id="wishlist-list" class="cards"></div>
+        </div>
+
+        <div id="view-attention" class="view" hidden>
+          <div class="toolbar">
+            <select id="attention-filter">
+              <option value="needs_review">Needs review</option>
+              <option value="needs_cover">Needs cover</option>
+              <option value="needs_tts">Needs TTS</option>
+              <option value="needs_audio">Needs audio</option>
+              <option value="sg_review_dirty">Update StoryGraph review</option>
+              <option value="sg_needs_add">Add to StoryGraph</option>
+              <option value="sg_audio_only_remote">SG audio, missing local</option>
+            </select>
+          </div>
+          <div id="attention-list" class="cards"></div>
+        </div>
+
+        <div id="view-admin" class="view" hidden>
+          <div class="panel">
+            <h2>Users</h2>
+            <form id="user-form" class="form-grid">
+              <label>Username <input name="username" required /></label>
+              <label>Password <input name="password" type="password" required /></label>
+              <label><input type="checkbox" name="is_admin" /> Admin</label>
+              <button type="submit">Create user</button>
+            </form>
+            <ul id="user-list"></ul>
+          </div>
+          <div class="panel">
+            <h2>Integrations</h2>
+            <button id="btn-sg-sync">Sync StoryGraph</button>
+            <button id="btn-tts-export">Export needs_tts queue</button>
+            <button id="btn-probe">Refresh health</button>
+            <pre id="integrations"></pre>
+          </div>
+        </div>
+
+        <div id="view-settings" class="view" hidden>
+          <form id="settings-form" class="panel form-grid">
+            <h2>Settings</h2>
+            <label><input type="checkbox" name="show_audio_gaps" /> Show audio gap badges</label>
+            <label><input type="checkbox" name="reader_infinite_scroll" /> Infinite scroll (Markdown) by default</label>
+            <button type="submit">Save</button>
+          </form>
+        </div>
+
+        <div id="view-detail" class="view" hidden>
+          <button id="back-library">← Back</button>
+          <div id="detail" class="detail"></div>
+        </div>
+
+        <div id="view-reader" class="view" hidden>
+          <div class="reader-bar">
+            <button id="reader-close">Close</button>
+            <span id="reader-title"></span>
+            <button id="reader-prev">Prev</button>
+            <button id="reader-next">Next</button>
+            <label><input type="checkbox" id="reader-scroll" /> Infinite scroll</label>
+          </div>
+          <div id="epub-area"></div>
+          <article id="md-area" hidden></article>
+          <audio id="audio-player" controls hidden></audio>
+        </div>
+      </main>
+    </section>
+  </div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

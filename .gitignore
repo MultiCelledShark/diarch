@@ -1,0 +1,9 @@
+/target
+**/target
+/data
+**/*.db
+.idea
+.vscode
+*.swp
+.DS_Store
+/web/node_modules

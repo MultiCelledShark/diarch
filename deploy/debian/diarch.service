@@ -1,0 +1,24 @@
+[Unit]
+Description=Diarch ebook library
+After=network.target
+
+[Service]
+Type=simple
+User=diarch
+Group=diarch
+Environment=DIARCH_LISTEN=0.0.0.0:8083
+Environment=DIARCH_DATA_DIR=/var/lib/diarch
+Environment=DIARCH_ADMIN_USER=admin
+Environment=DIARCH_ADMIN_PASS=change-me
+ExecStart=/usr/local/bin/diarch
+Restart=on-failure
+RestartSec=3
+Nice=5
+# Optional CPU soft limit for background friendliness
+CPUQuota=50%
+
+# Create user once: sudo useradd --system --home /var/lib/diarch --shell /usr/sbin/nologin diarch
+# sudo chown -R diarch:diarch /var/lib/diarch
+
+[Install]
+WantedBy=multi-user.target
