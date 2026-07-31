@@ -356,9 +356,34 @@ async function openDetail(id) {
         </div>
         <div class="review-pane review-md">
           <h3>Markdown</h3>
-          <textarea id="review-md-editor" spellcheck="false" placeholder="Loading…"></textarea>
+          <div class="review-md-toolbar" role="toolbar" aria-label="Markdown formatting">
+            <button type="button" data-md-cmd="bold" title="Bold (Ctrl+B)"><strong>B</strong></button>
+            <button type="button" data-md-cmd="italic" title="Italic (Ctrl+I)"><em>I</em></button>
+            <button type="button" data-md-cmd="heading" title="Heading">H</button>
+            <button type="button" data-md-cmd="link" title="Link">Link</button>
+            <button type="button" data-md-cmd="quote" title="Quote">“</button>
+            <button type="button" data-md-cmd="ul" title="Bullet list">• List</button>
+            <button type="button" data-md-cmd="ol" title="Numbered list">1. List</button>
+            <button type="button" data-md-cmd="code" title="Inline code">Code</button>
+            <button type="button" data-md-cmd="fence" title="Code block">Block</button>
+            <span class="tb-sep" aria-hidden="true"></span>
+            <button type="button" data-md-cmd="find" title="Find / Replace">Find</button>
+          </div>
+          <div id="review-find" class="review-find" hidden>
+            <input type="text" id="review-find-q" placeholder="Find" />
+            <input type="text" id="review-find-r" placeholder="Replace" />
+            <button type="button" id="review-find-next">Next</button>
+            <button type="button" id="review-find-replace">Replace</button>
+            <button type="button" id="review-find-all">Replace all</button>
+            <button type="button" id="review-find-close">Close</button>
+          </div>
+          <div class="review-md-split">
+            <textarea id="review-md-editor" spellcheck="false" placeholder="Loading…"></textarea>
+            <div id="review-md-preview" class="review-md-preview" aria-live="polite"></div>
+          </div>
           <div class="review-actions">
             <button type="button" id="btn-save-md">Save markdown</button>
+            <span id="review-dirty" class="review-dirty" hidden>Unsaved changes</span>
             <a href="/api/works/${w.id}/download/markdown"><button type="button">Download MD</button></a>
             <button type="button" id="btn-confirm">Confirm → EPUB</button>
           </div>
@@ -457,30 +482,7 @@ async function openDetail(id) {
     }
   });
   if (w.needs_review) {
-    const editor = document.getElementById("review-md-editor");
-    if (editor) {
-      fetch(`/api/works/${w.id}/content/markdown`, { credentials: "include" })
-        .then(async (res) => {
-          editor.value = res.ok ? await res.text() : "";
-          if (!res.ok) msg(`Could not load markdown (${res.status})`, true);
-        })
-        .catch((e) => msg(e.message || String(e), true));
-    }
-    document.getElementById("btn-save-md")?.addEventListener("click", async () => {
-      const text = document.getElementById("review-md-editor")?.value ?? "";
-      msg("Saving markdown…");
-      const res = await fetch(`/api/works/${w.id}/content/markdown`, {
-        method: "PUT",
-        credentials: "include",
-        headers: { "Content-Type": "text/markdown; charset=utf-8" },
-        body: text,
-      });
-      if (!res.ok) {
-        msg(await res.text() || `Save failed (${res.status})`, true);
-        return;
-      }
-      msg("Markdown saved (still needs confirm)");
-    });
+    wireReviewMarkdownEditor(w.id, msg);
   }
   document.getElementById("import-file")?.addEventListener("change", async (e) => {
     const file = e.target.files[0];
@@ -515,6 +517,7 @@ async function openDetail(id) {
         msg(await res.text() || "Could not save markdown before confirm", true);
         return;
       }
+      setReviewDirty(false, editor.value);
     }
     const j = await api(`/api/works/${w.id}/confirm`, { method: "POST" });
     msg("Building EPUB…");
@@ -547,6 +550,248 @@ document.getElementById("back-library").addEventListener("click", () => {
   loadWorks();
 });
 
+
+/* —— Review markdown editor —— */
+let reviewSavedText = "";
+let reviewPreviewTimer = null;
+
+function setReviewDirty(dirty, savedText) {
+  if (typeof savedText === "string") reviewSavedText = savedText;
+  const badge = document.getElementById("review-dirty");
+  const confirm = document.getElementById("btn-confirm");
+  if (badge) badge.hidden = !dirty;
+  if (confirm) confirm.disabled = !!dirty;
+}
+
+function renderReviewPreview(md) {
+  const preview = document.getElementById("review-md-preview");
+  if (!preview) return;
+  let html = "";
+  try {
+    if (typeof marked !== "undefined") {
+      html = marked.parse(md || "", { async: false });
+    } else {
+      html = `<pre>${escapeHtml(md || "")}</pre>`;
+    }
+  } catch (e) {
+    html = `<p class="error">Preview error: ${escapeHtml(e.message || String(e))}</p>`;
+  }
+  if (typeof DOMPurify !== "undefined") {
+    preview.innerHTML = DOMPurify.sanitize(html);
+  } else {
+    preview.textContent = md || "";
+  }
+}
+
+function scheduleReviewPreview(editor) {
+  clearTimeout(reviewPreviewTimer);
+  reviewPreviewTimer = setTimeout(() => renderReviewPreview(editor.value), 120);
+}
+
+function mdWrapSelection(editor, before, after = before) {
+  const start = editor.selectionStart;
+  const end = editor.selectionEnd;
+  const val = editor.value;
+  const selected = val.slice(start, end) || "text";
+  const next = val.slice(0, start) + before + selected + after + val.slice(end);
+  editor.value = next;
+  editor.focus();
+  editor.setSelectionRange(start + before.length, start + before.length + selected.length);
+  editor.dispatchEvent(new Event("input"));
+}
+
+function mdPrefixLines(editor, prefixFn) {
+  const start = editor.selectionStart;
+  const end = editor.selectionEnd;
+  const val = editor.value;
+  const lineStart = val.lastIndexOf("\n", start - 1) + 1;
+  const lineEnd = (() => {
+    const i = val.indexOf("\n", end);
+    return i === -1 ? val.length : i;
+  })();
+  const block = val.slice(lineStart, lineEnd);
+  const lines = block.split("\n");
+  const replaced = lines.map((line, i) => prefixFn(line, i)).join("\n");
+  editor.value = val.slice(0, lineStart) + replaced + val.slice(lineEnd);
+  editor.focus();
+  editor.setSelectionRange(lineStart, lineStart + replaced.length);
+  editor.dispatchEvent(new Event("input"));
+}
+
+function runMdCommand(cmd, editor) {
+  if (!editor) return;
+  switch (cmd) {
+    case "bold":
+      mdWrapSelection(editor, "**");
+      break;
+    case "italic":
+      mdWrapSelection(editor, "*");
+      break;
+    case "heading":
+      mdPrefixLines(editor, (line) => {
+        if (/^#{1,6}\s/.test(line)) {
+          const m = line.match(/^(#{1,6})\s/);
+          const n = Math.min(6, (m[1].length % 6) + 1);
+          return "#".repeat(n) + " " + line.replace(/^#{1,6}\s*/, "");
+        }
+        return "## " + line;
+      });
+      break;
+    case "link": {
+      const start = editor.selectionStart;
+      const end = editor.selectionEnd;
+      const selected = editor.value.slice(start, end) || "label";
+      const insert = `[${selected}](https://)`;
+      editor.value = editor.value.slice(0, start) + insert + editor.value.slice(end);
+      const urlStart = start + selected.length + 3;
+      editor.focus();
+      editor.setSelectionRange(urlStart, urlStart + "https://".length);
+      editor.dispatchEvent(new Event("input"));
+      break;
+    }
+    case "quote":
+      mdPrefixLines(editor, (line) => (line.startsWith("> ") ? line : "> " + line));
+      break;
+    case "ul":
+      mdPrefixLines(editor, (line) => (line.startsWith("- ") ? line : "- " + line));
+      break;
+    case "ol":
+      mdPrefixLines(editor, (line, i) => (/^\d+\.\s/.test(line) ? line : `${i + 1}. ${line}`));
+      break;
+    case "code":
+      mdWrapSelection(editor, "`");
+      break;
+    case "fence": {
+      const start = editor.selectionStart;
+      const end = editor.selectionEnd;
+      const selected = editor.value.slice(start, end) || "code";
+      const insert = "```\n" + selected + "\n```";
+      editor.value = editor.value.slice(0, start) + insert + editor.value.slice(end);
+      editor.focus();
+      editor.setSelectionRange(start + 4, start + 4 + selected.length);
+      editor.dispatchEvent(new Event("input"));
+      break;
+    }
+    case "find": {
+      const box = document.getElementById("review-find");
+      if (box) {
+        box.hidden = !box.hidden;
+        if (!box.hidden) document.getElementById("review-find-q")?.focus();
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+function findInEditor(editor, query, from) {
+  if (!query) return -1;
+  return editor.value.indexOf(query, from);
+}
+
+function wireReviewMarkdownEditor(workId, msg) {
+  const editor = document.getElementById("review-md-editor");
+  if (!editor) return;
+  const confirmBtn = document.getElementById("btn-confirm");
+  if (confirmBtn) confirmBtn.disabled = false;
+
+  fetch(`/api/works/${workId}/content/markdown`, { credentials: "include" })
+    .then(async (res) => {
+      editor.value = res.ok ? await res.text() : "";
+      if (!res.ok) msg(`Could not load markdown (${res.status})`, true);
+      setReviewDirty(false, editor.value);
+      renderReviewPreview(editor.value);
+    })
+    .catch((e) => msg(e.message || String(e), true));
+
+  editor.addEventListener("input", () => {
+    setReviewDirty(editor.value !== reviewSavedText);
+    scheduleReviewPreview(editor);
+  });
+
+  document.querySelectorAll("[data-md-cmd]").forEach((btn) => {
+    btn.addEventListener("click", () => runMdCommand(btn.dataset.mdCmd, editor));
+  });
+
+  editor.addEventListener("keydown", (e) => {
+    const mod = e.ctrlKey || e.metaKey;
+    if (!mod) return;
+    if (e.key === "s") {
+      e.preventDefault();
+      document.getElementById("btn-save-md")?.click();
+    } else if (e.key === "b") {
+      e.preventDefault();
+      runMdCommand("bold", editor);
+    } else if (e.key === "i") {
+      e.preventDefault();
+      runMdCommand("italic", editor);
+    } else if (e.key === "f") {
+      e.preventDefault();
+      runMdCommand("find", editor);
+    }
+  });
+
+  document.getElementById("btn-save-md")?.addEventListener("click", async () => {
+    msg("Saving markdown…");
+    const res = await fetch(`/api/works/${workId}/content/markdown`, {
+      method: "PUT",
+      credentials: "include",
+      headers: { "Content-Type": "text/markdown; charset=utf-8" },
+      body: editor.value,
+    });
+    if (!res.ok) {
+      msg((await res.text()) || `Save failed (${res.status})`, true);
+      return;
+    }
+    setReviewDirty(false, editor.value);
+    msg("Markdown saved (still needs confirm)");
+  });
+
+  const findNext = () => {
+    const q = document.getElementById("review-find-q")?.value || "";
+    if (!q) return;
+    let idx = findInEditor(editor, q, editor.selectionEnd);
+    if (idx < 0) idx = findInEditor(editor, q, 0);
+    if (idx < 0) {
+      msg("No matches", true);
+      return;
+    }
+    editor.focus();
+    editor.setSelectionRange(idx, idx + q.length);
+  };
+  document.getElementById("review-find-next")?.addEventListener("click", findNext);
+  document.getElementById("review-find-replace")?.addEventListener("click", () => {
+    const q = document.getElementById("review-find-q")?.value || "";
+    const r = document.getElementById("review-find-r")?.value ?? "";
+    if (!q) return;
+    const start = editor.selectionStart;
+    const end = editor.selectionEnd;
+    if (editor.value.slice(start, end) === q) {
+      editor.value = editor.value.slice(0, start) + r + editor.value.slice(end);
+      editor.setSelectionRange(start, start + r.length);
+      editor.dispatchEvent(new Event("input"));
+    }
+    findNext();
+  });
+  document.getElementById("review-find-all")?.addEventListener("click", () => {
+    const q = document.getElementById("review-find-q")?.value || "";
+    const r = document.getElementById("review-find-r")?.value ?? "";
+    if (!q) return;
+    if (!editor.value.includes(q)) {
+      msg("No matches", true);
+      return;
+    }
+    editor.value = editor.value.split(q).join(r);
+    editor.dispatchEvent(new Event("input"));
+    msg("Replaced all");
+  });
+  document.getElementById("review-find-close")?.addEventListener("click", () => {
+    const box = document.getElementById("review-find");
+    if (box) box.hidden = true;
+  });
+}
+
 async function pollJob(id, done) {
   for (let i = 0; i < 120; i++) {
     await new Promise((r) => setTimeout(r, 500));
@@ -559,12 +804,254 @@ async function pollJob(id, done) {
   await done({ status: "failed", detail: "Timed out waiting for import job" });
 }
 
+
+/* —— Reader typography —— */
+const TYPO_KEY = "diarch-reader-typo";
+const TYPO_DEFAULTS = {
+  palette: "dark",
+  font: "serif",
+  size: 100,
+  lineHeight: "normal",
+  measure: "medium",
+  justify: false,
+};
+
+const PALETTES = {
+  dark: { ink: "#f3e6d4", pageBg: "#0c1210", link: "#e8b87a" },
+  sepia: { ink: "#5b4636", pageBg: "#f4ecd8", link: "#8a5a2b" },
+  light: { ink: "#1a1a1a", pageBg: "#fafafa", link: "#8a5a2b" },
+};
+
+const FONTS = {
+  serif: '"Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif',
+  sans: '"Source Sans 3", "Segoe UI", system-ui, sans-serif',
+  mono: 'ui-monospace, "Cascadia Code", "Source Code Pro", monospace',
+};
+
+const LINE_HEIGHTS = { tight: 1.35, normal: 1.7, loose: 2.0 };
+const MEASURES = {
+  narrow: { maxCh: 52, padX: "max(2.5rem, calc(50vw - 14rem))", epubMargin: "12%" },
+  medium: { maxCh: 68, padX: "max(1rem, calc(50vw - 18rem))", epubMargin: "6%" },
+  wide: { maxCh: 88, padX: "1rem", epubMargin: "2%" },
+};
+
+function loadTypo() {
+  try {
+    const raw = localStorage.getItem(TYPO_KEY);
+    if (!raw) return { ...TYPO_DEFAULTS };
+    return { ...TYPO_DEFAULTS, ...JSON.parse(raw) };
+  } catch {
+    return { ...TYPO_DEFAULTS };
+  }
+}
+
+function saveTypo(typo) {
+  try {
+    localStorage.setItem(TYPO_KEY, JSON.stringify(typo));
+  } catch {}
+}
+
+function fillTypoForm(typo) {
+  const form = document.getElementById("reader-typo-form");
+  if (!form) return;
+  form.palette.value = typo.palette;
+  form.font.value = typo.font;
+  form.size.value = typo.size;
+  form.lineHeight.value = typo.lineHeight;
+  form.measure.value = typo.measure;
+  form.justify.checked = !!typo.justify;
+  const sv = document.getElementById("typo-size-val");
+  if (sv) sv.textContent = `${typo.size}%`;
+}
+
+function readTypoForm() {
+  const form = document.getElementById("reader-typo-form");
+  if (!form) return loadTypo();
+  return {
+    palette: form.palette.value || "dark",
+    font: form.font.value || "serif",
+    size: Number(form.size.value) || 100,
+    lineHeight: form.lineHeight.value || "normal",
+    measure: form.measure.value || "medium",
+    justify: !!form.justify.checked,
+  };
+}
+
+function applyReaderTypography(typo) {
+  const t = typo || loadTypo();
+  state.readerTypo = t;
+  const pal = PALETTES[t.palette] || PALETTES.dark;
+  const ff = FONTS[t.font] || FONTS.serif;
+  const lh = LINE_HEIGHTS[t.lineHeight] || LINE_HEIGHTS.normal;
+  const measure = MEASURES[t.measure] || MEASURES.medium;
+  const fs = `${(1.1 * t.size) / 100}rem`;
+  const stage = document.querySelector(".reader-stage");
+  if (stage) {
+    stage.style.setProperty("--reader-page-bg", pal.pageBg);
+    stage.style.setProperty("--reader-ink", pal.ink);
+  }
+  const md = document.getElementById("md-area");
+  if (md) {
+    md.style.setProperty("--reader-ink", pal.ink);
+    md.style.setProperty("--reader-ff", ff);
+    md.style.setProperty("--reader-fs", fs);
+    md.style.setProperty("--reader-lh", String(lh));
+    md.style.setProperty("--reader-pad-x", measure.padX);
+    md.style.setProperty("--reader-pad-y", "2rem");
+    md.style.setProperty("--reader-max-w", `${measure.maxCh}ch`);
+    md.style.setProperty("--reader-align", t.justify ? "justify" : "start");
+    md.style.background = pal.pageBg;
+    md.style.color = pal.ink;
+  }
+  if (state.rendition) {
+    applyEpubTypography(t, pal, ff, lh, measure);
+  }
+}
+
+function applyEpubTypography(t, pal, ff, lh, measure) {
+  if (!state.rendition) return;
+  pal = pal || PALETTES[(t || state.readerTypo || {}).palette] || PALETTES.dark;
+  ff = ff || FONTS[(t || state.readerTypo || {}).font] || FONTS.serif;
+  lh = lh || LINE_HEIGHTS[(t || state.readerTypo || {}).lineHeight] || LINE_HEIGHTS.normal;
+  measure = measure || MEASURES[(t || state.readerTypo || {}).measure] || MEASURES.medium;
+  t = t || state.readerTypo || TYPO_DEFAULTS;
+  const align = t.justify ? "justify" : "start";
+  try {
+    state.rendition.themes.fontSize(`${t.size}%`);
+  } catch {}
+  try {
+    state.rendition.themes.font(ff);
+  } catch {}
+  const w = state.currentWork?.work;
+  const rtl = w && (w.reading_direction === "rtl" || w.is_manga);
+  const bodyRules = {
+    color: `${pal.ink} !important`,
+    background: `${pal.pageBg} !important`,
+    "font-family": `${ff} !important`,
+    "line-height": `${lh} !important`,
+    "text-align": `${align} !important`,
+    "margin-left": `${measure.epubMargin} !important`,
+    "margin-right": `${measure.epubMargin} !important`,
+  };
+  if (rtl) bodyRules.direction = "rtl";
+  try {
+    state.rendition.themes.default({
+      body: bodyRules,
+      "p, div, span, li, td, th, h1, h2, h3, h4, h5, h6, blockquote, pre, code": {
+        color: `${pal.ink} !important`,
+        "font-family": `${ff} !important`,
+        "line-height": `${lh} !important`,
+      },
+      p: { "text-align": `${align} !important` },
+      a: { color: `${pal.link} !important` },
+    });
+  } catch {}
+}
+
+/* —— Reader TOC —— */
+function closeReaderPanels() {
+  const toc = document.getElementById("reader-toc");
+  const typo = document.getElementById("reader-typo");
+  if (toc) toc.hidden = true;
+  if (typo) typo.hidden = true;
+}
+
+function setTocEnabled(on) {
+  const btn = document.getElementById("reader-toc-btn");
+  if (btn) btn.disabled = !on;
+}
+
+function renderTocList(entries) {
+  const list = document.getElementById("reader-toc-list");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!entries.length) {
+    list.innerHTML = `<p class="reader-toc-empty">No contents available.</p>`;
+    setTocEnabled(false);
+    return;
+  }
+  setTocEnabled(true);
+  for (const e of entries) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = e.label;
+    btn.className = e.level >= 3 ? "toc-l3" : e.level === 2 ? "toc-l2" : "";
+    btn.addEventListener("click", () => {
+      if (e.kind === "epub" && state.rendition && e.href) {
+        state.rendition.display(e.href);
+      } else if (e.kind === "md") {
+        const area = document.getElementById("md-area");
+        const target = area?.querySelector(`[data-toc-id="${e.id}"]`);
+        if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+      closeReaderPanels();
+    });
+    list.appendChild(btn);
+  }
+}
+
+function flattenEpubToc(items, level = 1, out = []) {
+  if (!items) return out;
+  for (const item of items) {
+    const label = (item.label || "").trim() || "Untitled";
+    const href = item.href || "";
+    out.push({ kind: "epub", label, href, level });
+    if (item.subitems?.length) flattenEpubToc(item.subitems, level + 1, out);
+  }
+  return out;
+}
+
+async function populateEpubToc() {
+  try {
+    const nav = state.book?.navigation;
+    if (nav?.toc) {
+      renderTocList(flattenEpubToc(nav.toc));
+      return;
+    }
+    if (typeof state.book?.loaded?.navigation?.then === "function") {
+      const n = await state.book.loaded.navigation;
+      renderTocList(flattenEpubToc(n?.toc));
+      return;
+    }
+  } catch {}
+  renderTocList([]);
+}
+
+function populateMarkdownToc(rawText) {
+  const area = document.getElementById("md-area");
+  if (!area) return;
+  const lines = String(rawText || "").split("\n");
+  const entries = [];
+  area.textContent = "";
+  let headingIdx = 0;
+  for (const line of lines) {
+    const m = /^(#{1,6})\s+(.+)$/.exec(line);
+    if (m) {
+      const level = m[1].length;
+      const label = m[2].trim();
+      const id = `md-toc-${headingIdx}`;
+      entries.push({ kind: "md", label, level, id });
+      const span = document.createElement("span");
+      span.dataset.tocId = id;
+      span.textContent = line + "\n";
+      area.appendChild(span);
+      headingIdx += 1;
+    } else {
+      area.appendChild(document.createTextNode(line + "\n"));
+    }
+  }
+  renderTocList(entries);
+}
+
 async function openReader(w, hasEpub, hasMd, audio) {
   state.readerWorkId = w.id;
   state.readerHasEpub = !!hasEpub;
   state.readerHasMd = !!hasMd;
   show("reader");
   closeReaderMenu();
+  closeReaderPanels();
+  fillTypoForm(loadTypo());
+  applyReaderTypography(loadTypo());
   document.getElementById("reader-title").textContent = w.title;
   setReaderProgress("");
   const preferScroll = !!state.settings?.reader_infinite_scroll && hasMd;
@@ -573,6 +1060,8 @@ async function openReader(w, hasEpub, hasMd, audio) {
   setReaderChrome(useMd);
   document.getElementById("epub-area").hidden = useMd;
   document.getElementById("md-area").hidden = !useMd;
+  setTocEnabled(false);
+  renderTocList([]);
 
   const audioEl = document.getElementById("audio-player");
   if (audio) {
@@ -629,6 +1118,7 @@ async function applyReaderMode(useMd) {
   if (!useMd && !hasEpub) return;
   setInfiniteScrollActive(useMd);
   setReaderChrome(useMd);
+  closeReaderPanels();
   if (useMd) {
     if (state.book) {
       try { state.book.destroy(); } catch {}
@@ -676,8 +1166,10 @@ function updateEpubProgressUi(loc) {
 
 async function loadMarkdown(id) {
   const res = await fetch(`/api/works/${id}/content/markdown`, { credentials: "include" });
-  document.getElementById("md-area").textContent = await res.text();
+  const raw = await res.text();
   const area = document.getElementById("md-area");
+  applyReaderTypography(loadTypo());
+  populateMarkdownToc(raw);
   const prog = await api(`/api/works/${id}/progress?mode=markdown`).catch(() => null);
   if (prog?.percent) {
     area.scrollTop = (prog.percent / 100) * (area.scrollHeight - area.clientHeight);
@@ -696,6 +1188,7 @@ async function loadEpub(w) {
   const area = document.getElementById("epub-area");
   area.innerHTML = "";
   setReaderProgress("");
+  renderTocList([]);
   if (state.book) {
     try { state.book.destroy(); } catch {}
     state.book = null;
@@ -716,11 +1209,8 @@ async function loadEpub(w) {
       return;
     }
     const buf = await res.arrayBuffer();
-    // Pass ArrayBuffer so epub.js opens as binary (blob: URLs lack .epub and are
-    // mis-detected as directories). Requires JSZip loaded before epub.js in index.html.
     state.book = ePub(buf);
     state.epubLocationsReady = false;
-    // Force layout after unhiding reader so flex #epub-area has real size.
     void area.offsetHeight;
     const width = Math.max(area.clientWidth || 0, window.innerWidth || 320);
     const height = Math.max(area.clientHeight || 0, (window.innerHeight || 480) - 56);
@@ -730,30 +1220,10 @@ async function loadEpub(w) {
       flow: "paginated",
       allowScriptedContent: false,
     });
-    // Dark UI: near-white text with a light orange tint (matches Diarch accent warmth).
-    const ink = "#f3e6d4";
-    const pageBg = "#0c1210";
-    try {
-      state.rendition.themes.default({
-        body: {
-          color: `${ink} !important`,
-          background: `${pageBg} !important`,
-        },
-        "p, div, span, li, td, th, h1, h2, h3, h4, h5, h6, blockquote, pre, code": {
-          color: `${ink} !important`,
-        },
-        a: { color: "#e8b87a !important" },
-      });
-    } catch {}
-    const rtl = w.reading_direction === "rtl" || w.is_manga;
-    if (rtl) {
-      state.book.ready.then(() => {
-        try { state.rendition.themes.default({ body: { direction: "rtl", color: `${ink} !important`, background: `${pageBg} !important` } }); } catch {}
-      });
-    }
+    applyReaderTypography(loadTypo());
     await state.book.ready;
+    await populateEpubToc();
 
-    // Locations are required for a real % through the book; cache per work.
     const locKey = `diarch-epub-loc:${w.id}`;
     setReaderProgress("…");
     try {
@@ -781,6 +1251,7 @@ async function loadEpub(w) {
     if (prog?.position) await state.rendition.display(prog.position);
     else await state.rendition.display();
     state.rendition.on("relocated", (loc) => {
+      applyEpubTypography(state.readerTypo || loadTypo());
       const percent = updateEpubProgressUi(loc);
       api(`/api/works/${w.id}/progress`, {
         method: "PUT",
@@ -804,7 +1275,6 @@ function readerTurn(dir) {
   if (!state.rendition || isInfiniteScrollActive()) return;
   const w = state.currentWork?.work;
   const rtl = w && (w.reading_direction === "rtl" || w.is_manga);
-  // Physical left/right: for RTL, left advances; for LTR, right advances.
   if (dir === "left") {
     if (rtl) state.rendition.next();
     else state.rendition.prev();
@@ -816,6 +1286,7 @@ function readerTurn(dir) {
 
 function closeReaderView() {
   closeReaderMenu();
+  closeReaderPanels();
   if (state.book) {
     try { state.book.destroy(); } catch {}
     state.book = null;
@@ -844,6 +1315,39 @@ document.getElementById("reader-close").addEventListener("click", () => {
   closeReaderView();
 });
 
+document.getElementById("reader-toc-btn").addEventListener("click", () => {
+  closeReaderMenu();
+  const toc = document.getElementById("reader-toc");
+  const typo = document.getElementById("reader-typo");
+  if (typo) typo.hidden = true;
+  if (toc) toc.hidden = !toc.hidden;
+});
+
+document.getElementById("reader-typo-btn").addEventListener("click", () => {
+  closeReaderMenu();
+  const toc = document.getElementById("reader-toc");
+  const typo = document.getElementById("reader-typo");
+  if (toc) toc.hidden = true;
+  fillTypoForm(loadTypo());
+  if (typo) typo.hidden = !typo.hidden;
+});
+
+document.getElementById("reader-toc-close").addEventListener("click", () => {
+  document.getElementById("reader-toc").hidden = true;
+});
+
+document.getElementById("reader-typo-close").addEventListener("click", () => {
+  document.getElementById("reader-typo").hidden = true;
+});
+
+document.getElementById("reader-typo-form").addEventListener("input", () => {
+  const typo = readTypoForm();
+  const sv = document.getElementById("typo-size-val");
+  if (sv) sv.textContent = `${typo.size}%`;
+  saveTypo(typo);
+  applyReaderTypography(typo);
+});
+
 document.getElementById("reader-prev").addEventListener("click", () => readerTurn("left"));
 document.getElementById("reader-next").addEventListener("click", () => readerTurn("right"));
 
@@ -860,6 +1364,7 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.key === "Escape") {
     closeReaderMenu();
+    closeReaderPanels();
     return;
   }
   if (e.key === "ArrowLeft") {
@@ -870,6 +1375,7 @@ document.addEventListener("keydown", (e) => {
     readerTurn("right");
   }
 });
+
 
 document.getElementById("wishlist-form").addEventListener("submit", async (e) => {
   e.preventDefault();

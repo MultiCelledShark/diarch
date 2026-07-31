@@ -9,6 +9,8 @@
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
 </head>
 <body>
   <div id="app">
@@ -160,6 +162,8 @@
               <div class="reader-menu-wrap">
                 <button type="button" id="reader-menu-btn" class="reader-menu-btn" aria-label="Reader menu" aria-haspopup="true" aria-expanded="false">☰</button>
                 <div id="reader-menu" class="reader-menu" hidden>
+                  <button type="button" id="reader-toc-btn">Contents</button>
+                  <button type="button" id="reader-typo-btn">Typography</button>
                   <button type="button" id="reader-scroll" aria-pressed="false">Infinite scroll</button>
                   <button type="button" id="reader-close">Close</button>
                 </div>
@@ -167,8 +171,52 @@
             </div>
           </div>
           <div class="reader-stage">
+            <aside id="reader-toc" class="reader-panel reader-toc" hidden aria-label="Table of contents">
+              <div class="reader-panel-head">
+                <strong>Contents</strong>
+                <button type="button" id="reader-toc-close" aria-label="Close contents">×</button>
+              </div>
+              <nav id="reader-toc-list" class="reader-toc-list"></nav>
+            </aside>
             <div id="epub-area"></div>
             <article id="md-area" hidden></article>
+            <aside id="reader-typo" class="reader-panel reader-typo" hidden aria-label="Typography">
+              <div class="reader-panel-head">
+                <strong>Typography</strong>
+                <button type="button" id="reader-typo-close" aria-label="Close typography">×</button>
+              </div>
+              <form id="reader-typo-form" class="reader-typo-form">
+                <fieldset>
+                  <legend>Palette</legend>
+                  <label><input type="radio" name="palette" value="dark" /> Dark</label>
+                  <label><input type="radio" name="palette" value="sepia" /> Sepia</label>
+                  <label><input type="radio" name="palette" value="light" /> Light</label>
+                </fieldset>
+                <fieldset>
+                  <legend>Font</legend>
+                  <label><input type="radio" name="font" value="serif" /> Serif</label>
+                  <label><input type="radio" name="font" value="sans" /> Sans</label>
+                  <label><input type="radio" name="font" value="mono" /> Mono</label>
+                </fieldset>
+                <label>Size
+                  <input type="range" name="size" min="80" max="160" step="5" />
+                  <span id="typo-size-val" class="typo-val"></span>
+                </label>
+                <fieldset>
+                  <legend>Line height</legend>
+                  <label><input type="radio" name="lineHeight" value="tight" /> Tight</label>
+                  <label><input type="radio" name="lineHeight" value="normal" /> Normal</label>
+                  <label><input type="radio" name="lineHeight" value="loose" /> Loose</label>
+                </fieldset>
+                <fieldset>
+                  <legend>Margins</legend>
+                  <label><input type="radio" name="measure" value="narrow" /> Narrow</label>
+                  <label><input type="radio" name="measure" value="medium" /> Medium</label>
+                  <label><input type="radio" name="measure" value="wide" /> Wide</label>
+                </fieldset>
+                <label class="check"><input type="checkbox" name="justify" /> Justify</label>
+              </form>
+            </aside>
           </div>
           <audio id="audio-player" controls hidden></audio>
         </div>

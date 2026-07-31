@@ -47,7 +47,7 @@ Default admin: `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` (defaults `admin` / `ad
 | **0 Bootstrap** | Done | Repo, workspace, seed, deploy notes |
 | **1 Auth + works + ACL + web shell + EPUB import** | **Complete** | Login, Library with import dropzone, metadata editor (status / taxonomy / year list), grants by username, wishlist, admin users. EPUB import extracts title/author and lands the book in the library. |
 | **2 Import polish** | **Complete** | PDF quarantine + side-by-side MD review; `ocrmypdf --skip-text` → `pdftohtml` → pandoc HTML→MD; PUT markdown; ISBN / title+author metadata enrich; confirm → EPUB |
-| **3 Readers** | API/MVP done | epub.js + MD scroll + manga RTL in web. No polish (TOC chrome, themes) |
+| **3 Readers** | **Complete** | epub.js + MD scroll + manga RTL; TOC panel; full typography suite (palette/font/size/line-height/margins/justify); review MD toolbar + live preview |
 | **4 Metadata / covers / wishlist** | API/MVP done | Open Library + LoC search, barcode wishlist, placeholder / LocalAI hooks. Cover gen needs LocalAI/Hermes configured |
 | **5 Audio** | API/MVP done | M4A upload + Range stream. No Audible/transcription wiring yet |
 | **6 StoryGraph / reMarkable / fixer** | API/MVP done | Pull+flags, rmapi send, health probes. Scrapers/CLI are fragile |
