@@ -14,6 +14,8 @@ pub struct MetaHit {
     #[serde(default)]
     pub subjects: Vec<String>,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_url: Option<String>,
 }
 
 /// Combined local (EPUB) + Open Library subjects mapped onto Diarch codes.
@@ -30,12 +32,104 @@ pub struct TaxonomyHint {
 
 pub async fn lookup_isbn(state: &AppState, isbn: &str) -> Result<Option<MetaHit>> {
     let isbn = isbn.replace('-', "");
+    if isbn.is_empty() {
+        return Ok(None);
+    }
+    if let Some(hit) = open_library_books_api(state, &isbn).await? {
+        let _ = state
+            .db
+            .set_integration_health("openlibrary", "ok", None, true)
+            .await;
+        return Ok(Some(hit));
+    }
     if let Some(hit) = open_library(state, &isbn).await? {
         let _ = state
             .db
             .set_integration_health("openlibrary", "ok", None, true)
             .await;
         return Ok(Some(hit));
+    }
+    if let Some(hit) = google_books_isbn(state, &isbn).await? {
+        let _ = state
+            .db
+            .set_integration_health("googlebooks", "ok", None, true)
+            .await;
+        return Ok(Some(hit));
+    }
+    Ok(None)
+}
+
+/// Download a cover image by ISBN (Open Library covers, then Google Books).
+pub async fn fetch_remote_cover(state: &AppState, isbn: &str) -> Result<Option<Vec<u8>>> {
+    let isbn = isbn.replace('-', "");
+    if isbn.is_empty() {
+        return Ok(None);
+    }
+    if let Some(bytes) = fetch_ol_cover_by_isbn(state, &isbn).await? {
+        return Ok(Some(bytes));
+    }
+    if let Some(hit) = lookup_isbn(state, &isbn).await? {
+        if let Some(url) = hit.cover_url {
+            if let Some(bytes) = fetch_image_url(state, &url).await? {
+                return Ok(Some(bytes));
+            }
+        }
+    }
+    if let Some(bytes) = fetch_google_books_cover(state, &isbn).await? {
+        return Ok(Some(bytes));
+    }
+    Ok(None)
+}
+
+async fn fetch_image_url(state: &AppState, url: &str) -> Result<Option<Vec<u8>>> {
+    let resp = state.http.get(url).send().await?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let ct = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !ct.starts_with("image/") {
+        return Ok(None);
+    }
+    let bytes = resp.bytes().await?;
+    // Open Library sometimes returns a tiny 1x1 GIF for missing covers.
+    if bytes.len() < 2_000 {
+        return Ok(None);
+    }
+    Ok(Some(bytes.to_vec()))
+}
+
+async fn fetch_ol_cover_by_isbn(state: &AppState, isbn: &str) -> Result<Option<Vec<u8>>> {
+    let url = format!("https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg");
+    fetch_image_url(state, &url).await
+}
+
+async fn fetch_google_books_cover(state: &AppState, isbn: &str) -> Result<Option<Vec<u8>>> {
+    let url = format!("https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}");
+    let resp = state.http.get(&url).send().await?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let v: Value = resp.json().await?;
+    let links = v
+        .pointer("/items/0/volumeInfo/imageLinks")
+        .cloned()
+        .unwrap_or(Value::Null);
+    for key in ["extraLarge", "large", "medium", "thumbnail", "smallThumbnail"] {
+        if let Some(u) = links.get(key).and_then(|x| x.as_str()) {
+            let mut u = u.replace("http://", "https://");
+            if let Some(stripped) = u.strip_suffix("&edge=curl") {
+                u = stripped.to_string();
+            }
+            u = u.replace("zoom=1", "zoom=0");
+            if let Some(bytes) = fetch_image_url(state, &u).await? {
+                return Ok(Some(bytes));
+            }
+        }
     }
     Ok(None)
 }
@@ -98,6 +192,99 @@ fn parse_ol_subjects(v: &Value) -> Vec<String> {
         .collect()
 }
 
+async fn open_library_books_api(state: &AppState, isbn: &str) -> Result<Option<MetaHit>> {
+    let url = format!(
+        "https://openlibrary.org/api/books?bibkeys=ISBN:{isbn}&format=json&jscmd=data"
+    );
+    let resp = state.http.get(&url).send().await?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let v: Value = resp.json().await?;
+    let key = format!("ISBN:{isbn}");
+    let Some(book) = v.get(&key) else {
+        return Ok(None);
+    };
+    let title = book
+        .get("title")
+        .and_then(|t| t.as_str())
+        .unwrap_or("Unknown")
+        .to_string();
+    let authors = book
+        .get("authors")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let description = book
+        .get("notes")
+        .and_then(|d| {
+            d.as_str().map(|s| s.to_string()).or_else(|| {
+                d.get("value")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string())
+            })
+        })
+        .or_else(|| {
+            book.get("excerpts")
+                .and_then(|e| e.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|x| x.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+        });
+    let subjects = book
+        .get("subjects")
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let cover_url = book
+        .pointer("/cover/large")
+        .or_else(|| book.pointer("/cover/medium"))
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string());
+    Ok(Some(MetaHit {
+        title,
+        authors,
+        isbn: Some(isbn.to_string()),
+        description,
+        subjects,
+        source: "openlibrary".into(),
+        cover_url,
+    }))
+}
+
+async fn resolve_ol_authors(state: &AppState, v: &Value) -> String {
+    let Some(arr) = v.get("authors").and_then(|a| a.as_array()) else {
+        return String::new();
+    };
+    let mut names = Vec::new();
+    for a in arr {
+        if let Some(name) = a.get("name").and_then(|n| n.as_str()) {
+            names.push(name.to_string());
+            continue;
+        }
+        let Some(key) = a.get("key").and_then(|k| k.as_str()) else {
+            continue;
+        };
+        let url = format!("https://openlibrary.org{key}.json");
+        if let Ok(resp) = state.http.get(&url).send().await {
+            if let Ok(av) = resp.json::<Value>().await {
+                if let Some(n) = av.get("name").and_then(|n| n.as_str()) {
+                    names.push(n.to_string());
+                }
+            }
+        }
+    }
+    names.join(", ")
+}
+
 async fn open_library(state: &AppState, isbn: &str) -> Result<Option<MetaHit>> {
     let url = format!("https://openlibrary.org/isbn/{isbn}.json");
     let resp = state.http.get(&url).send().await?;
@@ -110,21 +297,86 @@ async fn open_library(state: &AppState, isbn: &str) -> Result<Option<MetaHit>> {
         .and_then(|t| t.as_str())
         .unwrap_or("Unknown")
         .to_string();
-    let description = v
-        .get("description")
-        .and_then(|d| d.as_str().map(|s| s.to_string()).or_else(|| {
+    let description = v.get("description").and_then(|d| {
+        d.as_str().map(|s| s.to_string()).or_else(|| {
             d.get("value")
                 .and_then(|x| x.as_str())
                 .map(|s| s.to_string())
-        }));
+        })
+    });
     let subjects = parse_ol_subjects(&v);
+    let authors = resolve_ol_authors(state, &v).await;
     Ok(Some(MetaHit {
         title,
-        authors: String::new(),
+        authors,
         isbn: Some(isbn.to_string()),
         description,
         subjects,
         source: "openlibrary".into(),
+        cover_url: Some(format!("https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg")),
+    }))
+}
+
+async fn google_books_isbn(state: &AppState, isbn: &str) -> Result<Option<MetaHit>> {
+    let url = format!("https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}");
+    let resp = match state.http.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = state
+                .db
+                .set_integration_health("googlebooks", "broken", Some(&e.to_string()), false)
+                .await;
+            return Ok(None);
+        }
+    };
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let v: Value = resp.json().await?;
+    let Some(item) = v.pointer("/items/0/volumeInfo") else {
+        return Ok(None);
+    };
+    let title = item
+        .get("title")
+        .and_then(|t| t.as_str())
+        .unwrap_or("Unknown")
+        .to_string();
+    let authors = item
+        .get("authors")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let description = item
+        .get("description")
+        .and_then(|d| d.as_str())
+        .map(|s| s.to_string());
+    let subjects = item
+        .get("categories")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let cover_url = item
+        .pointer("/imageLinks/thumbnail")
+        .or_else(|| item.pointer("/imageLinks/smallThumbnail"))
+        .and_then(|u| u.as_str())
+        .map(|u| u.replace("http://", "https://").replace("zoom=1", "zoom=0"));
+    Ok(Some(MetaHit {
+        title,
+        authors,
+        isbn: Some(isbn.to_string()),
+        description,
+        subjects,
+        source: "googlebooks".into(),
+        cover_url,
     }))
 }
 
@@ -176,6 +428,7 @@ async fn open_library_search(
         author_name: Option<Vec<String>>,
         isbn: Option<Vec<String>>,
         first_sentence: Option<Vec<String>>,
+        cover_i: Option<i64>,
     }
     let s: Search = resp.json().await?;
     let _ = state
@@ -184,13 +437,24 @@ async fn open_library_search(
         .await;
     Ok(s.docs
         .into_iter()
-        .map(|d| MetaHit {
-            title: d.title.unwrap_or_else(|| "Unknown".into()),
-            authors: d.author_name.unwrap_or_default().join(", "),
-            isbn: d.isbn.and_then(|v| v.into_iter().next()),
-            description: d.first_sentence.and_then(|v| v.into_iter().next()),
-            subjects: vec![],
-            source: "openlibrary".into(),
+        .map(|d| {
+            let isbn = d.isbn.clone().and_then(|v| v.into_iter().next());
+            let cover_url = d
+                .cover_i
+                .map(|id| format!("https://covers.openlibrary.org/b/id/{id}-L.jpg"))
+                .or_else(|| {
+                    isbn.as_ref()
+                        .map(|i| format!("https://covers.openlibrary.org/b/isbn/{i}-L.jpg"))
+                });
+            MetaHit {
+                title: d.title.unwrap_or_else(|| "Unknown".into()),
+                authors: d.author_name.unwrap_or_default().join(", "),
+                isbn,
+                description: d.first_sentence.and_then(|v| v.into_iter().next()),
+                subjects: vec![],
+                source: "openlibrary".into(),
+                cover_url,
+            }
         })
         .collect())
 }
@@ -230,7 +494,6 @@ async fn loc_search(
         .db
         .set_integration_health("loc", "ok", None, true)
         .await;
-    // Very light XML scrape for dc:title / dc:creator
     let mut hits = Vec::new();
     for rec in text.split("<srw:record>").skip(1) {
         let t = extract_tag(rec, "dc:title").unwrap_or_else(|| title.to_string());
@@ -243,6 +506,7 @@ async fn loc_search(
             description: None,
             subjects: vec![],
             source: "loc".into(),
+            cover_url: None,
         });
     }
     Ok(hits)
@@ -313,10 +577,10 @@ pub async fn generate_cover_localai(
     state: &AppState,
     prompt: &str,
 ) -> Result<Option<Vec<u8>>> {
+    // Kept for future LocalAI/Hermes wiring; returns None when unset.
     let Some(base) = state.config.localai_url.as_ref() else {
         return Ok(None);
     };
-    // Prefer Hermes agent if configured
     if let Some(hermes) = state.config.hermes_url.as_ref() {
         let body = serde_json::json!({
             "task": "generate_book_cover",

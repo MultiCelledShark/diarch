@@ -199,6 +199,7 @@ function renderCards(el, works, empty = {}) {
     }
     if (w.primary_code) badges.push(taxonomyLabel(w.primary_code).split(" — ")[1] || `#${w.primary_code}`);
     if (w.needs_review) badges.push("review");
+    if (w.needs_cover) badges.push("needs cover");
     if (state.settings?.show_audio_gaps && w.needs_audio) badges.push("no audio");
     if (w.is_manga) badges.push("manga");
     card.innerHTML = `
@@ -321,20 +322,26 @@ async function openDetail(id) {
         <label>Year reading list
           <input name="year_list" type="number" value="${w.year_list ?? ""}" placeholder="${new Date().getFullYear()}" />
         </label>
+        <label>Description
+          <textarea name="description" rows="4" placeholder="Optional blurb">${escapeHtml(w.description || "")}</textarea>
+        </label>
         <label class="check"><input type="checkbox" name="is_manga" ${w.is_manga ? "checked" : ""} /> Manga / RTL</label>
         <div class="row">
           <button type="submit">Save metadata</button>
           <button type="button" id="btn-enrich-meta">Enrich from ISBN / search</button>
         </div>
+        <div id="meta-hits" class="meta-hits" hidden></div>
       </form>
-      <p class="muted">${hasEpub ? "EPUB ready" : "No EPUB yet"} · ${hasMd ? "Markdown ready" : "No Markdown"} · Direction: ${escapeHtml(w.reading_direction)}${w.needs_review ? " · Needs review" : ""}</p>
+      <p class="muted">${hasEpub ? "EPUB ready" : "No EPUB yet"} · ${hasMd ? "Markdown ready" : "No Markdown"} · Direction: ${escapeHtml(w.reading_direction)}${w.needs_review ? " · Needs review" : ""}${w.needs_cover ? " · Needs cover" : ""}</p>
       <div class="actions">
         ${hasEpub || hasMd ? `<button type="button" id="btn-read">Read</button>` : ""}
         <button type="button" id="btn-refresh-meta">Refresh metadata</button>
         <label class="btn-file">Replace / import file <input type="file" id="import-file" accept=".epub,.pdf,.md,.markdown" hidden /></label>
         ${hasEpub ? `<a href="/api/works/${w.id}/download/epub"><button type="button">Download EPUB</button></a>` : ""}
         ${hasMd ? `<a href="/api/works/${w.id}/download/markdown"><button type="button">Download MD</button></a>` : ""}
+        <button type="button" id="btn-fetch-cover"${w.isbn ? "" : " disabled title=\"Add an ISBN first\""}>Fetch cover</button>
         <label class="btn-file">Upload cover <input type="file" id="cover-file" accept="image/*" hidden /></label>
+        ${w.needs_cover ? `<button type="button" id="btn-clear-needs-cover">Dismiss needs cover</button>` : ""}
         ${state.user.is_admin ? `
           <label>Grant access
             <select id="grant-user">
@@ -413,6 +420,7 @@ async function openDetail(id) {
         title: fd.get("title"),
         authors: fd.get("authors"),
         isbn: fd.get("isbn") || null,
+        description: String(fd.get("description") || "").trim() || null,
         status: fd.get("status"),
         primary_code: primary,
         year_list: yearRaw ? Number(yearRaw) : null,
@@ -439,6 +447,46 @@ async function openDetail(id) {
       msg(e.message || String(e), true);
     }
   });
+  async function applyMetaHit(hit) {
+    const form = document.getElementById("detail-form");
+    if (!form || !hit) return;
+    form.title.value = hit.title || form.title.value;
+    if (hit.authors) form.authors.value = hit.authors;
+    if (hit.isbn) form.isbn.value = hit.isbn;
+    if (hit.description && form.description) form.description.value = hit.description;
+    await api(`/api/works/${w.id}`, {
+      method: "PUT",
+      json: {
+        title: form.title.value,
+        authors: form.authors.value,
+        isbn: form.isbn.value || null,
+        description: form.description?.value || hit.description || null,
+      },
+    });
+    msg(`Applied metadata from ${hit.source || "lookup"}`);
+    await openDetail(w.id);
+  }
+
+  function showMetaHits(hits) {
+    const box = document.getElementById("meta-hits");
+    if (!box) return;
+    if (!hits?.length) {
+      box.hidden = true;
+      box.innerHTML = "";
+      return;
+    }
+    box.hidden = false;
+    box.innerHTML = `<p class="muted">Pick a match:</p>` + hits.map((h, i) => `
+      <button type="button" class="meta-hit" data-hit="${i}">
+        <strong>${escapeHtml(h.title || "Untitled")}</strong>
+        <span>${escapeHtml(h.authors || "Unknown author")}</span>
+        <span class="muted">${escapeHtml(h.source || "")}${h.isbn ? " · " + escapeHtml(h.isbn) : ""}</span>
+      </button>`).join("");
+    box.querySelectorAll(".meta-hit").forEach((btn) => {
+      btn.addEventListener("click", () => applyMetaHit(hits[Number(btn.dataset.hit)]));
+    });
+  }
+
   document.getElementById("btn-enrich-meta")?.addEventListener("click", async () => {
     const form = document.getElementById("detail-form");
     const fd = new FormData(form);
@@ -446,38 +494,59 @@ async function openDetail(id) {
     const title = String(fd.get("title") || "").trim();
     const authors = String(fd.get("authors") || "").trim();
     msg(isbn ? `Looking up ISBN ${isbn}…` : "Searching Open Library / LoC…");
+    showMetaHits([]);
     try {
-      let hit = null;
       if (isbn) {
-        hit = await api(`/api/metadata/isbn/${encodeURIComponent(isbn)}`);
+        const hit = await api(`/api/metadata/isbn/${encodeURIComponent(isbn)}`);
+        if (hit) {
+          await applyMetaHit(hit);
+          return;
+        }
       }
-      if (!hit && title) {
-        const q = new URLSearchParams({ title });
-        if (authors) q.set("author", authors);
-        const hits = await api(`/api/metadata/search?${q}`);
-        hit = Array.isArray(hits) && hits.length ? hits[0] : null;
-      }
-      if (!hit) {
+      if (!title) {
         msg("No metadata match found", true);
         return;
       }
-      form.title.value = hit.title || form.title.value;
-      if (hit.authors) form.authors.value = hit.authors;
-      if (hit.isbn) form.isbn.value = hit.isbn;
-      await api(`/api/works/${w.id}`, {
-        method: "PUT",
-        json: {
-          title: form.title.value,
-          authors: form.authors.value,
-          isbn: form.isbn.value || null,
-          description: hit.description || undefined,
-        },
-      });
-      msg(`Applied metadata from ${hit.source || "lookup"}`);
+      const q = new URLSearchParams({ title });
+      if (authors) q.set("author", authors);
+      const hits = await api(`/api/metadata/search?${q}`);
+      if (!Array.isArray(hits) || !hits.length) {
+        msg("No metadata match found", true);
+        return;
+      }
+      if (hits.length === 1) {
+        await applyMetaHit(hits[0]);
+        return;
+      }
+      msg(`Found ${hits.length} matches — pick one`);
+      showMetaHits(hits);
+    } catch (e) {
+      msg(e.message || String(e), true);
+    }
+  });
+
+  document.getElementById("btn-fetch-cover")?.addEventListener("click", async () => {
+    msg("Fetching cover from Open Library / Google Books…");
+    try {
+      const r = await api(`/api/works/${w.id}/cover/fetch`, { method: "POST" });
+      if (!r?.ok) {
+        msg(r?.message || "No remote cover found", true);
+        return;
+      }
+      msg("Cover fetched");
       await openDetail(w.id);
     } catch (e) {
       msg(e.message || String(e), true);
     }
+  });
+
+  document.getElementById("btn-clear-needs-cover")?.addEventListener("click", async () => {
+    await api(`/api/works/${w.id}/flags/clear`, {
+      method: "POST",
+      json: { flags: ["needs_cover"] },
+    });
+    msg("Cleared needs_cover");
+    await openDetail(w.id);
   });
   if (w.needs_review) {
     wireReviewMarkdownEditor(w.id, msg);

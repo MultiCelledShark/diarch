@@ -48,10 +48,11 @@ Default admin: `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` (defaults `admin` / `ad
 | **1 Auth + works + ACL + web shell + EPUB import** | **Complete** | Login, Library with import dropzone, metadata editor (status / taxonomy / year list), grants by username, wishlist, admin users. EPUB import extracts title/author and lands the book in the library. |
 | **2 Import polish** | **Complete** | PDF quarantine + side-by-side MD review; `ocrmypdf --skip-text` → `pdftohtml` → pandoc HTML→MD; PUT markdown; ISBN / title+author metadata enrich; confirm → EPUB |
 | **3 Readers** | **Complete** | epub.js + MD scroll + manga RTL; TOC panel; full typography suite (palette/font/size/line-height/margins/justify); review MD toolbar + live preview |
-| **4 Metadata / covers / wishlist** | API/MVP done | Open Library + LoC search, barcode wishlist, placeholder / LocalAI hooks. Cover gen needs LocalAI/Hermes configured |
+| **4 Metadata / covers / wishlist** | **Complete** | OL + Google Books + LoC; ISBN authors fixed; remote cover fetch; wishlist enrich + barcode; extract/placeholder/upload covers. LocalAI/Hermes deferred → Phase 8 |
 | **5 Audio** | API/MVP done | M4A upload + Range stream. No Audible/transcription wiring yet |
 | **6 StoryGraph / reMarkable / fixer** | API/MVP done | Pull+flags, rmapi send, health probes. Scrapers/CLI are fragile |
 | **7 Android / KOReader** | Not done | Docs/stubs only |
+| **8 Deferred AI + skipped polish** | Not started | Circle-back: LocalAI/Hermes covers, staged approve, and other optionals parked below |
 | **Regression tests** | Done | `cargo test --workspace` (~32 tests) |
 
 ### What you should see after login
@@ -105,4 +106,31 @@ diarch-server (Axum) ── SQLite ── /var/lib/diarch/library
 
 ---
 
-*Update this table when a phase moves from API/MVP → polished, or when Phase 7 starts.*
+## Phase 8 — Deferred AI + skipped polish (circle-back)
+
+Parked until LocalAI / Hermes (or equivalent) is ready on Keystone, and until earlier phases are polished enough to care. Do **not** block Phases 5–7 on this.
+
+### LocalAI / Hermes covers
+
+- Wire `DIARCH_LOCALAI_URL` / `DIARCH_HERMES_URL` for real image generation (stubs already exist: `POST /api/works/{id}/cover/generate`, `GET …/cover/prompt`).
+- Web UI: **Generate cover** on work detail; show prompt; show result.
+- **Staged approve:** write candidate to e.g. `cover.candidate.jpg` (or blob), preview beside current cover, then **Approve → `cover.jpg`** / Discard. Do not overwrite `cover.jpg` until approve.
+- Clear `needs_cover` only on approve (or explicit dismiss).
+- Health probe row for LocalAI/Hermes in Admin integrations.
+
+### Other optionals skipped earlier
+
+| Origin | Item |
+|--------|------|
+| Phase 3 | Server-persisted reader typography (today: `localStorage` only) |
+| Phase 3 | Richer MD review editor (CodeMirror/Monaco) if toolbar+preview is not enough |
+| Phase 4 | Cover “reset to placeholder” / regenerate SVG from current title+authors |
+| Phase 4 | Attention one-click clear for soft flags without opening detail |
+| Product | ebook2audiobook desktop watcher — [TODO-ebook2audiobook-watcher.md](TODO-ebook2audiobook-watcher.md) |
+| Later | Anything else deliberately deferred from Phases 5–7 that should not live in those phases’ MVP |
+
+Audible / transcription / Android / KOReader stay owned by Phases 5 and 7; list them here only if they get deferred out of those phases later.
+
+---
+
+*Update this table when a phase moves from API/MVP → polished, or when Phase 7 / 8 starts.*

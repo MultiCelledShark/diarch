@@ -98,6 +98,39 @@ main { padding: 1.25rem; }
 .btn-file:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .detail-form { max-width: none; margin-bottom: 1rem; }
 .detail-form .check { display: flex; align-items: center; gap: 0.5rem; }
+.detail-form textarea {
+  display: block;
+  width: 100%;
+  margin-top: 0.35rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #0f1814;
+  color: var(--ink);
+  font: inherit;
+  resize: vertical;
+}
+.meta-hits {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.75rem;
+  padding: 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #0f1814;
+}
+.meta-hits[hidden] { display: none !important; }
+.meta-hit {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  width: 100%;
+  text-align: left;
+  padding: 0.55rem 0.65rem;
+}
+.meta-hit span { color: var(--muted); font-size: 0.85rem; }
 .muted { color: var(--muted); }
 #detail-msg.error, .error { color: var(--danger); white-space: pre-wrap; }
 .view-heading { margin: 0; margin-right: auto; font-size: 1.35rem; color: var(--ink); }

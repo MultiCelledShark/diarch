@@ -45,6 +45,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/works/{id}/download/epub", get(download_epub))
         .route("/api/works/{id}/download/markdown", get(download_md))
         .route("/api/works/{id}/cover", get(get_cover).post(upload_cover))
+        .route("/api/works/{id}/cover/fetch", post(fetch_cover))
         .route("/api/works/{id}/cover/generate", post(generate_cover))
         .route("/api/works/{id}/cover/prompt", get(cover_prompt))
         .route("/api/works/{id}/audio", post(upload_audio))
@@ -874,26 +875,69 @@ async fn upload_cover(
     }
     while let Some(field) = multipart.next_field().await.map_err(|_| StatusCode::BAD_REQUEST)? {
         let data = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
-        let dest = state.config.work_dir(id).join("cover.jpg");
-        tokio::fs::write(&dest, &data)
+        apply_cover_bytes(&state, id, &data)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        if let Some(mut w) = state.db.get_work(id).await.ok().flatten() {
-            w.needs_cover = false;
-            let _ = state.db.update_work(&w).await;
-        }
-        let asset = WorkAsset {
-            id: Uuid::new_v4(),
-            work_id: id,
-            kind: AssetKind::Cover,
-            relative_path: "cover.jpg".into(),
-            mime: Some("image/jpeg".into()),
-            bytes: Some(data.len() as i64),
-            created_at: Utc::now(),
-        };
-        let _ = state.db.add_asset(&asset).await;
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn apply_cover_bytes(state: &AppState, id: Uuid, data: &[u8]) -> anyhow::Result<()> {
+    let dest = state.config.work_dir(id).join("cover.jpg");
+    tokio::fs::write(&dest, data).await?;
+    if let Some(mut w) = state.db.get_work(id).await.ok().flatten() {
+        w.needs_cover = false;
+        w.updated_at = Utc::now();
+        let _ = state.db.update_work(&w).await;
+    }
+    let asset = WorkAsset {
+        id: Uuid::new_v4(),
+        work_id: id,
+        kind: AssetKind::Cover,
+        relative_path: "cover.jpg".into(),
+        mime: Some("image/jpeg".into()),
+        bytes: Some(data.len() as i64),
+        created_at: Utc::now(),
+    };
+    let _ = state.db.add_asset(&asset).await;
+    Ok(())
+}
+
+async fn fetch_cover(
+    AuthUser(user): AuthUser,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let work = state
+        .db
+        .get_work(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let Some(isbn) = work.isbn.as_deref().filter(|s| !s.is_empty()) else {
+        return Ok(Json(serde_json::json!({
+            "ok": false,
+            "message": "No ISBN on this work — add an ISBN first"
+        })));
+    };
+    match metadata::fetch_remote_cover(&state, isbn)
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?
+    {
+        Some(bytes) => {
+            apply_cover_bytes(&state, id, &bytes)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            Ok(Json(serde_json::json!({ "ok": true })))
+        }
+        None => Ok(Json(serde_json::json!({
+            "ok": false,
+            "message": "No remote cover found for this ISBN"
+        }))),
+    }
 }
 
 async fn generate_cover(
@@ -915,25 +959,28 @@ async fn generate_cover(
         .map(|c| c.to_string())
         .unwrap_or_else(|| "general".into());
     let prompt = metadata::cover_prompt(&work.title, &work.authors, &genre);
+    // LocalAI/Hermes not wired for Phase 4 — leave endpoint stubbed.
+    if state.config.localai_url.is_none() && state.config.hermes_url.is_none() {
+        return Ok(Json(serde_json::json!({
+            "ok": false,
+            "prompt": prompt,
+            "message": "LocalAI/Hermes not configured; use Fetch cover or Upload"
+        })));
+    }
     match metadata::generate_cover_localai(&state, &prompt)
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?
     {
         Some(bytes) => {
-            let dest = state.config.work_dir(id).join("cover.jpg");
-            tokio::fs::write(&dest, &bytes)
+            apply_cover_bytes(&state, id, &bytes)
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            if let Some(mut w) = state.db.get_work(id).await.ok().flatten() {
-                w.needs_cover = false;
-                let _ = state.db.update_work(&w).await;
-            }
             Ok(Json(serde_json::json!({ "ok": true, "prompt": prompt })))
         }
         None => Ok(Json(serde_json::json!({
             "ok": false,
             "prompt": prompt,
-            "message": "LocalAI/Hermes unavailable; use prompt manually"
+            "message": "LocalAI/Hermes unavailable; use Fetch cover or Upload"
         }))),
     }
 }
@@ -1326,6 +1373,19 @@ async fn refresh_metadata(
         .update_work(&work)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Best-effort remote cover when still on placeholder.
+    if work.needs_cover {
+        if let Some(isbn_v) = work.isbn.as_deref().filter(|s| !s.is_empty()) {
+            if let Ok(Some(bytes)) = metadata::fetch_remote_cover(&state, isbn_v).await {
+                let _ = apply_cover_bytes(&state, id, &bytes).await;
+                if let Ok(Some(updated)) = state.db.get_work(id).await {
+                    return Ok(Json(updated));
+                }
+            }
+        }
+    }
+
     Ok(Json(work))
 }
 
@@ -1415,13 +1475,13 @@ async fn wishlist_add(
         return Err((StatusCode::BAD_REQUEST, "title or isbn required".into()));
     }
 
-    create_work(
+    let (status, Json(work)) = create_work(
         AuthUser(user),
-        State(state),
+        State(state.clone()),
         Json(CreateWorkReq {
             title,
             authors: Some(authors),
-            isbn,
+            isbn: isbn.clone(),
             description,
             status: Some("wishlist".into()),
             codes: body.codes,
@@ -1432,6 +1492,18 @@ async fn wishlist_add(
         }),
     )
     .await
+    .map_err(|(s, e)| (s, e))?;
+
+    if let Some(isbn_v) = work.isbn.as_deref().filter(|s| !s.is_empty()) {
+        if let Ok(Some(bytes)) = metadata::fetch_remote_cover(&state, isbn_v).await {
+            let _ = apply_cover_bytes(&state, work.id, &bytes).await;
+            if let Ok(Some(updated)) = state.db.get_work(work.id).await {
+                return Ok((status, Json(updated)));
+            }
+        }
+    }
+
+    Ok((status, Json(work)))
 }
 
 async fn meta_isbn(
