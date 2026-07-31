@@ -557,9 +557,22 @@ function updateMarkdownProgressUi(area) {
 }
 
 function updateEpubProgressUi(loc) {
-  if (!loc?.start) return;
-  const pct = Math.round((loc.start.percentage || 0) * 100);
+  if (!loc?.start?.cfi) return 0;
+  let pct = 0;
+  try {
+    if (state.book?.locations && state.epubLocationsReady) {
+      const frac = state.book.locations.percentageFromCfi(loc.start.cfi);
+      if (Number.isFinite(frac)) pct = Math.round(Math.min(1, Math.max(0, frac)) * 100);
+    } else if (Number.isFinite(loc.start.percentage)) {
+      pct = Math.round(Math.min(1, Math.max(0, loc.start.percentage)) * 100);
+    }
+  } catch {
+    if (Number.isFinite(loc.start.percentage)) {
+      pct = Math.round(Math.min(1, Math.max(0, loc.start.percentage)) * 100);
+    }
+  }
   setReaderProgress(`${pct}% read`);
+  return pct;
 }
 
 async function loadMarkdown(id) {
@@ -607,6 +620,7 @@ async function loadEpub(w) {
     // Pass ArrayBuffer so epub.js opens as binary (blob: URLs lack .epub and are
     // mis-detected as directories). Requires JSZip loaded before epub.js in index.html.
     state.book = ePub(buf);
+    state.epubLocationsReady = false;
     // Force layout after unhiding reader so flex #epub-area has real size.
     void area.offsetHeight;
     const width = Math.max(area.clientWidth || 0, window.innerWidth || 320);
@@ -639,14 +653,39 @@ async function loadEpub(w) {
       });
     }
     await state.book.ready;
+
+    // Locations are required for a real % through the book; cache per work.
+    const locKey = `diarch-epub-loc:${w.id}`;
+    setReaderProgress("…");
+    try {
+      const stored = localStorage.getItem(locKey);
+      if (stored) {
+        state.book.locations.load(stored);
+        state.epubLocationsReady = true;
+      } else {
+        await state.book.locations.generate(1024);
+        state.epubLocationsReady = true;
+        try {
+          localStorage.setItem(locKey, state.book.locations.save());
+        } catch {}
+      }
+    } catch {
+      try {
+        await state.book.locations.generate(1024);
+        state.epubLocationsReady = true;
+      } catch {
+        state.epubLocationsReady = false;
+      }
+    }
+
     const prog = await api(`/api/works/${w.id}/progress?mode=epub`).catch(() => null);
     if (prog?.position) await state.rendition.display(prog.position);
     else await state.rendition.display();
     state.rendition.on("relocated", (loc) => {
-      updateEpubProgressUi(loc);
+      const percent = updateEpubProgressUi(loc);
       api(`/api/works/${w.id}/progress`, {
         method: "PUT",
-        json: { mode: "epub", position: loc.start.cfi, percent: loc.start.percentage * 100 },
+        json: { mode: "epub", position: loc.start.cfi, percent },
       }).catch(() => {});
     });
     try {
