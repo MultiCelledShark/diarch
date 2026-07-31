@@ -50,7 +50,11 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/works/{id}/audio", post(upload_audio))
         .route("/api/works/{id}/audio/{filename}", get(stream_audio))
         .route("/api/works/{id}/progress", get(get_progress).put(put_progress))
-        .route("/api/works/{id}/content/markdown", get(get_markdown))
+        .route(
+            "/api/works/{id}/content/markdown",
+            get(get_markdown).put(put_markdown),
+        )
+        .route("/api/works/{id}/content/pdf", get(get_pdf_file))
         .route("/api/works/{id}/content/epub", get(get_epub_file))
         .route("/api/works/{id}/remarkable", post(send_remarkable))
         .route("/api/works/{id}/flags/clear", post(clear_flags))
@@ -313,10 +317,12 @@ async fn get_work(
         .ok_or(StatusCode::NOT_FOUND)?;
     let codes = state.db.work_codes(id).await.unwrap_or_default();
     let assets = state.db.list_assets(id).await.unwrap_or_default();
+    let has_import_pdf = state.config.work_dir(id).join("import.pdf").exists();
     Ok(Json(serde_json::json!({
         "work": work,
         "codes": codes,
         "assets": assets,
+        "has_import_pdf": has_import_pdf,
     })))
 }
 
@@ -1115,6 +1121,73 @@ async fn get_markdown(
     Ok(([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], data).into_response())
 }
 
+async fn put_markdown(
+    AuthUser(user): AuthUser,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    body: String,
+) -> Result<StatusCode, StatusCode> {
+    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let dir = state.config.work_dir(id);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let path = dir.join("book.md");
+    tokio::fs::write(&path, body.as_bytes())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Do not clear needs_review — confirm_epub owns that transition.
+    if let Some(mut work) = state.db.get_work(id).await.ok().flatten() {
+        work.updated_at = Utc::now();
+        let _ = state.db.update_work(&work).await;
+    }
+    let assets = state.db.list_assets(id).await.unwrap_or_default();
+    if !assets.iter().any(|a| a.kind == AssetKind::Markdown) {
+        let meta = tokio::fs::metadata(&path)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let asset = WorkAsset {
+            id: Uuid::new_v4(),
+            work_id: id,
+            kind: AssetKind::Markdown,
+            relative_path: "book.md".into(),
+            mime: Some("text/markdown".into()),
+            bytes: Some(meta.len() as i64),
+            created_at: Utc::now(),
+        };
+        let _ = state.db.add_asset(&asset).await;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_pdf_file(
+    AuthUser(user): AuthUser,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, StatusCode> {
+    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let path = state.config.work_dir(id).join("import.pdf");
+    let data = tokio::fs::read(&path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/pdf"),
+            (
+                header::CONTENT_DISPOSITION,
+                "inline; filename=\"import.pdf\"",
+            ),
+        ],
+        data,
+    )
+        .into_response())
+}
+
 async fn get_epub_file(
     AuthUser(user): AuthUser,
     State(state): State<Arc<AppState>>,
@@ -1192,6 +1265,40 @@ async fn refresh_metadata(
     }
     if (work.title.is_empty() || work.title == "Untitled") && meta.title.is_some() {
         work.title = meta.title.unwrap();
+    } else if let Some(t) = hint.title {
+        if work.title.is_empty() || work.title == "Untitled" {
+            work.title = t;
+        }
+    }
+
+    // Title+author search (Open Library → LoC) when ISBN path left gaps.
+    let need_search = work.isbn.is_none()
+        || work.authors.is_empty()
+        || work.description.is_none()
+        || work.title.is_empty()
+        || work.title == "Untitled";
+    if need_search && !work.title.is_empty() && work.title != "Untitled" {
+        let author_ref = if work.authors.is_empty() {
+            None
+        } else {
+            Some(work.authors.as_str())
+        };
+        if let Ok(hits) = metadata::search_title(&state, &work.title, author_ref).await {
+            if let Some(hit) = hits.into_iter().next() {
+                if work.isbn.is_none() {
+                    work.isbn = hit.isbn;
+                }
+                if work.authors.is_empty() && !hit.authors.is_empty() {
+                    work.authors = hit.authors;
+                }
+                if work.description.is_none() {
+                    work.description = hit.description;
+                }
+                if (work.title.is_empty() || work.title == "Untitled") && !hit.title.is_empty() {
+                    work.title = hit.title;
+                }
+            }
+        }
     }
 
     let mut codes = state.db.work_codes(id).await.unwrap_or_default();

@@ -5,6 +5,7 @@ use crate::state::AppState;
 /// Probe integrations and attempt simple repairs.
 pub async fn probe_all(state: &AppState) {
     probe_pandoc(state).await;
+    probe_ocrmypdf(state).await;
     probe_openlibrary(state).await;
     if state.config.storygraph_username.is_some() {
         let _ = crate::storygraph::pull_lists(state).await;
@@ -54,6 +55,31 @@ async fn probe_pandoc(state: &AppState) {
     }
 }
 
+async fn probe_ocrmypdf(state: &AppState) {
+    let ok = tokio::process::Command::new("ocrmypdf")
+        .arg("--version")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if ok {
+        let _ = state
+            .db
+            .set_integration_health("ocrmypdf", "ok", None, true)
+            .await;
+    } else {
+        let _ = state
+            .db
+            .set_integration_health(
+                "ocrmypdf",
+                "broken",
+                Some("ocrmypdf missing (required for PDF import)"),
+                false,
+            )
+            .await;
+    }
+}
+
 async fn probe_openlibrary(state: &AppState) {
     match state
         .http
@@ -80,6 +106,10 @@ pub async fn repair(state: &AppState, name: &str) -> Result<(), String> {
     match name {
         "pandoc" => {
             probe_pandoc(state).await;
+            Ok(())
+        }
+        "ocrmypdf" => {
+            probe_ocrmypdf(state).await;
             Ok(())
         }
         "openlibrary" | "loc" => {

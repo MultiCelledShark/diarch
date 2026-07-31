@@ -143,6 +143,52 @@ main { padding: 1.25rem; }
 .detail img { width: 180px; border: 1px solid var(--line); }
 .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
 
+.review-workspace {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-top: 1.5rem;
+  min-height: 60vh;
+}
+.review-pane h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  color: var(--accent);
+  font-family: var(--font-display);
+}
+.review-pdf iframe {
+  width: 100%;
+  min-height: 60vh;
+  height: 100%;
+  border: 1px solid var(--line);
+  background: #0f1814;
+}
+.review-md {
+  display: flex;
+  flex-direction: column;
+  min-height: 60vh;
+}
+.review-md textarea {
+  flex: 1;
+  width: 100%;
+  min-height: 50vh;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #0f1814;
+  color: var(--ink);
+  font-family: ui-monospace, "Cascadia Code", "Source Code Pro", monospace;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  resize: vertical;
+}
+.review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
 #view-reader {
   position: fixed; inset: 0; background: #0a100e; z-index: 20;
   flex-direction: column;
@@ -246,6 +292,7 @@ main { padding: 1.25rem; }
 
 @media (max-width: 720px) {
   .detail { grid-template-columns: 1fr; }
+  .review-workspace { grid-template-columns: 1fr; }
   .top { flex-wrap: wrap; }
   #reader-title { font-size: 0.9rem; }
 }

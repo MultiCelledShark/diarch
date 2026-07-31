@@ -1,4 +1,5 @@
 use diarch_import::{export_needs_tts_queue, ingest_file, zip_markdown_bundle};
+use std::path::Path;
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -82,4 +83,83 @@ async fn pandoc_markdown_to_epub_when_available() {
     let epub = diarch_import::confirm_markdown_to_epub(&lib, id).await.unwrap();
     assert!(epub.exists());
     assert!(epub.metadata().unwrap().len() > 100);
+}
+
+fn tools_available() -> bool {
+    let pandoc = std::process::Command::new("pandoc")
+        .arg("--version")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let ocr = std::process::Command::new("ocrmypdf")
+        .arg("--version")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let pdftohtml = std::path::Path::new("/usr/bin/pdftohtml").is_file()
+        || std::env::var_os("PATH")
+            .map(|paths| {
+                std::env::split_paths(&paths)
+                    .any(|p| p.join("pdftohtml").is_file())
+            })
+            .unwrap_or(false);
+    pandoc && ocr && pdftohtml
+}
+
+/// PDF fixture generated with ghostscript (pandoc 3 cannot emit PDF without LaTeX).
+fn write_sample_pdf(path: &std::path::Path) {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures_sample.pdf");
+    if fixture.exists() {
+        std::fs::copy(&fixture, path).unwrap();
+        return;
+    }
+    // Fallback: invoke gs if fixture missing
+    let ps = path.with_extension("ps");
+    std::fs::write(
+        &ps,
+        b"%!PS\n/Helvetica findfont 24 scalefont setfont\n72 720 moveto\n(Hello Diarch) show\nshowpage\n",
+    )
+    .unwrap();
+    let status = std::process::Command::new("gs")
+        .args(["-q", "-sDEVICE=pdfwrite", "-o"])
+        .arg(path)
+        .arg(&ps)
+        .status()
+        .expect("ghostscript");
+    assert!(status.success());
+    let _ = std::fs::remove_file(ps);
+}
+
+#[tokio::test]
+async fn pdf_ingest_quarantines_and_makes_markdown() {
+    if !tools_available() {
+        eprintln!("skipping: pandoc, ocrmypdf, or pdftohtml not available");
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let lib = dir.path().join("library");
+    let id = Uuid::new_v4();
+    let src = dir.path().join("sample.pdf");
+    write_sample_pdf(&src);
+    let result = ingest_file(&lib, id, &src, "My_Sample_Book.pdf")
+        .await
+        .expect("pdf ingest");
+    assert!(result.needs_review);
+    assert!(result.epub_path.is_none());
+    let quarantine = lib.join(id.to_string()).join("import.pdf");
+    assert!(quarantine.exists(), "import.pdf quarantine missing");
+    let md = result.markdown_path.expect("markdown path");
+    assert!(md.exists());
+    let text = tokio::fs::read_to_string(&md).await.unwrap();
+    assert!(
+        text.to_ascii_lowercase().contains("hello") || text.to_ascii_lowercase().contains("diarch"),
+        "unexpected md: {text}"
+    );
+
+    // confirm deletes quarantine PDF
+    let epub = diarch_import::confirm_markdown_to_epub(&lib, id)
+        .await
+        .expect("confirm");
+    assert!(epub.exists());
+    assert!(!quarantine.exists(), "import.pdf should be removed on confirm");
 }

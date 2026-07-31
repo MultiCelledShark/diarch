@@ -19,7 +19,7 @@ Default admin: `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` (defaults `admin` / `ad
 ## Locked product rules
 
 - **Canonical storage:** EPUB + Markdown(+media) + optional M4A. PDFs only in the import box (not retained).
-- **PDF path:** PDF → Markdown (`needs_review`) → confirm → EPUB via pandoc.
+- **PDF path:** PDF → OCR (`ocrmypdf`) → Markdown via pdftohtml+pandoc (`needs_review`) → confirm → EPUB via pandoc.
 - **EPUB path:** store EPUB; derive Markdown with pandoc.
 - **Taxonomy:** multi-code on every work; **primary** = most specific subgenre (e.g. Epic Fantasy `8201`).
 - **StoryGraph:** pull + flags only (no write-back required); manual clear after you update SG.
@@ -46,7 +46,7 @@ Default admin: `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` (defaults `admin` / `ad
 |-------|--------|---------|
 | **0 Bootstrap** | Done | Repo, workspace, seed, deploy notes |
 | **1 Auth + works + ACL + web shell + EPUB import** | **Complete** | Login, Library with import dropzone, metadata editor (status / taxonomy / year list), grants by username, wishlist, admin users. EPUB import extracts title/author and lands the book in the library. |
-| **2 Import polish** | API/MVP | PDF→MD review path, MD zip download; deeper PDF/OCR polish still open |
+| **2 Import polish** | **Complete** | PDF quarantine + side-by-side MD review; `ocrmypdf --skip-text` → `pdftohtml` → pandoc HTML→MD; PUT markdown; ISBN / title+author metadata enrich; confirm → EPUB |
 | **3 Readers** | API/MVP done | epub.js + MD scroll + manga RTL in web. No polish (TOC chrome, themes) |
 | **4 Metadata / covers / wishlist** | API/MVP done | Open Library + LoC search, barcode wishlist, placeholder / LocalAI hooks. Cover gen needs LocalAI/Hermes configured |
 | **5 Audio** | API/MVP done | M4A upload + Range stream. No Audible/transcription wiring yet |
@@ -84,7 +84,7 @@ Clients (Web :8083, Android later)
         ▼
 diarch-server (Axum) ── SQLite ── /var/lib/diarch/library
         │
-        ├── pandoc (import)
+        ├── pandoc + ocrmypdf + pdftohtml (PDF import)
         ├── Open Library / LoC
         ├── LocalAI / Hermes (covers)
         ├── StoryGraph (pull)

@@ -289,6 +289,7 @@ async function openDetail(id) {
   const assets = data.assets || [];
   const hasEpub = assets.some((a) => a.kind === "epub");
   const hasMd = assets.some((a) => a.kind === "markdown");
+  const hasImportPdf = !!data.has_import_pdf;
   const audio = assets.find((a) => a.kind === "audio");
   const codes = data.codes || [];
 
@@ -323,14 +324,14 @@ async function openDetail(id) {
         <label class="check"><input type="checkbox" name="is_manga" ${w.is_manga ? "checked" : ""} /> Manga / RTL</label>
         <div class="row">
           <button type="submit">Save metadata</button>
+          <button type="button" id="btn-enrich-meta">Enrich from ISBN / search</button>
         </div>
       </form>
-      <p class="muted">${hasEpub ? "EPUB ready" : "No EPUB yet"} · ${hasMd ? "Markdown ready" : "No Markdown"} · Direction: ${escapeHtml(w.reading_direction)}</p>
+      <p class="muted">${hasEpub ? "EPUB ready" : "No EPUB yet"} · ${hasMd ? "Markdown ready" : "No Markdown"} · Direction: ${escapeHtml(w.reading_direction)}${w.needs_review ? " · Needs review" : ""}</p>
       <div class="actions">
         ${hasEpub || hasMd ? `<button type="button" id="btn-read">Read</button>` : ""}
         <button type="button" id="btn-refresh-meta">Refresh metadata</button>
         <label class="btn-file">Replace / import file <input type="file" id="import-file" accept=".epub,.pdf,.md,.markdown" hidden /></label>
-        ${w.needs_review ? `<button type="button" id="btn-confirm">Confirm → EPUB</button>` : ""}
         ${hasEpub ? `<a href="/api/works/${w.id}/download/epub"><button type="button">Download EPUB</button></a>` : ""}
         ${hasMd ? `<a href="/api/works/${w.id}/download/markdown"><button type="button">Download MD</button></a>` : ""}
         <label class="btn-file">Upload cover <input type="file" id="cover-file" accept="image/*" hidden /></label>
@@ -345,6 +346,25 @@ async function openDetail(id) {
           <button type="button" id="btn-grant">Grant</button>
         ` : ""}
       </div>
+      ${w.needs_review ? `
+      <section class="review-workspace" aria-label="Import review">
+        <div class="review-pane review-pdf">
+          <h3>Source PDF</h3>
+          ${hasImportPdf
+            ? `<iframe title="Quarantined PDF" src="/api/works/${w.id}/content/pdf"></iframe>`
+            : `<p class="muted">No quarantine PDF (markdown-only import).</p>`}
+        </div>
+        <div class="review-pane review-md">
+          <h3>Markdown</h3>
+          <textarea id="review-md-editor" spellcheck="false" placeholder="Loading…"></textarea>
+          <div class="review-actions">
+            <button type="button" id="btn-save-md">Save markdown</button>
+            <a href="/api/works/${w.id}/download/markdown"><button type="button">Download MD</button></a>
+            <button type="button" id="btn-confirm">Confirm → EPUB</button>
+          </div>
+        </div>
+      </section>
+      ` : ""}
       <pre id="detail-msg"></pre>
     </div>`;
 
@@ -396,6 +416,72 @@ async function openDetail(id) {
       msg(e.message || String(e), true);
     }
   });
+  document.getElementById("btn-enrich-meta")?.addEventListener("click", async () => {
+    const form = document.getElementById("detail-form");
+    const fd = new FormData(form);
+    const isbn = String(fd.get("isbn") || "").trim();
+    const title = String(fd.get("title") || "").trim();
+    const authors = String(fd.get("authors") || "").trim();
+    msg(isbn ? `Looking up ISBN ${isbn}…` : "Searching Open Library / LoC…");
+    try {
+      let hit = null;
+      if (isbn) {
+        hit = await api(`/api/metadata/isbn/${encodeURIComponent(isbn)}`);
+      }
+      if (!hit && title) {
+        const q = new URLSearchParams({ title });
+        if (authors) q.set("author", authors);
+        const hits = await api(`/api/metadata/search?${q}`);
+        hit = Array.isArray(hits) && hits.length ? hits[0] : null;
+      }
+      if (!hit) {
+        msg("No metadata match found", true);
+        return;
+      }
+      form.title.value = hit.title || form.title.value;
+      if (hit.authors) form.authors.value = hit.authors;
+      if (hit.isbn) form.isbn.value = hit.isbn;
+      await api(`/api/works/${w.id}`, {
+        method: "PUT",
+        json: {
+          title: form.title.value,
+          authors: form.authors.value,
+          isbn: form.isbn.value || null,
+          description: hit.description || undefined,
+        },
+      });
+      msg(`Applied metadata from ${hit.source || "lookup"}`);
+      await openDetail(w.id);
+    } catch (e) {
+      msg(e.message || String(e), true);
+    }
+  });
+  if (w.needs_review) {
+    const editor = document.getElementById("review-md-editor");
+    if (editor) {
+      fetch(`/api/works/${w.id}/content/markdown`, { credentials: "include" })
+        .then(async (res) => {
+          editor.value = res.ok ? await res.text() : "";
+          if (!res.ok) msg(`Could not load markdown (${res.status})`, true);
+        })
+        .catch((e) => msg(e.message || String(e), true));
+    }
+    document.getElementById("btn-save-md")?.addEventListener("click", async () => {
+      const text = document.getElementById("review-md-editor")?.value ?? "";
+      msg("Saving markdown…");
+      const res = await fetch(`/api/works/${w.id}/content/markdown`, {
+        method: "PUT",
+        credentials: "include",
+        headers: { "Content-Type": "text/markdown; charset=utf-8" },
+        body: text,
+      });
+      if (!res.ok) {
+        msg(await res.text() || `Save failed (${res.status})`, true);
+        return;
+      }
+      msg("Markdown saved (still needs confirm)");
+    });
+  }
   document.getElementById("import-file")?.addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -417,6 +503,19 @@ async function openDetail(id) {
     });
   });
   document.getElementById("btn-confirm")?.addEventListener("click", async () => {
+    const editor = document.getElementById("review-md-editor");
+    if (editor) {
+      const res = await fetch(`/api/works/${w.id}/content/markdown`, {
+        method: "PUT",
+        credentials: "include",
+        headers: { "Content-Type": "text/markdown; charset=utf-8" },
+        body: editor.value,
+      });
+      if (!res.ok) {
+        msg(await res.text() || "Could not save markdown before confirm", true);
+        return;
+      }
+    }
     const j = await api(`/api/works/${w.id}/confirm`, { method: "POST" });
     msg("Building EPUB…");
     await pollJob(j.job_id, async (job) => {

@@ -4,10 +4,21 @@ Personal ebook / audiobook library. Rust (Axum + SQLite), multi-user ACL, EPUB +
 
 ## Quick start (Arch laptop)
 
+**PDF import requires** `pandoc`, `ocrmypdf` (Tesseract), and Poppler (`pdftohtml`) on `PATH`:
+
+```bash
+# Arch
+sudo pacman -S pandoc poppler tesseract tesseract-data-eng
+# ocrmypdf: AUR, or:
+uv tool install ocrmypdf   # ensure ~/.local/bin is on PATH
+```
+
+Pandoc 3.x cannot read PDF directly; Diarch OCRs with `ocrmypdf --skip-text`, converts via `pdftohtml`, then `pandoc` HTML→Markdown.
 ```bash
 export DIARCH_DATA_DIR=./data
 export DIARCH_ADMIN_USER=admin
 export DIARCH_ADMIN_PASS='change-me'
+export PATH="$HOME/.local/bin:$PATH"
 cargo run -p diarch-server
 ```
 
@@ -37,7 +48,7 @@ cargo build -p diarch-server --release --target x86_64-unknown-linux-musl
 scp target/x86_64-unknown-linux-musl/release/diarch key@keystone:/tmp/
 # on Keystone:
 sudo install -m 755 /tmp/diarch /usr/local/bin/diarch
-sudo apt install pandoc
+sudo apt install pandoc ocrmypdf tesseract-ocr tesseract-ocr-eng poppler-utils
 sudo mkdir -p /var/lib/diarch
 sudo cp deploy/debian/diarch.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now diarch
@@ -49,7 +60,7 @@ See [deploy/debian/README.md](deploy/debian/README.md).
 
 - `crates/diarch-server` — HTTP API + embedded web UI
 - `crates/diarch-db` — SQLite
-- `crates/diarch-import` — pandoc import / confirm
+- `crates/diarch-import` — pandoc + ocrmypdf PDF/MD import / confirm
 - `crates/diarch-core` — domain + config
 - `taxonomy/seed.json` — 1000–9999 codes
 - `web/` — UI source (copied to `web/dist` for `rust-embed`)
@@ -69,7 +80,7 @@ Coverage includes:
 
 - **diarch-core** — taxonomy seed, primary-code suggestion, manga inference, title matching
 - **diarch-db** — auth/sessions, ACL grants, multi-code works, attention filters, jobs
-- **diarch-import** — markdown ingest, zip export, TTS queue copy; pandoc confirm when installed
+- **diarch-import** — markdown ingest, PDF OCR (`ocrmypdf`) + `pdftohtml` + pandoc, zip export, TTS queue copy
 - **diarch-server** — HTTP API regression (auth, ACL, wishlist, flags, progress, settings, import jobs)
 
-Pandoc-dependent cases skip cleanly if `pandoc` is missing.
+Pandoc / ocrmypdf / poppler-dependent cases skip cleanly if those tools are missing.

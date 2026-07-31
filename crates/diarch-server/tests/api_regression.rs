@@ -602,3 +602,234 @@ async fn currently_reading_shelf_caps_at_three() {
     assert_eq!(status, 200);
     assert_eq!(list.as_array().unwrap().len(), 3);
 }
+
+async fn raw_req(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    cookie: Option<&str>,
+    content_type: &str,
+    body: Vec<u8>,
+) -> (u16, Vec<u8>) {
+    let mut builder = axum::http::Request::builder().method(method).uri(uri);
+    if let Some(c) = cookie {
+        builder = builder.header("cookie", format!("diarch_session={c}"));
+    }
+    let req = builder
+        .header("content-type", content_type)
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let status = res.status().as_u16();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, bytes.to_vec())
+}
+
+#[tokio::test]
+async fn put_markdown_keeps_needs_review() {
+    let (_dir, app, state) = test_app().await;
+    let token = login(&app, "admin", "adminpass").await;
+    let (status, work, _) = json_req(
+        &app,
+        "POST",
+        "/api/works",
+        Some(&token),
+        Some(json!({"title":"ReviewMe","authors":"A"})),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let id = work["id"].as_str().unwrap().to_string();
+    let work_uuid = uuid::Uuid::parse_str(&id).unwrap();
+
+    let imports = state.config.data_dir.join("imports");
+    tokio::fs::create_dir_all(&imports).await.unwrap();
+    let path = imports.join(format!("{id}-book.md"));
+    tokio::fs::write(&path, b"# Draft\n").await.unwrap();
+    let job = state
+        .db
+        .create_job("import", Some(work_uuid))
+        .await
+        .unwrap();
+    state
+        .db
+        .update_job(
+            job.id,
+            "pending",
+            Some(&format!("book.md|{}", path.display())),
+        )
+        .await
+        .unwrap();
+    routes::jobs::process_one(&state).await.unwrap();
+
+    let (status, detail, _) =
+        json_req(&app, "GET", &format!("/api/works/{id}"), Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(detail["work"]["needs_review"], true);
+    assert_eq!(detail["has_import_pdf"], false);
+
+    let (status, _) = raw_req(
+        &app,
+        "PUT",
+        &format!("/api/works/{id}/content/markdown"),
+        Some(&token),
+        "text/markdown; charset=utf-8",
+        b"# Edited\n\nStill reviewing.\n".to_vec(),
+    )
+    .await;
+    assert_eq!(status, 204);
+
+    let (status, body) = raw_req(
+        &app,
+        "GET",
+        &format!("/api/works/{id}/content/markdown"),
+        Some(&token),
+        "text/plain",
+        vec![],
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(String::from_utf8_lossy(&body).contains("Still reviewing"));
+
+    let (status, detail, _) =
+        json_req(&app, "GET", &format!("/api/works/{id}"), Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(detail["work"]["needs_review"], true);
+}
+
+#[tokio::test]
+async fn pdf_import_put_md_confirm_api() {
+    let pandoc_ok = tokio::process::Command::new("pandoc")
+        .arg("--version")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let ocr_ok = tokio::process::Command::new("ocrmypdf")
+        .arg("--version")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let pdftohtml_ok = std::path::Path::new("/usr/bin/pdftohtml").is_file()
+        || std::env::var_os("PATH")
+            .map(|paths| {
+                std::env::split_paths(&paths)
+                    .any(|p| p.join("pdftohtml").is_file())
+            })
+            .unwrap_or(false);
+    if !pandoc_ok || !ocr_ok || !pdftohtml_ok {
+        eprintln!("skipping: pandoc, ocrmypdf, or pdftohtml not available");
+        return;
+    }
+
+    let (_dir, app, state) = test_app().await;
+    let token = login(&app, "admin", "adminpass").await;
+    let (status, work, _) = json_req(
+        &app,
+        "POST",
+        "/api/works",
+        Some(&token),
+        Some(json!({"title":"PdfBook","authors":""})),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let id = work["id"].as_str().unwrap().to_string();
+    let work_uuid = uuid::Uuid::parse_str(&id).unwrap();
+
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../diarch-import/tests/fixtures_sample.pdf");
+    let pdf_bytes = if fixture.exists() {
+        tokio::fs::read(&fixture).await.unwrap()
+    } else {
+        // last-resort handcrafted (may fail OCR/html path)
+        b"%PDF-1.4\n1 0 obj<< /Type /Catalog /Pages 2 0 R >>endobj\ntrailer<< /Root 1 0 R >>\n%%EOF\n"
+            .to_vec()
+    };
+    let imports = state.config.data_dir.join("imports");
+    tokio::fs::create_dir_all(&imports).await.unwrap();
+    let path = imports.join(format!("{id}-book.pdf"));
+    tokio::fs::write(&path, pdf_bytes).await.unwrap();
+    let job = state
+        .db
+        .create_job("import", Some(work_uuid))
+        .await
+        .unwrap();
+    state
+        .db
+        .update_job(
+            job.id,
+            "pending",
+            Some(&format!("book.pdf|{}", path.display())),
+        )
+        .await
+        .unwrap();
+    routes::jobs::process_one(&state).await.unwrap();
+
+    let done = state.db.get_job(job.id).await.unwrap().unwrap();
+    assert_eq!(done.status, "done", "{:?}", done.detail);
+
+    let quarantine = state.config.work_dir(work_uuid).join("import.pdf");
+    assert!(quarantine.exists());
+
+    let (status, detail, _) =
+        json_req(&app, "GET", &format!("/api/works/{id}"), Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(detail["work"]["needs_review"], true);
+    assert_eq!(detail["has_import_pdf"], true);
+
+    let (status, pdf_body) = raw_req(
+        &app,
+        "GET",
+        &format!("/api/works/{id}/content/pdf"),
+        Some(&token),
+        "application/octet-stream",
+        vec![],
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(pdf_body.starts_with(b"%PDF"));
+
+    let (status, _) = raw_req(
+        &app,
+        "PUT",
+        &format!("/api/works/{id}/content/markdown"),
+        Some(&token),
+        "text/markdown; charset=utf-8",
+        b"# PdfBook\n\nReviewed body.\n".to_vec(),
+    )
+    .await;
+    assert_eq!(status, 204);
+
+    let (status, confirm, _) =
+        json_req(&app, "POST", &format!("/api/works/{id}/confirm"), Some(&token), None).await;
+    assert_eq!(status, 200);
+    let job_id = confirm["job_id"].as_str().unwrap();
+    for _ in 0..10 {
+        routes::jobs::process_one(&state).await.unwrap();
+        let j = state
+            .db
+            .get_job(uuid::Uuid::parse_str(job_id).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        if j.status == "done" || j.status == "failed" {
+            assert_eq!(j.status, "done", "{:?}", j.detail);
+            break;
+        }
+    }
+
+    assert!(!quarantine.exists(), "import.pdf removed on confirm");
+    let (status, detail, _) =
+        json_req(&app, "GET", &format!("/api/works/{id}"), Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(detail["work"]["needs_review"], false);
+    assert_eq!(detail["has_import_pdf"], false);
+    let kinds: Vec<_> = detail["assets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["kind"].as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"epub"));
+    assert!(kinds.contains(&"markdown"));
+}

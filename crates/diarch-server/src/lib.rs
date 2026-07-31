@@ -23,7 +23,15 @@ pub async fn build_state(config: Config) -> Result<Arc<AppState>> {
     db.seed_taxonomy(seed).await?;
     db.ensure_admin(&config.admin_username, &config.admin_password)
         .await?;
-    for name in ["pandoc", "openlibrary", "loc", "storygraph", "remarkable", "localai"] {
+    for name in [
+        "pandoc",
+        "ocrmypdf",
+        "openlibrary",
+        "loc",
+        "storygraph",
+        "remarkable",
+        "localai",
+    ] {
         let _ = db
             .set_integration_health(name, "unknown", None, false)
             .await;
