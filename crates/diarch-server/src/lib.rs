@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod auth;
 pub mod fixer;
 pub mod metadata;
@@ -26,11 +27,13 @@ pub async fn build_state(config: Config) -> Result<Arc<AppState>> {
     for name in [
         "pandoc",
         "ocrmypdf",
+        "ffmpeg",
         "openlibrary",
         "loc",
         "storygraph",
         "remarkable",
         "localai",
+        "audible",
     ] {
         let _ = db
             .set_integration_health(name, "unknown", None, false)

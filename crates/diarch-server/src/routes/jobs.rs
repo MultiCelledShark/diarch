@@ -15,14 +15,15 @@ pub async fn process_one(state: &Arc<AppState>) -> Result<()> {
     let result = match job.kind.as_str() {
         "import" => run_import(state, &job).await,
         "confirm_epub" => run_confirm(state, &job).await,
+        "aax_to_m4b" => run_aax_to_m4b(state, &job).await,
         "transcribe" => {
-            // Throttled transcription hook — mark detail for ops; full Whisper later.
+            // Phase 8 / LocalAI — keep stub honest.
             state
                 .db
                 .update_job(
                     job.id,
                     "failed",
-                    Some("transcription worker not configured; set needs_transcription and run offline"),
+                    Some("transcription isn’t ready yet (needs LocalAI/Hermes — Phase 8)"),
                 )
                 .await?;
             return Ok(());
@@ -173,6 +174,40 @@ async fn run_confirm(state: &Arc<AppState>, job: &diarch_core::Job) -> Result<Op
         state.db.update_work(&work).await?;
     }
     Ok(Some("epub confirmed".into()))
+}
+
+async fn run_aax_to_m4b(state: &Arc<AppState>, job: &diarch_core::Job) -> Result<Option<String>> {
+    let work_id = job.work_id.ok_or_else(|| anyhow!("aax_to_m4b missing work_id"))?;
+    let key = crate::audio::require_activation_bytes(state.config.audible_key.as_deref())?;
+    let work_dir = state.config.work_dir(work_id);
+    let aax = work_dir.join("import.aax");
+    let dest = work_dir.join("audio").join(crate::audio::BOOK_M4B);
+    crate::audio::aax_to_m4b(&aax, &dest, key).await?;
+    register_asset(
+        state,
+        work_id,
+        AssetKind::Audio,
+        &format!("audio/{}", crate::audio::BOOK_M4B),
+        "audio/mp4",
+        &dest,
+    )
+    .await?;
+    if let Some(mut work) = state.db.get_work(work_id).await? {
+        work.needs_audio = false;
+        work.sg_audio_only_remote = false;
+        work.updated_at = Utc::now();
+        state.db.update_work(&work).await?;
+    }
+    let _ = tokio::fs::remove_file(&aax).await;
+    let _ = state
+        .db
+        .set_integration_health("audible", "ok", None, true)
+        .await;
+    let _ = state
+        .db
+        .set_integration_health("ffmpeg", "ok", None, true)
+        .await;
+    Ok(Some("aax converted to book.m4b".into()))
 }
 
 async fn register_asset(

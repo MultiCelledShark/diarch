@@ -18,7 +18,7 @@ Default admin: `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` (defaults `admin` / `ad
 
 ## Locked product rules
 
-- **Canonical storage:** EPUB + Markdown(+media) + optional M4A. PDFs only in the import box (not retained).
+- **Canonical storage:** EPUB + Markdown(+media) + optional M4B. PDFs only in the import box (not retained).
 - **PDF path:** PDF → OCR (`ocrmypdf`) → Markdown via pdftohtml+pandoc (`needs_review`) → confirm → EPUB via pandoc.
 - **EPUB path:** store EPUB; derive Markdown with pandoc.
 - **Taxonomy:** multi-code on every work; **primary** = most specific subgenre (e.g. Epic Fantasy `8201`).
@@ -49,7 +49,7 @@ Default admin: `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` (defaults `admin` / `ad
 | **2 Import polish** | **Complete** | PDF quarantine + side-by-side MD review; `ocrmypdf --skip-text` → `pdftohtml` → pandoc HTML→MD; PUT markdown; ISBN / title+author metadata enrich; confirm → EPUB |
 | **3 Readers** | **Complete** | epub.js + MD scroll + manga RTL; TOC panel; full typography suite (palette/font/size/line-height/margins/justify); review MD toolbar + live preview |
 | **4 Metadata / covers / wishlist** | **Complete** | OL + Google Books + LoC; ISBN authors fixed; remote cover fetch; wishlist enrich + barcode; extract/placeholder/upload covers. LocalAI/Hermes deferred → Phase 8 |
-| **5 Audio** | API/MVP done | M4A upload + Range stream. No Audible/transcription wiring yet |
+| **5 Audio** | **Complete** | Canonical `book.m4b` upload + Range stream; Audible AAX→M4B server job (`DIARCH_AUDIBLE_KEY` + ffmpeg, same flags as audible2m4b). Transcription stubbed → Phase 8 |
 | **6 StoryGraph / reMarkable / fixer** | API/MVP done | Pull+flags, rmapi send, health probes. Scrapers/CLI are fragile |
 | **7 Android / KOReader** | Not done | Docs/stubs only |
 | **8 Deferred AI + skipped polish** | Not started | Circle-back: LocalAI/Hermes covers, staged approve, and other optionals parked below |
@@ -69,8 +69,8 @@ Restart `cargo run -p diarch-server` after pulling UI changes (assets are embedd
 ## Suggested next work (priority)
 
 1. **UX harden** — empty states (in progress), year reading list UI, grant UX without pasting UUIDs.
-2. **Audio pipeline** — Audible script; desktop `needs_tts` watcher in ebook2audiobook repo.
-3. **Transcription** — background job ~10% CPU.
+2. **Transcription** — Phase 8 when LocalAI/Hermes is ready (UI stubbed in Phase 5).
+3. **ebook2audiobook watcher** — desktop TTS → `queue/incoming_audio` as `.m4b`.
 4. **Deploy** — musl/Debian 13 → Keystone systemd.
 5. **Android** — thin client.
 6. **KOReader** — optional sync.
@@ -86,8 +86,9 @@ Clients (Web :8083, Android later)
 diarch-server (Axum) ── SQLite ── /var/lib/diarch/library
         │
         ├── pandoc + ocrmypdf + pdftohtml (PDF import)
-        ├── Open Library / LoC
-        ├── LocalAI / Hermes (covers)
+        ├── Open Library / Google Books / LoC
+        ├── ffmpeg (Audible AAX → M4B)
+        ├── LocalAI / Hermes (covers / transcription — Phase 8)
         ├── StoryGraph (pull)
         └── rmapi (reMarkable)
 ```
@@ -100,6 +101,7 @@ diarch-server (Axum) ── SQLite ── /var/lib/diarch/library
 | `DIARCH_DATA_DIR` | Data root |
 | `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` | Bootstrap admin |
 | `DIARCH_LOCALAI_URL` / `DIARCH_HERMES_URL` | Cover generation |
+| `DIARCH_AUDIBLE_KEY` | Audible activation bytes for AAX → M4B (never commit) |
 | `DIARCH_STORYGRAPH_USER` / `DIARCH_STORYGRAPH_COOKIE` | SG pull |
 | `DIARCH_REMARKABLE_TOKEN` | Optional; prefer `rmapi` on PATH |
 | `DIARCH_SHOW_AUDIO_GAPS` | Soft audio-gap badges |
@@ -127,6 +129,7 @@ Parked until LocalAI / Hermes (or equivalent) is ready on Keystone, and until ea
 | Phase 4 | Cover “reset to placeholder” / regenerate SVG from current title+authors |
 | Phase 4 | Attention one-click clear for soft flags without opening detail |
 | Product | ebook2audiobook desktop watcher — [TODO-ebook2audiobook-watcher.md](TODO-ebook2audiobook-watcher.md) |
+| Phase 5 | Real audiobook transcription (LocalAI/Hermes or local ASR) — UI stub only today |
 | Later | Anything else deliberately deferred from Phases 5–7 that should not live in those phases’ MVP |
 
 Audible / transcription / Android / KOReader stay owned by Phases 5 and 7; list them here only if they get deferred out of those phases later.

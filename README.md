@@ -1,6 +1,6 @@
 # Diarch
 
-Personal ebook / audiobook library. Rust (Axum + SQLite), multi-user ACL, EPUB + Markdown storage, StoryGraph flags, reMarkable send, LocalAI covers.
+Personal ebook / audiobook library. Rust (Axum + SQLite), multi-user ACL, EPUB + Markdown storage, M4B audio (Audible AAX convert), StoryGraph flags, reMarkable send, LocalAI covers.
 
 ## Quick start (Arch laptop)
 
@@ -33,6 +33,7 @@ Open `http://127.0.0.1:8083` — default listen `0.0.0.0:8083`.
 | `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` | `admin` / `admin` | Bootstrap admin |
 | `DIARCH_LOCALAI_URL` | — | LocalAI base URL for covers |
 | `DIARCH_HERMES_URL` | — | Hermes agent base (optional) |
+| `DIARCH_AUDIBLE_KEY` | — | Audible activation bytes for AAX → M4B |
 | `DIARCH_STORYGRAPH_USER` / `DIARCH_STORYGRAPH_COOKIE` | — | StoryGraph pull |
 | `DIARCH_REMARKABLE_TOKEN` | — | Optional; prefer `rmapi` on PATH |
 | `DIARCH_SHOW_AUDIO_GAPS` | `true` | Soft audio-gap badges |

@@ -833,3 +833,188 @@ async fn pdf_import_put_md_confirm_api() {
     assert!(kinds.contains(&"epub"));
     assert!(kinds.contains(&"markdown"));
 }
+
+#[tokio::test]
+async fn m4b_upload_attaches_and_streams_with_range() {
+    let (_dir, app, _) = test_app().await;
+    let token = login(&app, "admin", "adminpass").await;
+    let (status, work, _) = json_req(
+        &app,
+        "POST",
+        "/api/works",
+        Some(&token),
+        Some(json!({"title":"Audio Book","authors":"A","needs_audio":true})),
+    )
+    .await;
+    assert_eq!(status, 201, "{work}");
+    let id = work["id"].as_str().unwrap();
+
+    // Minimal fake "m4b" payload (not a real media file; attach path only).
+    let fake = b"ftypM4B fake audiobook bytes for test!!!!";
+    let boundary = "----audioBoundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"book.m4b\"\r\nContent-Type: audio/mp4\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(fake);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("/api/works/{id}/audio"))
+        .header("cookie", format!("diarch_session={token}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), 200, "upload");
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let j: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(j["filename"], "book.m4b");
+
+    let (status, detail, _) =
+        json_req(&app, "GET", &format!("/api/works/{id}"), Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(detail["work"]["needs_audio"], false);
+    let kinds: Vec<_> = detail["assets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["kind"].as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"audio"), "{kinds:?}");
+
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri(format!("/api/works/{id}/audio/book.m4b"))
+        .header("cookie", format!("diarch_session={token}"))
+        .header("range", "bytes=0-9")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), 206);
+    assert_eq!(
+        res.headers().get("content-type").and_then(|v| v.to_str().ok()),
+        Some("audio/mp4")
+    );
+    let slice = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&slice[..], &fake[..10]);
+
+    let (status, ch, _) = json_req(
+        &app,
+        "GET",
+        &format!("/api/works/{id}/audio/chapters"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(ch["chapters"].as_array().unwrap().is_empty());
+
+    let (status, tr, _) = json_req(
+        &app,
+        "POST",
+        &format!("/api/works/{id}/transcribe"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(tr["ready"], false);
+    assert!(tr["message"].as_str().unwrap().contains("Phase 8"));
+}
+
+#[tokio::test]
+async fn aax_upload_without_key_fails_clearly() {
+    let (_dir, app, _) = test_app().await;
+    let token = login(&app, "admin", "adminpass").await;
+    let (status, work, _) = json_req(
+        &app,
+        "POST",
+        "/api/works",
+        Some(&token),
+        Some(json!({"title":"AAX Book","authors":"A"})),
+    )
+    .await;
+    assert_eq!(status, 201, "{work}");
+    let id = work["id"].as_str().unwrap();
+
+    let boundary = "----aaxBoundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"book.aax\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(b"not-a-real-aax");
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("/api/works/{id}/audio"))
+        .header("cookie", format!("diarch_session={token}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), 400);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let msg = String::from_utf8_lossy(&bytes);
+    assert!(
+        msg.contains("DIARCH_AUDIBLE_KEY") || msg.contains("activation"),
+        "{msg}"
+    );
+}
+
+#[tokio::test]
+async fn mp3_audio_upload_rejected() {
+    let (_dir, app, _) = test_app().await;
+    let token = login(&app, "admin", "adminpass").await;
+    let (status, work, _) = json_req(
+        &app,
+        "POST",
+        "/api/works",
+        Some(&token),
+        Some(json!({"title":"MP3 Book","authors":"A"})),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let id = work["id"].as_str().unwrap();
+
+    let boundary = "----mp3Boundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"book.mp3\"\r\nContent-Type: audio/mpeg\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(b"ID3fake");
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("/api/works/{id}/audio"))
+        .header("cookie", format!("diarch_session={token}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), 400);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let msg = String::from_utf8_lossy(&bytes);
+    assert!(msg.to_ascii_lowercase().contains("mp3"), "{msg}");
+}

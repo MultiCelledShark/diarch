@@ -49,6 +49,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/works/{id}/cover/generate", post(generate_cover))
         .route("/api/works/{id}/cover/prompt", get(cover_prompt))
         .route("/api/works/{id}/audio", post(upload_audio))
+        .route("/api/works/{id}/audio/chapters", get(audio_chapters))
+        .route("/api/works/{id}/transcribe", post(request_transcribe))
         .route("/api/works/{id}/audio/{filename}", get(stream_audio))
         .route("/api/works/{id}/progress", get(get_progress).put(put_progress))
         .route(
@@ -1013,39 +1015,148 @@ async fn upload_audio(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
     mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
+        return Err((StatusCode::FORBIDDEN, "forbidden".into()));
+    }
+    if state.db.get_work(id).await.ok().flatten().is_none() {
+        return Err((StatusCode::NOT_FOUND, "work not found".into()));
+    }
+
+    let mut saved: Option<(String, Vec<u8>)> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| (StatusCode::BAD_REQUEST, "bad multipart".into()))?
+    {
+        let name = field
+            .file_name()
+            .unwrap_or("book.m4b")
+            .to_string();
+        let data = field
+            .bytes()
+            .await
+            .map_err(|_| (StatusCode::BAD_REQUEST, "bad file body".into()))?;
+        saved = Some((name, data.to_vec()));
+    }
+    let (orig_name, data) = saved.ok_or((StatusCode::BAD_REQUEST, "file required".into()))?;
+    let lower = orig_name.to_ascii_lowercase();
+    let work_dir = state.config.work_dir(id);
+
+    if lower.ends_with(".mp3") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "MP3 is not supported; upload .m4b or Audible .aax".into(),
+        ));
+    }
+
+    if lower.ends_with(".aax") {
+        if state.config.audible_key.as_deref().unwrap_or("").is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "DIARCH_AUDIBLE_KEY is not set; cannot convert AAX".into(),
+            ));
+        }
+        if !crate::audio::ffmpeg_available() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "ffmpeg not found on PATH; required for AAX → M4B".into(),
+            ));
+        }
+        let aax_path = work_dir.join("import.aax");
+        tokio::fs::write(&aax_path, &data)
+            .await
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to store AAX".into()))?;
+        let job = state
+            .db
+            .create_job("aax_to_m4b", Some(id))
+            .await
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "job create failed".into()))?;
+        let _ = state
+            .db
+            .update_job(job.id, "pending", Some("import.aax"))
+            .await;
+        return Ok(Json(serde_json::json!({
+            "job_id": job.id,
+            "kind": "aax_to_m4b",
+            "message": "Converting AAX → M4B"
+        })));
+    }
+
+    if !(lower.ends_with(".m4b") || lower.ends_with(".m4a")) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "expected .m4b (preferred) or .aax; .m4a accepted as book.m4b".into(),
+        ));
+    }
+
+    let audio_dir = work_dir.join("audio");
+    tokio::fs::create_dir_all(&audio_dir)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "mkdir audio failed".into()))?;
+    let filename = crate::audio::BOOK_M4B.to_string();
+    let dest = audio_dir.join(&filename);
+    tokio::fs::write(&dest, &data)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "write m4b failed".into()))?;
+    let asset = WorkAsset {
+        id: Uuid::new_v4(),
+        work_id: id,
+        kind: AssetKind::Audio,
+        relative_path: format!("audio/{filename}"),
+        mime: Some("audio/mp4".into()),
+        bytes: Some(data.len() as i64),
+        created_at: Utc::now(),
+    };
+    let _ = state.db.add_asset(&asset).await;
+    if let Some(mut w) = state.db.get_work(id).await.ok().flatten() {
+        w.needs_audio = false;
+        w.sg_audio_only_remote = false;
+        w.updated_at = Utc::now();
+        let _ = state.db.update_work(&w).await;
+    }
+    Ok(Json(serde_json::json!({
+        "filename": filename,
+        "kind": "m4b"
+    })))
+}
+
+async fn audio_chapters(
+    AuthUser(user): AuthUser,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let audio_dir = state.config.work_dir(id).join("audio");
-    tokio::fs::create_dir_all(&audio_dir)
+    let path = state
+        .config
+        .work_dir(id)
+        .join("audio")
+        .join(crate::audio::BOOK_M4B);
+    let chapters = crate::audio::ffprobe_chapters(&path)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut filename = String::from("book.m4a");
-    while let Some(field) = multipart.next_field().await.map_err(|_| StatusCode::BAD_REQUEST)? {
-        filename = field.file_name().unwrap_or("book.m4a").to_string();
-        let data = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
-        let dest = audio_dir.join(&filename);
-        tokio::fs::write(&dest, &data)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let asset = WorkAsset {
-            id: Uuid::new_v4(),
-            work_id: id,
-            kind: AssetKind::Audio,
-            relative_path: format!("audio/{filename}"),
-            mime: Some("audio/mp4".into()),
-            bytes: Some(data.len() as i64),
-            created_at: Utc::now(),
-        };
-        let _ = state.db.add_asset(&asset).await;
-        if let Some(mut w) = state.db.get_work(id).await.ok().flatten() {
-            w.needs_audio = false;
-            w.sg_audio_only_remote = false;
-            let _ = state.db.update_work(&w).await;
-        }
+        .unwrap_or_default();
+    Ok(Json(serde_json::json!({ "chapters": chapters })))
+}
+
+async fn request_transcribe(
+    AuthUser(user): AuthUser,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
+        return Err(StatusCode::FORBIDDEN);
     }
-    Ok(Json(serde_json::json!({ "filename": filename })))
+    if state.db.get_work(id).await.ok().flatten().is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    // Stub until Phase 8 LocalAI/Hermes transcription.
+    Ok(Json(serde_json::json!({
+        "ok": false,
+        "ready": false,
+        "message": "Transcription isn’t ready yet (needs LocalAI/Hermes — Phase 8)"
+    })))
 }
 
 async fn stream_audio(
@@ -1056,6 +1167,10 @@ async fn stream_audio(
 ) -> Result<Response, StatusCode> {
     if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
         return Err(StatusCode::FORBIDDEN);
+    }
+    // Path traversal guard
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return Err(StatusCode::BAD_REQUEST);
     }
     let path = state.config.work_dir(id).join("audio").join(&filename);
     let data = tokio::fs::read(&path)
@@ -1069,8 +1184,11 @@ async fn stream_audio(
             let end: u64 = parts
                 .next()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(len - 1)
-                .min(len - 1);
+                .unwrap_or(len.saturating_sub(1))
+                .min(len.saturating_sub(1));
+            if start > end || len == 0 {
+                return Err(StatusCode::RANGE_NOT_SATISFIABLE);
+            }
             let slice = data[start as usize..=end as usize].to_vec();
             return Ok((
                 StatusCode::PARTIAL_CONTENT,

@@ -291,7 +291,12 @@ async function openDetail(id) {
   const hasEpub = assets.some((a) => a.kind === "epub");
   const hasMd = assets.some((a) => a.kind === "markdown");
   const hasImportPdf = !!data.has_import_pdf;
-  const audio = assets.find((a) => a.kind === "audio");
+  const audioAssets = assets.filter((a) => a.kind === "audio");
+  const audio =
+    audioAssets.find((a) => (a.relative_path || "").endsWith("book.m4b")) ||
+    audioAssets[0] ||
+    null;
+  const hasAudio = !!audio;
   const codes = data.codes || [];
 
   document.getElementById("detail").innerHTML = `
@@ -332,7 +337,7 @@ async function openDetail(id) {
         </div>
         <div id="meta-hits" class="meta-hits" hidden></div>
       </form>
-      <p class="muted">${hasEpub ? "EPUB ready" : "No EPUB yet"} · ${hasMd ? "Markdown ready" : "No Markdown"} · Direction: ${escapeHtml(w.reading_direction)}${w.needs_review ? " · Needs review" : ""}${w.needs_cover ? " · Needs cover" : ""}</p>
+      <p class="muted">${hasEpub ? "EPUB ready" : "No EPUB yet"} · ${hasMd ? "Markdown ready" : "No Markdown"} · ${hasAudio ? "M4B ready" : (w.needs_audio ? "Needs audio" : "No audio")} · Direction: ${escapeHtml(w.reading_direction)}${w.needs_review ? " · Needs review" : ""}${w.needs_cover ? " · Needs cover" : ""}</p>
       <div class="actions">
         ${hasEpub || hasMd ? `<button type="button" id="btn-read">Read</button>` : ""}
         <button type="button" id="btn-refresh-meta">Refresh metadata</button>
@@ -342,6 +347,8 @@ async function openDetail(id) {
         <button type="button" id="btn-fetch-cover"${w.isbn ? "" : " disabled title=\"Add an ISBN first\""}>Fetch cover</button>
         <label class="btn-file">Upload cover <input type="file" id="cover-file" accept="image/*" hidden /></label>
         ${w.needs_cover ? `<button type="button" id="btn-clear-needs-cover">Dismiss needs cover</button>` : ""}
+        <label class="btn-file">Upload audiobook (.m4b / .aax) <input type="file" id="audio-file" accept=".m4b,.aax,audio/mp4" hidden /></label>
+        <button type="button" id="btn-transcribe" disabled title="Transcription isn’t ready yet (needs LocalAI/Hermes — Phase 8)">Transcribe</button>
         ${state.user.is_admin ? `
           <label>Grant access
             <select id="grant-user">
@@ -601,6 +608,50 @@ async function openDetail(id) {
     await fetch(`/api/works/${w.id}/cover`, { method: "POST", body: fd, credentials: "include" });
     await openDetail(w.id);
   });
+
+  document.getElementById("audio-file")?.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    const lower = file.name.toLowerCase();
+    msg(lower.endsWith(".aax") ? `Uploading AAX “${file.name}” for convert…` : `Uploading audiobook “${file.name}”…`);
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const res = await fetch(`/api/works/${w.id}/audio`, {
+        method: "POST",
+        body: fd,
+        credentials: "include",
+      });
+      const textBody = await res.text();
+      let body = null;
+      try {
+        body = textBody ? JSON.parse(textBody) : null;
+      } catch {
+        body = { message: textBody };
+      }
+      if (!res.ok) {
+        msg(body?.message || textBody || `Upload failed (${res.status})`, true);
+        return;
+      }
+      if (body?.job_id) {
+        msg("Converting AAX → M4B…");
+        await pollJob(body.job_id, async (job) => {
+          if (job.status === "failed") msg(job.detail || "AAX convert failed", true);
+          else {
+            msg("Audiobook ready (book.m4b)");
+            await openDetail(w.id);
+          }
+        });
+        return;
+      }
+      msg(`Attached ${body?.filename || "book.m4b"}`);
+      await openDetail(w.id);
+    } catch (err) {
+      msg(err.message || String(err), true);
+    }
+  });
+
   document.getElementById("btn-grant")?.addEventListener("click", async () => {
     const username = document.getElementById("grant-user").value;
     if (!username) {
@@ -1219,9 +1270,11 @@ async function openReader(w, hasEpub, hasMd, audio) {
   const audioEl = document.getElementById("audio-player");
   if (audio) {
     audioEl.hidden = false;
-    audioEl.src = `/api/works/${w.id}/audio/${audio.relative_path.split("/").pop()}`;
+    const name = (audio.relative_path || "book.m4b").split("/").pop() || "book.m4b";
+    audioEl.src = `/api/works/${w.id}/audio/${name}`;
   } else {
     audioEl.hidden = true;
+    audioEl.removeAttribute("src");
   }
 
   if (useMd) await loadMarkdown(w.id);

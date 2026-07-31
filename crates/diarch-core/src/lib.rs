@@ -16,6 +16,8 @@ pub struct Config {
     pub storygraph_cookie: Option<String>,
     pub storygraph_username: Option<String>,
     pub remarkable_token: Option<String>,
+    /// Audible activation bytes for AAX → M4B (never log this value).
+    pub audible_key: Option<String>,
     pub show_audio_gaps: bool,
 }
 
@@ -31,6 +33,7 @@ impl Default for Config {
             storygraph_cookie: None,
             storygraph_username: None,
             remarkable_token: None,
+            audible_key: None,
             show_audio_gaps: true,
         }
     }
@@ -56,6 +59,7 @@ impl Config {
         c.storygraph_cookie = std::env::var("DIARCH_STORYGRAPH_COOKIE").ok();
         c.storygraph_username = std::env::var("DIARCH_STORYGRAPH_USER").ok();
         c.remarkable_token = std::env::var("DIARCH_REMARKABLE_TOKEN").ok();
+        c.audible_key = std::env::var("DIARCH_AUDIBLE_KEY").ok().filter(|s| !s.is_empty());
         if let Ok(v) = std::env::var("DIARCH_SHOW_AUDIO_GAPS") {
             c.show_audio_gaps = matches!(v.as_str(), "1" | "true" | "yes" | "on");
         }
