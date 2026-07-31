@@ -557,20 +557,9 @@ function updateMarkdownProgressUi(area) {
 }
 
 function updateEpubProgressUi(loc) {
-  if (!state.book || !loc?.start) return;
-  try {
-    if (state.book.locations && state.book.locations.length && state.book.locations.length() > 0) {
-      const total = state.book.locations.length();
-      const current = Math.min(
-        total,
-        Math.max(1, state.book.locations.locationFromCfi(loc.start.cfi) + 1),
-      );
-      setReaderProgress(`Page ${current} of ${total}`);
-      return;
-    }
-  } catch {}
+  if (!loc?.start) return;
   const pct = Math.round((loc.start.percentage || 0) * 100);
-  setReaderProgress(`${pct}%`);
+  setReaderProgress(`${pct}% read`);
 }
 
 async function loadMarkdown(id) {
@@ -650,16 +639,6 @@ async function loadEpub(w) {
       });
     }
     await state.book.ready;
-    // Build page locations in the background for "Page X of Y".
-    state.book.locations
-      .generate(1024)
-      .then(() => {
-        try {
-          const loc = state.rendition.currentLocation();
-          if (loc) updateEpubProgressUi(loc);
-        } catch {}
-      })
-      .catch(() => {});
     const prog = await api(`/api/works/${w.id}/progress?mode=epub`).catch(() => null);
     if (prog?.position) await state.rendition.display(prog.position);
     else await state.rendition.display();
@@ -670,6 +649,10 @@ async function loadEpub(w) {
         json: { mode: "epub", position: loc.start.cfi, percent: loc.start.percentage * 100 },
       }).catch(() => {});
     });
+    try {
+      const loc = state.rendition.currentLocation();
+      if (loc) updateEpubProgressUi(loc);
+    } catch {}
   } catch (e) {
     area.textContent = `EPUB render failed: ${e.message || e}`;
   }
