@@ -148,14 +148,17 @@
 
         <div id="view-reader" class="view" hidden>
           <div class="reader-bar">
-            <button id="reader-close">Close</button>
+            <button type="button" id="reader-close">Close</button>
             <span id="reader-title"></span>
-            <button id="reader-prev">Prev</button>
-            <button id="reader-next">Next</button>
-            <label><input type="checkbox" id="reader-scroll" /> Infinite scroll</label>
+            <span id="reader-progress" class="reader-progress" aria-live="polite"></span>
+            <label class="reader-scroll-label"><input type="checkbox" id="reader-scroll" /> Infinite scroll</label>
           </div>
-          <div id="epub-area"></div>
-          <article id="md-area" hidden></article>
+          <div class="reader-stage">
+            <button type="button" id="reader-prev" class="reader-nav reader-nav-left" aria-label="Previous page">←</button>
+            <div id="epub-area"></div>
+            <article id="md-area" hidden></article>
+            <button type="button" id="reader-next" class="reader-nav reader-nav-right" aria-label="Next page">→</button>
+          </div>
           <audio id="audio-player" controls hidden></audio>
         </div>
       </main>

@@ -464,10 +464,12 @@ async function openReader(w, hasEpub, hasMd, audio) {
   state.readerWorkId = w.id;
   show("reader");
   document.getElementById("reader-title").textContent = w.title;
+  setReaderProgress("");
   const scrollPref = state.settings?.reader_infinite_scroll;
   const scrollBox = document.getElementById("reader-scroll");
   scrollBox.checked = !!scrollPref && hasMd;
   const useMd = scrollBox.checked && hasMd;
+  setReaderChrome(useMd);
   document.getElementById("epub-area").hidden = useMd;
   document.getElementById("md-area").hidden = !useMd;
 
@@ -483,6 +485,7 @@ async function openReader(w, hasEpub, hasMd, audio) {
   else if (hasEpub) await loadEpub(w);
   else if (hasMd) {
     scrollBox.checked = true;
+    setReaderChrome(true);
     document.getElementById("epub-area").hidden = true;
     document.getElementById("md-area").hidden = false;
     await loadMarkdown(w.id);
@@ -495,10 +498,12 @@ async function openReader(w, hasEpub, hasMd, audio) {
         state.book = null;
         state.rendition = null;
       }
+      setReaderChrome(true);
       document.getElementById("epub-area").hidden = true;
       document.getElementById("md-area").hidden = false;
       await loadMarkdown(w.id);
     } else if (hasEpub) {
+      setReaderChrome(false);
       document.getElementById("md-area").hidden = true;
       document.getElementById("epub-area").hidden = false;
       await loadEpub(w);
@@ -506,20 +511,53 @@ async function openReader(w, hasEpub, hasMd, audio) {
   };
 }
 
+function setReaderChrome(infiniteScroll) {
+  document.getElementById("reader-prev").hidden = !!infiniteScroll;
+  document.getElementById("reader-next").hidden = !!infiniteScroll;
+}
+
+function setReaderProgress(text) {
+  const el = document.getElementById("reader-progress");
+  if (el) el.textContent = text || "";
+}
+
+function updateMarkdownProgressUi(area) {
+  const percent =
+    area.scrollHeight <= area.clientHeight
+      ? 100
+      : (area.scrollTop / (area.scrollHeight - area.clientHeight)) * 100;
+  setReaderProgress(`${Math.round(percent)}% read`);
+  return percent;
+}
+
+function updateEpubProgressUi(loc) {
+  if (!state.book || !loc?.start) return;
+  try {
+    if (state.book.locations && state.book.locations.length && state.book.locations.length() > 0) {
+      const total = state.book.locations.length();
+      const current = Math.min(
+        total,
+        Math.max(1, state.book.locations.locationFromCfi(loc.start.cfi) + 1),
+      );
+      setReaderProgress(`Page ${current} of ${total}`);
+      return;
+    }
+  } catch {}
+  const pct = Math.round((loc.start.percentage || 0) * 100);
+  setReaderProgress(`${pct}%`);
+}
+
 async function loadMarkdown(id) {
   const res = await fetch(`/api/works/${id}/content/markdown`, { credentials: "include" });
   document.getElementById("md-area").textContent = await res.text();
+  const area = document.getElementById("md-area");
   const prog = await api(`/api/works/${id}/progress?mode=markdown`).catch(() => null);
   if (prog?.percent) {
-    const area = document.getElementById("md-area");
     area.scrollTop = (prog.percent / 100) * (area.scrollHeight - area.clientHeight);
   }
-  document.getElementById("md-area").onscroll = () => {
-    const area = document.getElementById("md-area");
-    const percent =
-      area.scrollHeight <= area.clientHeight
-        ? 100
-        : (area.scrollTop / (area.scrollHeight - area.clientHeight)) * 100;
+  updateMarkdownProgressUi(area);
+  area.onscroll = () => {
+    const percent = updateMarkdownProgressUi(area);
     api(`/api/works/${id}/progress`, {
       method: "PUT",
       json: { mode: "markdown", position: String(area.scrollTop), percent },
@@ -530,6 +568,7 @@ async function loadMarkdown(id) {
 async function loadEpub(w) {
   const area = document.getElementById("epub-area");
   area.innerHTML = "";
+  setReaderProgress("");
   if (state.book) {
     try { state.book.destroy(); } catch {}
     state.book = null;
@@ -585,10 +624,21 @@ async function loadEpub(w) {
       });
     }
     await state.book.ready;
+    // Build page locations in the background for "Page X of Y".
+    state.book.locations
+      .generate(1024)
+      .then(() => {
+        try {
+          const loc = state.rendition.currentLocation();
+          if (loc) updateEpubProgressUi(loc);
+        } catch {}
+      })
+      .catch(() => {});
     const prog = await api(`/api/works/${w.id}/progress?mode=epub`).catch(() => null);
     if (prog?.position) await state.rendition.display(prog.position);
     else await state.rendition.display();
     state.rendition.on("relocated", (loc) => {
+      updateEpubProgressUi(loc);
       api(`/api/works/${w.id}/progress`, {
         method: "PUT",
         json: { mode: "epub", position: loc.start.cfi, percent: loc.start.percentage * 100 },
@@ -599,12 +649,31 @@ async function loadEpub(w) {
   }
 }
 
+function readerIsOpen() {
+  return !document.getElementById("view-reader")?.hidden;
+}
+
+function readerTurn(dir) {
+  if (!state.rendition || document.getElementById("reader-scroll")?.checked) return;
+  const w = state.currentWork?.work;
+  const rtl = w && (w.reading_direction === "rtl" || w.is_manga);
+  // Physical left/right: for RTL, left advances; for LTR, right advances.
+  if (dir === "left") {
+    if (rtl) state.rendition.next();
+    else state.rendition.prev();
+  } else {
+    if (rtl) state.rendition.prev();
+    else state.rendition.next();
+  }
+}
+
 document.getElementById("reader-close").addEventListener("click", () => {
   if (state.book) {
     try { state.book.destroy(); } catch {}
     state.book = null;
     state.rendition = null;
   }
+  setReaderProgress("");
   if (state.readerWorkId) openDetail(state.readerWorkId);
   else {
     show("library");
@@ -612,20 +681,21 @@ document.getElementById("reader-close").addEventListener("click", () => {
   }
 });
 
-document.getElementById("reader-prev").addEventListener("click", () => {
-  const w = state.currentWork?.work;
-  const rtl = w && (w.reading_direction === "rtl" || w.is_manga);
-  if (!state.rendition) return;
-  if (rtl) state.rendition.next();
-  else state.rendition.prev();
-});
+document.getElementById("reader-prev").addEventListener("click", () => readerTurn("left"));
+document.getElementById("reader-next").addEventListener("click", () => readerTurn("right"));
 
-document.getElementById("reader-next").addEventListener("click", () => {
-  const w = state.currentWork?.work;
-  const rtl = w && (w.reading_direction === "rtl" || w.is_manga);
-  if (!state.rendition) return;
-  if (rtl) state.rendition.prev();
-  else state.rendition.next();
+document.addEventListener("keydown", (e) => {
+  if (!readerIsOpen()) return;
+  if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable)) {
+    return;
+  }
+  if (e.key === "ArrowLeft") {
+    e.preventDefault();
+    readerTurn("left");
+  } else if (e.key === "ArrowRight") {
+    e.preventDefault();
+    readerTurn("right");
+  }
 });
 
 document.getElementById("wishlist-form").addEventListener("submit", async (e) => {
