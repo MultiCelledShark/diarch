@@ -27,6 +27,8 @@
       <header class="top">
         <div class="brand">Diarch</div>
         <nav>
+          <button data-view="currently-reading" class="nav">Currently Reading</button>
+          <button data-view="to-read" class="nav">To Read</button>
           <button data-view="library" class="nav active">Library</button>
           <button data-view="wishlist" class="nav">Wishlist</button>
           <button data-view="attention" class="nav">Attention</button>
@@ -40,33 +42,40 @@
       </header>
 
       <main>
+        <div id="view-currently-reading" class="view" hidden>
+          <div class="toolbar">
+            <h2 class="view-heading">Currently Reading</h2>
+            <span class="muted shelf-cap" id="currently-reading-cap">Up to 3 books</span>
+          </div>
+          <div id="currently-reading-list" class="cards"></div>
+        </div>
+
+        <div id="view-to-read" class="view" hidden>
+          <div class="toolbar">
+            <h2 class="view-heading">To Read</h2>
+            <span class="muted shelf-cap" id="to-read-cap">Up to 9 books</span>
+          </div>
+          <div id="to-read-list" class="cards"></div>
+        </div>
+
         <div id="view-library" class="view">
           <div class="toolbar">
             <h2 class="view-heading">Library</h2>
             <select id="filter-status">
               <option value="">All statuses</option>
               <option value="unread">Unread</option>
+              <option value="to_read">To read</option>
               <option value="reading">Reading</option>
               <option value="read">Read</option>
               <option value="wishlist">Wishlist</option>
             </select>
-            <button type="button" id="btn-new-work">New listing</button>
+            <label class="btn-file" id="btn-import">
+              Import
+              <input type="file" id="library-import-file" accept=".epub,.pdf,.md,.markdown,application/epub+zip" hidden />
+            </label>
+            <button type="button" id="btn-add-wishlist">Add to wishlist</button>
           </div>
-
-          <div id="import-box" class="import-box">
-            <strong>Import ebook</strong>
-            <p>Drop an EPUB here, or choose a file. PDF/Markdown also accepted (review before EPUB export).</p>
-            <div class="row">
-              <label class="btn-file primary">
-                Choose EPUB…
-                <input type="file" id="library-import-file" accept=".epub,.pdf,.md,.markdown,application/epub+zip" hidden />
-              </label>
-              <label>Primary code
-                <input type="number" id="import-primary" placeholder="e.g. 8201" />
-              </label>
-            </div>
-            <p id="import-status" class="muted" aria-live="polite"></p>
-          </div>
+          <p id="import-status" class="muted" aria-live="polite"></p>
 
           <div id="work-list" class="cards"></div>
         </div>

@@ -120,6 +120,8 @@ document.querySelectorAll("button.nav").forEach((b) => {
     const v = b.dataset.view;
     show(v);
     if (v === "library") await loadWorks();
+    if (v === "currently-reading") await loadCurrentlyReading();
+    if (v === "to-read") await loadToRead();
     if (v === "wishlist") await loadWishlist();
     if (v === "attention") await loadAttention();
     if (v === "admin") await loadAdmin();
@@ -133,11 +135,31 @@ async function loadWorks() {
   const works = await api(`/api/works${q}`);
   renderCards(document.getElementById("work-list"), works, {
     emptyTitle: "Your library is empty",
-    emptyHint: "Import an EPUB above, or create a listing / wishlist item.",
+    emptyHint: "Import an EPUB, or add something to your wishlist.",
   });
 }
 
 document.getElementById("filter-status").addEventListener("change", loadWorks);
+
+async function loadCurrentlyReading() {
+  const works = await api("/api/works?status=reading");
+  const cap = document.getElementById("currently-reading-cap");
+  if (cap) cap.textContent = `${works.length} / 3 slots`;
+  renderCards(document.getElementById("currently-reading-list"), works, {
+    emptyTitle: "Nothing in progress",
+    emptyHint: "Set a book’s status to Reading (max 3) from its detail page.",
+  });
+}
+
+async function loadToRead() {
+  const works = await api("/api/works?status=to_read");
+  const cap = document.getElementById("to-read-cap");
+  if (cap) cap.textContent = `${works.length} / 9 slots`;
+  renderCards(document.getElementById("to-read-list"), works, {
+    emptyTitle: "To Read is empty",
+    emptyHint: "Promote books here from Library (status: To read, max 9).",
+  });
+}
 
 async function loadWishlist() {
   const works = await api("/api/works?status=wishlist");
@@ -171,7 +193,10 @@ function renderCards(el, works, empty = {}) {
     const card = document.createElement("div");
     card.className = "card";
     const badges = [];
-    if (w.status && w.status !== "unread") badges.push(w.status);
+    if (w.status && w.status !== "unread") {
+      const statusLabel = { to_read: "to read", reading: "reading", read: "read", wishlist: "wishlist" }[w.status] || w.status;
+      badges.push(statusLabel);
+    }
     if (w.primary_code) badges.push(taxonomyLabel(w.primary_code).split(" — ")[1] || `#${w.primary_code}`);
     if (w.needs_review) badges.push("review");
     if (state.settings?.show_audio_gaps && w.needs_audio) badges.push("no audio");
@@ -188,8 +213,7 @@ function renderCards(el, works, empty = {}) {
   }
 }
 
-/* —— Import box —— */
-const importBox = document.getElementById("import-box");
+/* —— Import / wishlist actions —— */
 const importFile = document.getElementById("library-import-file");
 const importStatus = document.getElementById("import-status");
 
@@ -203,8 +227,6 @@ async function importLibraryFile(file) {
   setImportStatus(`Uploading ${file.name}…`);
   const fd = new FormData();
   fd.append("file", file);
-  const primary = document.getElementById("import-primary").value;
-  if (primary) fd.append("primary_code", primary);
   try {
     const res = await fetch("/api/library/import", {
       method: "POST",
@@ -235,35 +257,10 @@ importFile.addEventListener("change", (e) => {
   e.target.value = "";
 });
 
-["dragenter", "dragover"].forEach((ev) => {
-  importBox.addEventListener(ev, (e) => {
-    e.preventDefault();
-    importBox.classList.add("drag");
-  });
-});
-["dragleave", "drop"].forEach((ev) => {
-  importBox.addEventListener(ev, (e) => {
-    e.preventDefault();
-    importBox.classList.remove("drag");
-  });
-});
-importBox.addEventListener("drop", (e) => {
-  const file = e.dataTransfer?.files?.[0];
-  if (file) importLibraryFile(file);
-});
-
-document.getElementById("btn-new-work").addEventListener("click", async () => {
-  const title = prompt("Title?");
-  if (!title) return;
-  const authors = prompt("Author(s)?") || "";
-  const code = prompt("Primary taxonomy code? (e.g. 8201)") || "";
-  const codes = code ? [Number(code)] : [];
-  const work = await api("/api/works", {
-    method: "POST",
-    json: { title, authors, codes, primary_code: codes[0] || null },
-  });
-  await loadWorks();
-  await openDetail(work.id);
+document.getElementById("btn-add-wishlist").addEventListener("click", () => {
+  show("wishlist");
+  loadWishlist();
+  document.getElementById("wl-isbn")?.focus();
 });
 
 function taxonomyOptions(selected) {
@@ -304,8 +301,14 @@ async function openDetail(id) {
         <label>ISBN <input name="isbn" value="${escapeHtml(w.isbn || "")}" /></label>
         <label>Status
           <select name="status">
-            ${["unread","reading","read","wishlist"].map((s) =>
-              `<option value="${s}" ${w.status === s ? "selected" : ""}>${s}</option>`).join("")}
+            ${[
+              ["unread", "Unread"],
+              ["to_read", "To read"],
+              ["reading", "Currently reading"],
+              ["read", "Read"],
+              ["wishlist", "Wishlist"],
+            ].map(([s, label]) =>
+              `<option value="${s}" ${w.status === s ? "selected" : ""}>${label}</option>`).join("")}
           </select>
         </label>
         <label>Primary taxonomy

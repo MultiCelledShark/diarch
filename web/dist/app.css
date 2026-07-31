@@ -81,23 +81,12 @@ button.nav.active { color: var(--accent); border-bottom: 1px solid var(--accent)
   z-index: 5;
 }
 .brand { font-size: 1.4rem; color: var(--accent); margin-right: auto; }
+.top nav { display: flex; flex-wrap: wrap; gap: 0.15rem 0.35rem; align-items: center; }
 .user { display: flex; gap: 0.75rem; align-items: center; color: var(--muted); }
 main { padding: 1.25rem; }
 .toolbar { display: flex; gap: 0.75rem; margin-bottom: 1rem; flex-wrap: wrap; align-items: center; }
-.import-box {
-  margin-bottom: 1.25rem;
-  padding: 1.25rem;
-  border: 1px dashed var(--accent);
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--panel) 80%, transparent);
-}
-.import-box.drag {
-  background: color-mix(in srgb, var(--accent) 16%, var(--panel));
-}
-.import-box strong { display: block; color: var(--accent); font-size: 1.05rem; }
-.import-box p { color: var(--muted); margin: 0.35rem 0 0.75rem; }
-.import-box .row { align-items: end; }
-.import-box label { margin: 0; }
+.shelf-cap { margin-left: auto; font-size: 0.9rem; }
+#import-status { min-height: 1.2em; margin: -0.5rem 0 1rem; }
 .btn-file {
   display: inline-block;
   border: 1px solid var(--accent);
@@ -105,9 +94,6 @@ main { padding: 1.25rem; }
   padding: 0.45rem 0.9rem;
   border-radius: 3px;
   cursor: pointer;
-}
-.btn-file.primary {
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 .btn-file:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .detail-form { max-width: none; margin-bottom: 1rem; }

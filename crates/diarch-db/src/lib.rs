@@ -389,6 +389,20 @@ impl Db {
         Ok(works)
     }
 
+    /// Count works the user can access that are in `status`, optionally excluding one id.
+    pub async fn count_accessible_by_status(
+        &self,
+        user: &User,
+        status: &str,
+        exclude: Option<Uuid>,
+    ) -> Result<usize> {
+        let works = self.list_works_for_user(user, Some(status), None).await?;
+        Ok(works
+            .iter()
+            .filter(|w| exclude.map(|id| w.id != id).unwrap_or(true))
+            .count())
+    }
+
     pub async fn grant_work(&self, user_id: Uuid, work_id: Uuid) -> Result<()> {
         sqlx::query("INSERT OR IGNORE INTO work_grants (user_id, work_id) VALUES (?, ?)")
             .bind(user_id.to_string())

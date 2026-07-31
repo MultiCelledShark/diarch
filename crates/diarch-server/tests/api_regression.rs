@@ -541,3 +541,64 @@ async fn tts_queue_export_documents_todo() {
     assert_eq!(status, 200);
     assert!(body["todo"].as_str().unwrap().contains("ebook2audiobook"));
 }
+
+#[tokio::test]
+async fn currently_reading_shelf_caps_at_three() {
+    let (_dir, app, _) = test_app().await;
+    let token = login(&app, "admin", "adminpass").await;
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let (status, body, _) = json_req(
+            &app,
+            "POST",
+            "/api/works",
+            Some(&token),
+            Some(json!({
+                "title": format!("Reading {i}"),
+                "authors": "A",
+                "status": "reading"
+            })),
+        )
+        .await;
+        assert_eq!(status, 201, "{body}");
+        ids.push(body["id"].as_str().unwrap().to_string());
+    }
+    let (status, body, _) = json_req(
+        &app,
+        "POST",
+        "/api/works",
+        Some(&token),
+        Some(json!({
+            "title": "Reading overflow",
+            "authors": "A",
+            "status": "reading"
+        })),
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+
+    let (status, body, _) = json_req(
+        &app,
+        "POST",
+        "/api/works",
+        Some(&token),
+        Some(json!({ "title": "Parked", "authors": "A" })),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let id = body["id"].as_str().unwrap();
+    let (status, body, _) = json_req(
+        &app,
+        "PUT",
+        &format!("/api/works/{id}"),
+        Some(&token),
+        Some(json!({ "status": "reading" })),
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+
+    let (status, list, _) =
+        json_req(&app, "GET", "/api/works?status=reading", Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(list.as_array().unwrap().len(), 3);
+}

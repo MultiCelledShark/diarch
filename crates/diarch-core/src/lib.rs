@@ -87,15 +87,24 @@ impl Config {
 #[serde(rename_all = "snake_case")]
 pub enum ReadingStatus {
     Unread,
+    /// Short "up next" shelf (max [`MAX_TO_READ`]).
+    ToRead,
+    /// Actively reading / listening (max [`MAX_CURRENTLY_READING`]).
     Reading,
     Read,
     Wishlist,
 }
 
+/// Cap for the Currently Reading shelf.
+pub const MAX_CURRENTLY_READING: usize = 3;
+/// Cap for the To Read shelf.
+pub const MAX_TO_READ: usize = 9;
+
 impl ReadingStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Unread => "unread",
+            Self::ToRead => "to_read",
             Self::Reading => "reading",
             Self::Read => "read",
             Self::Wishlist => "wishlist",
@@ -105,9 +114,18 @@ impl ReadingStatus {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "unread" => Some(Self::Unread),
+            "to_read" => Some(Self::ToRead),
             "reading" => Some(Self::Reading),
             "read" => Some(Self::Read),
             "wishlist" => Some(Self::Wishlist),
+            _ => None,
+        }
+    }
+
+    pub fn shelf_cap(self) -> Option<usize> {
+        match self {
+            Self::Reading => Some(MAX_CURRENTLY_READING),
+            Self::ToRead => Some(MAX_TO_READ),
             _ => None,
         }
     }
@@ -306,11 +324,14 @@ mod tests {
 
     #[test]
     fn reading_status_roundtrip() {
-        for s in ["unread", "reading", "read", "wishlist"] {
+        for s in ["unread", "to_read", "reading", "read", "wishlist"] {
             let st = ReadingStatus::parse(s).unwrap();
             assert_eq!(st.as_str(), s);
         }
         assert!(ReadingStatus::parse("nope").is_none());
+        assert_eq!(ReadingStatus::Reading.shelf_cap(), Some(3));
+        assert_eq!(ReadingStatus::ToRead.shelf_cap(), Some(9));
+        assert_eq!(ReadingStatus::Unread.shelf_cap(), None);
     }
 
     #[test]

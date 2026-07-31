@@ -219,7 +219,7 @@ async fn create_work(
     AuthUser(user): AuthUser,
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateWorkReq>,
-) -> Result<(StatusCode, Json<Work>), StatusCode> {
+) -> Result<(StatusCode, Json<Work>), (StatusCode, String)> {
     let now = Utc::now();
     let codes = body.codes.clone().unwrap_or_default();
     let primary = body
@@ -232,6 +232,24 @@ async fn create_work(
         ReadingStatus::parse(body.status.as_deref().unwrap_or("unread"))
             .unwrap_or(ReadingStatus::Unread)
     };
+    if let Some(cap) = status.shelf_cap() {
+        let n = state
+            .db
+            .count_accessible_by_status(&user, status.as_str(), None)
+            .await
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "db error".into()))?;
+        if n >= cap {
+            let label = match status {
+                ReadingStatus::Reading => "Currently Reading",
+                ReadingStatus::ToRead => "To Read",
+                _ => status.as_str(),
+            };
+            return Err((
+                StatusCode::CONFLICT,
+                format!("{label} is full (max {cap}). Move a book off that shelf first."),
+            ));
+        }
+    }
     let work = Work {
         id: Uuid::new_v4(),
         title: body.title,
@@ -263,11 +281,11 @@ async fn create_work(
         .db
         .create_work(&work, &codes, Some(user.id))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "db error".into()))?;
     let dir = state.config.work_dir(work.id);
     tokio::fs::create_dir_all(&dir)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "fs error".into()))?;
     // placeholder cover
     let svg = metadata::placeholder_cover_svg(&work.title, &work.authors);
     let _ = tokio::fs::write(dir.join("cover.svg"), svg).await;
@@ -329,16 +347,16 @@ async fn update_work(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateWorkReq>,
-) -> Result<Json<Work>, StatusCode> {
+) -> Result<Json<Work>, (StatusCode, String)> {
     if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err((StatusCode::FORBIDDEN, "forbidden".into()));
     }
     let mut work = state
         .db
         .get_work(id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "db error".into()))?
+        .ok_or((StatusCode::NOT_FOUND, "not found".into()))?;
     if let Some(t) = body.title {
         work.title = t;
     }
@@ -352,6 +370,26 @@ async fn update_work(
         work.description = Some(d);
     }
     if let Some(s) = body.status.as_deref().and_then(ReadingStatus::parse) {
+        if s != work.status {
+            if let Some(cap) = s.shelf_cap() {
+                let n = state
+                    .db
+                    .count_accessible_by_status(&user, s.as_str(), Some(id))
+                    .await
+                    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "db error".into()))?;
+                if n >= cap {
+                    let label = match s {
+                        ReadingStatus::Reading => "Currently Reading",
+                        ReadingStatus::ToRead => "To Read",
+                        _ => s.as_str(),
+                    };
+                    return Err((
+                        StatusCode::CONFLICT,
+                        format!("{label} is full (max {cap}). Move a book off that shelf first."),
+                    ));
+                }
+            }
+        }
         work.status = s;
     }
     if let Some(p) = body.primary_code {
@@ -411,7 +449,7 @@ async fn update_work(
         .db
         .update_work(&work)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "db error".into()))?;
     Ok(Json(work))
 }
 
@@ -1233,7 +1271,7 @@ async fn wishlist_add(
     AuthUser(user): AuthUser,
     State(state): State<Arc<AppState>>,
     Json(body): Json<WishlistReq>,
-) -> Result<(StatusCode, Json<Work>), StatusCode> {
+) -> Result<(StatusCode, Json<Work>), (StatusCode, String)> {
     let mut title = body.title.unwrap_or_default();
     let mut authors = body.authors.unwrap_or_default();
     let mut isbn = body.isbn.clone();
@@ -1267,7 +1305,7 @@ async fn wishlist_add(
         }
     }
     if title.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err((StatusCode::BAD_REQUEST, "title or isbn required".into()));
     }
 
     create_work(
