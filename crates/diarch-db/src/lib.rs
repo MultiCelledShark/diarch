@@ -537,6 +537,18 @@ impl Db {
         Ok(row.map(|r| row_job(&r)).transpose()?)
     }
 
+    /// Mark orphaned `running` jobs as failed (e.g. after a server crash mid-import).
+    pub async fn reclaim_stale_running_jobs(&self, detail: &str) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE jobs SET status = 'failed', detail = ?, updated_at = ? WHERE status = 'running'",
+        )
+        .bind(detail)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
     pub async fn set_integration_health(
         &self,
         name: &str,

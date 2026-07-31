@@ -57,6 +57,17 @@ pub fn spawn_workers(state: Arc<AppState>) {
     {
         let st = state.clone();
         tokio::spawn(async move {
+            match st
+                .db
+                .reclaim_stale_running_jobs(
+                    "interrupted: server restarted while job was running; re-queue the import",
+                )
+                .await
+            {
+                Ok(n) if n > 0 => tracing::warn!(count = n, "reclaimed stale running jobs"),
+                Err(e) => tracing::warn!(error = %e, "reclaim stale jobs"),
+                _ => {}
+            }
             loop {
                 if let Err(e) = routes::jobs::process_one(&st).await {
                     tracing::warn!(error = %e, "job worker");

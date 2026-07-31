@@ -235,14 +235,20 @@ fn missing_tool_msg(bin: &str) -> String {
     match bin {
         "pandoc" => "pandoc is required for PDF import. Install: apt install pandoc (Debian) or pacman -S pandoc (Arch)".into(),
         "ocrmypdf" => "ocrmypdf is required for PDF import. Install: apt install ocrmypdf tesseract-ocr tesseract-ocr-eng (Debian); on Arch: pacman -S tesseract tesseract-data-eng and `uv tool install ocrmypdf` (or AUR ocrmypdf)".into(),
-        "pdftohtml" => "pdftohtml (poppler) is required for PDF→Markdown. Install: apt install poppler-utils (Debian) or pacman -S poppler (Arch)".into(),
+        "pdftohtml" | "pdftotext" => format!(
+            "{bin} (poppler) is required for PDF→Markdown. Install: apt install poppler-utils (Debian) or pacman -S poppler (Arch)"
+        ),
         other => format!("{other} is required but was not found on PATH"),
     }
 }
 
 async fn ensure_on_path(bin: &str) -> Result<()> {
     // poppler tools accept -v (stderr) rather than --version
-    let version_arg = if bin == "pdftohtml" { "-v" } else { "--version" };
+    let version_arg = if bin == "pdftohtml" || bin == "pdftotext" {
+        "-v"
+    } else {
+        "--version"
+    };
     match Command::new(bin)
         .arg(version_arg)
         .stdin(Stdio::null())
@@ -272,59 +278,90 @@ fn which_bin(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn ingest_pdf(library_root: &Path, work_id: Uuid, source: &Path) -> Result<ImportResult> {
-    // Pandoc 3.x cannot read PDF; we OCR, then pdftohtml → pandoc HTML→Markdown.
-    ensure_on_path("pandoc").await?;
-    ensure_on_path("ocrmypdf").await?;
-    ensure_on_path("pdftohtml").await?;
-
-    let work_dir = library_root.join(work_id.to_string());
-    tokio::fs::create_dir_all(&work_dir).await?;
-    let quarantine = work_dir.join("import.pdf");
-    tokio::fs::copy(source, &quarantine)
-        .await
-        .context("copy quarantine import.pdf")?;
-
-    let ocr_pdf = work_dir.join("import.ocr.pdf");
-    let ocr_status = Command::new("ocrmypdf")
-        .arg("--skip-text")
-        .arg(&quarantine)
-        .arg(&ocr_pdf)
+/// Run a tool with captured stdout/stderr. Avoids `stderr(Stdio::piped())` +
+/// `.status()` deadlocks when tools emit more than a pipe buffer of logs.
+async fn run_tool(bin: &str, args: &[&str]) -> Result<std::process::Output> {
+    Command::new(bin)
+        .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .status()
+        .output()
         .await
-        .map_err(|_| anyhow!("{}", missing_tool_msg("ocrmypdf")))?;
+        .map_err(|_| anyhow!("{}", missing_tool_msg(bin)))
+}
 
-    if !ocr_status.success() {
-        let _ = tokio::fs::remove_file(&ocr_pdf).await;
-        return Err(anyhow!(
-            "ocrmypdf failed OCR on PDF (exit {:?}). Ensure tesseract + language data are installed",
-            ocr_status.code()
-        ));
+fn tool_stderr(output: &std::process::Output) -> String {
+    let s = String::from_utf8_lossy(&output.stderr);
+    let t = s.trim();
+    if t.is_empty() {
+        String::new()
+    } else {
+        // Keep errors readable in the jobs table
+        let one_line: String = t.chars().take(400).collect();
+        format!(": {one_line}")
     }
+}
 
+/// Text inside `<p>...</p>` only. pdftohtml often emits empty page shells (CSS +
+/// empty divs, no paragraphs) for OCR'd PDFs with odd font encodings.
+fn html_paragraph_alnum_len(html: &str) -> usize {
+    let mut total = 0usize;
+    let mut rest = html;
+    while let Some(start) = rest.find("<p") {
+        let Some(gt) = rest[start..].find('>') else {
+            break;
+        };
+        let content_start = start + gt + 1;
+        let Some(rel_end) = rest[content_start..].find("</p>") else {
+            break;
+        };
+        let content = &rest[content_start..content_start + rel_end];
+        total += content.chars().filter(|c| c.is_alphanumeric()).count();
+        rest = &rest[content_start + rel_end + 4..];
+    }
+    total
+}
+
+fn cleanup_import_intermediates(work_dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(work_dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with("import")
+                && (name.ends_with(".png")
+                    || name.ends_with(".jpg")
+                    || name.ends_with(".html")
+                    || name.ends_with(".xml")
+                    || name.ends_with(".ocr.pdf")
+                    || name == "import.txt")
+            {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+}
+
+async fn pdf_to_markdown_via_html(
+    work_dir: &Path,
+    ocr_pdf: &Path,
+    md_dest: &Path,
+    media: &Path,
+) -> Result<bool> {
     let html_path = work_dir.join("import.html");
-    let html_status = Command::new("pdftohtml")
-        .arg("-s")
-        .arg("-i")
-        .arg("-noframes")
-        .arg(&ocr_pdf)
-        .arg(&html_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .status()
-        .await
-        .map_err(|_| anyhow!("{}", missing_tool_msg("pdftohtml")))?;
-
-    if !html_status.success() {
-        let _ = tokio::fs::remove_file(&ocr_pdf).await;
-        let _ = tokio::fs::remove_file(&html_path).await;
+    let html_args = [
+        "-s",
+        "-i",
+        "-noframes",
+        ocr_pdf.to_str().unwrap_or_default(),
+        html_path.to_str().unwrap_or_default(),
+    ];
+    let html_out = run_tool("pdftohtml", &html_args).await?;
+    if !html_out.status.success() {
         return Err(anyhow!(
-            "pdftohtml failed converting PDF to HTML (exit {:?})",
-            html_status.code()
+            "pdftohtml failed converting PDF to HTML (exit {:?}){}",
+            html_out.status.code(),
+            tool_stderr(&html_out)
         ));
     }
 
@@ -336,9 +373,8 @@ async fn ingest_pdf(library_root: &Path, work_id: Uuid, source: &Path) -> Result
         if alt.exists() {
             alt
         } else {
-            // pick any .html just produced beside the OCR pdf
             let mut found = None;
-            if let Ok(mut entries) = tokio::fs::read_dir(&work_dir).await {
+            if let Ok(mut entries) = tokio::fs::read_dir(work_dir).await {
                 while let Ok(Some(e)) = entries.next_entry().await {
                     let p = e.path();
                     if p.extension().and_then(|x| x.to_str()) == Some("html") {
@@ -351,48 +387,133 @@ async fn ingest_pdf(library_root: &Path, work_id: Uuid, source: &Path) -> Result
         }
     };
 
+    let html = tokio::fs::read_to_string(&html_src)
+        .await
+        .unwrap_or_default();
+    // Fixture "Hello Diarch" is 11 alnum in one <p>; empty page shells have none.
+    if html_paragraph_alnum_len(&html) < 1 {
+        warn!(
+            path = %html_src.display(),
+            "pdftohtml produced little/no extractable text; will fall back to pdftotext"
+        );
+        let _ = tokio::fs::remove_file(&html_src).await;
+        return Ok(false);
+    }
+
+    let media_arg = format!("--extract-media={}", media.display());
+    let pandoc_out = run_tool(
+        "pandoc",
+        &[
+            html_src.to_str().unwrap_or_default(),
+            "-t",
+            "markdown",
+            "-o",
+            md_dest.to_str().unwrap_or_default(),
+            &media_arg,
+        ],
+    )
+    .await?;
+    let _ = tokio::fs::remove_file(&html_src).await;
+    if !pandoc_out.status.success() {
+        return Err(anyhow!(
+            "pandoc failed converting PDF HTML intermediate to markdown{}",
+            tool_stderr(&pandoc_out)
+        ));
+    }
+    Ok(true)
+}
+
+async fn pdf_to_markdown_via_pdftotext(ocr_pdf: &Path, md_dest: &Path) -> Result<()> {
+    ensure_on_path("pdftotext").await?;
+    let txt_path = ocr_pdf.with_extension("txt");
+    let out = run_tool(
+        "pdftotext",
+        &[
+            "-layout",
+            ocr_pdf.to_str().unwrap_or_default(),
+            txt_path.to_str().unwrap_or_default(),
+        ],
+    )
+    .await?;
+    if !out.status.success() {
+        let _ = tokio::fs::remove_file(&txt_path).await;
+        return Err(anyhow!(
+            "pdftotext failed extracting text from PDF (exit {:?}){}",
+            out.status.code(),
+            tool_stderr(&out)
+        ));
+    }
+    let text = tokio::fs::read_to_string(&txt_path)
+        .await
+        .context("read pdftotext output")?;
+    let _ = tokio::fs::remove_file(&txt_path).await;
+    let alnum = text.chars().filter(|c| c.is_alphanumeric()).count();
+    if alnum < 1 {
+        return Err(anyhow!(
+            "PDF text extraction produced little/no content ({alnum} alnum chars). The PDF may be image-only and OCR failed, or the file is corrupt"
+        ));
+    }
+    // Plain text is valid Markdown; pandoc will wrap it on confirm → EPUB.
+    tokio::fs::write(md_dest, text)
+        .await
+        .context("write markdown from pdftotext")?;
+    Ok(())
+}
+
+async fn ingest_pdf(library_root: &Path, work_id: Uuid, source: &Path) -> Result<ImportResult> {
+    // Pandoc 3.x cannot read PDF; we OCR, then pdftohtml → pandoc HTML→Markdown,
+    // with pdftotext fallback when pdftohtml emits empty page shells.
+    ensure_on_path("pandoc").await?;
+    ensure_on_path("ocrmypdf").await?;
+    ensure_on_path("pdftohtml").await?;
+
+    let work_dir = library_root.join(work_id.to_string());
+    tokio::fs::create_dir_all(&work_dir).await?;
+    let quarantine = work_dir.join("import.pdf");
+    tokio::fs::copy(source, &quarantine)
+        .await
+        .context("copy quarantine import.pdf")?;
+
+    let ocr_pdf = work_dir.join("import.ocr.pdf");
+    let ocr_out = run_tool(
+        "ocrmypdf",
+        &[
+            "--skip-text",
+            quarantine.to_str().unwrap_or_default(),
+            ocr_pdf.to_str().unwrap_or_default(),
+        ],
+    )
+    .await?;
+
+    if !ocr_out.status.success() {
+        let _ = tokio::fs::remove_file(&ocr_pdf).await;
+        return Err(anyhow!(
+            "ocrmypdf failed OCR on PDF (exit {:?}). Ensure tesseract + language data are installed{}",
+            ocr_out.status.code(),
+            tool_stderr(&ocr_out)
+        ));
+    }
+
     let md_dest = work_markdown_path(library_root, work_id);
     let media = work_media_dir(library_root, work_id);
     tokio::fs::create_dir_all(&media).await?;
-    let media_arg = format!("--extract-media={}", media.display());
 
-    let status = Command::new("pandoc")
-        .arg(&html_src)
-        .arg("-t")
-        .arg("markdown")
-        .arg("-o")
-        .arg(&md_dest)
-        .arg(&media_arg)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .status()
-        .await
-        .map_err(|_| anyhow!("{}", missing_tool_msg("pandoc")))?;
-
-    let _ = tokio::fs::remove_file(&ocr_pdf).await;
-    let _ = tokio::fs::remove_file(&html_src).await;
-    // pdftohtml may drop companion pngs next to html; leave media/ for extracted assets
-    if let Ok(mut entries) = tokio::fs::read_dir(&work_dir).await {
-        while let Ok(Some(e)) = entries.next_entry().await {
-            let p = e.path();
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name.starts_with("import")
-                && (name.ends_with(".png")
-                    || name.ends_with(".jpg")
-                    || name.ends_with(".html")
-                    || name.ends_with(".xml"))
-            {
-                let _ = tokio::fs::remove_file(&p).await;
-            }
+    let via_html = match pdf_to_markdown_via_html(&work_dir, &ocr_pdf, &md_dest, &media).await {
+        Ok(true) => true,
+        Ok(false) => false,
+        Err(e) => {
+            warn!(error = %e, "pdftohtml/pandoc path failed; trying pdftotext");
+            false
         }
+    };
+    if !via_html {
+        pdf_to_markdown_via_pdftotext(&ocr_pdf, &md_dest).await?;
+        info!(?work_id, "PDF converted via pdftotext fallback; awaiting review");
+    } else {
+        info!(?work_id, "PDF OCR'd and converted to markdown; awaiting review before EPUB export");
     }
 
-    if !status.success() {
-        return Err(anyhow!("pandoc failed converting PDF HTML intermediate to markdown"));
-    }
-
-    info!(?work_id, "PDF OCR'd and converted to markdown; awaiting review before EPUB export");
+    cleanup_import_intermediates(&work_dir);
 
     Ok(ImportResult {
         epub_path: None,
