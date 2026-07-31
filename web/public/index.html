@@ -148,16 +148,27 @@
 
         <div id="view-reader" class="view" hidden>
           <div class="reader-bar">
-            <button type="button" id="reader-close">Close</button>
-            <span id="reader-title"></span>
-            <span id="reader-progress" class="reader-progress" aria-live="polite"></span>
-            <label class="reader-scroll-label"><input type="checkbox" id="reader-scroll" /> Infinite scroll</label>
+            <div class="reader-side reader-side-left">
+              <button type="button" id="reader-prev" class="reader-nav" aria-label="Previous page">←</button>
+            </div>
+            <div class="reader-center">
+              <span id="reader-title"></span>
+              <span id="reader-progress" class="reader-progress" aria-live="polite"></span>
+            </div>
+            <div class="reader-side reader-side-right">
+              <button type="button" id="reader-next" class="reader-nav" aria-label="Next page">→</button>
+              <div class="reader-menu-wrap">
+                <button type="button" id="reader-menu-btn" class="reader-menu-btn" aria-label="Reader menu" aria-haspopup="true" aria-expanded="false">☰</button>
+                <div id="reader-menu" class="reader-menu" hidden>
+                  <button type="button" id="reader-scroll" aria-pressed="false">Infinite scroll</button>
+                  <button type="button" id="reader-close">Close</button>
+                </div>
+              </div>
+            </div>
           </div>
           <div class="reader-stage">
-            <button type="button" id="reader-prev" class="reader-nav reader-nav-left" aria-label="Previous page">←</button>
             <div id="epub-area"></div>
             <article id="md-area" hidden></article>
-            <button type="button" id="reader-next" class="reader-nav reader-nav-right" aria-label="Next page">→</button>
           </div>
           <audio id="audio-player" controls hidden></audio>
         </div>

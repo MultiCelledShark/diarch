@@ -462,13 +462,15 @@ async function pollJob(id, done) {
 
 async function openReader(w, hasEpub, hasMd, audio) {
   state.readerWorkId = w.id;
+  state.readerHasEpub = !!hasEpub;
+  state.readerHasMd = !!hasMd;
   show("reader");
+  closeReaderMenu();
   document.getElementById("reader-title").textContent = w.title;
   setReaderProgress("");
-  const scrollPref = state.settings?.reader_infinite_scroll;
-  const scrollBox = document.getElementById("reader-scroll");
-  scrollBox.checked = !!scrollPref && hasMd;
-  const useMd = scrollBox.checked && hasMd;
+  const preferScroll = !!state.settings?.reader_infinite_scroll && hasMd;
+  const useMd = preferScroll || (!hasEpub && hasMd);
+  setInfiniteScrollActive(useMd);
   setReaderChrome(useMd);
   document.getElementById("epub-area").hidden = useMd;
   document.getElementById("md-area").hidden = !useMd;
@@ -483,32 +485,17 @@ async function openReader(w, hasEpub, hasMd, audio) {
 
   if (useMd) await loadMarkdown(w.id);
   else if (hasEpub) await loadEpub(w);
-  else if (hasMd) {
-    scrollBox.checked = true;
-    setReaderChrome(true);
-    document.getElementById("epub-area").hidden = true;
-    document.getElementById("md-area").hidden = false;
-    await loadMarkdown(w.id);
-  }
+}
 
-  scrollBox.onchange = async () => {
-    if (scrollBox.checked && hasMd) {
-      if (state.book) {
-        try { state.book.destroy(); } catch {}
-        state.book = null;
-        state.rendition = null;
-      }
-      setReaderChrome(true);
-      document.getElementById("epub-area").hidden = true;
-      document.getElementById("md-area").hidden = false;
-      await loadMarkdown(w.id);
-    } else if (hasEpub) {
-      setReaderChrome(false);
-      document.getElementById("md-area").hidden = true;
-      document.getElementById("epub-area").hidden = false;
-      await loadEpub(w);
-    }
-  };
+function isInfiniteScrollActive() {
+  return document.getElementById("reader-scroll")?.getAttribute("aria-pressed") === "true";
+}
+
+function setInfiniteScrollActive(on) {
+  const btn = document.getElementById("reader-scroll");
+  if (!btn) return;
+  btn.classList.toggle("active", !!on);
+  btn.setAttribute("aria-pressed", on ? "true" : "false");
 }
 
 function setReaderChrome(infiniteScroll) {
@@ -519,6 +506,45 @@ function setReaderChrome(infiniteScroll) {
 function setReaderProgress(text) {
   const el = document.getElementById("reader-progress");
   if (el) el.textContent = text || "";
+}
+
+function closeReaderMenu() {
+  const menu = document.getElementById("reader-menu");
+  const btn = document.getElementById("reader-menu-btn");
+  if (menu) menu.hidden = true;
+  if (btn) btn.setAttribute("aria-expanded", "false");
+}
+
+function toggleReaderMenu() {
+  const menu = document.getElementById("reader-menu");
+  const btn = document.getElementById("reader-menu-btn");
+  const open = !!menu.hidden;
+  menu.hidden = !open;
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+async function applyReaderMode(useMd) {
+  const hasMd = !!state.readerHasMd;
+  const hasEpub = !!state.readerHasEpub;
+  if (useMd && !hasMd) return;
+  if (!useMd && !hasEpub) return;
+  setInfiniteScrollActive(useMd);
+  setReaderChrome(useMd);
+  if (useMd) {
+    if (state.book) {
+      try { state.book.destroy(); } catch {}
+      state.book = null;
+      state.rendition = null;
+    }
+    document.getElementById("epub-area").hidden = true;
+    document.getElementById("md-area").hidden = false;
+    await loadMarkdown(state.readerWorkId);
+  } else {
+    document.getElementById("md-area").hidden = true;
+    document.getElementById("epub-area").hidden = false;
+    const w = state.currentWork?.work;
+    if (w) await loadEpub(w);
+  }
 }
 
 function updateMarkdownProgressUi(area) {
@@ -654,7 +680,7 @@ function readerIsOpen() {
 }
 
 function readerTurn(dir) {
-  if (!state.rendition || document.getElementById("reader-scroll")?.checked) return;
+  if (!state.rendition || isInfiniteScrollActive()) return;
   const w = state.currentWork?.work;
   const rtl = w && (w.reading_direction === "rtl" || w.is_manga);
   // Physical left/right: for RTL, left advances; for LTR, right advances.
@@ -667,7 +693,8 @@ function readerTurn(dir) {
   }
 }
 
-document.getElementById("reader-close").addEventListener("click", () => {
+function closeReaderView() {
+  closeReaderMenu();
   if (state.book) {
     try { state.book.destroy(); } catch {}
     state.book = null;
@@ -679,14 +706,39 @@ document.getElementById("reader-close").addEventListener("click", () => {
     show("library");
     loadWorks();
   }
+}
+
+document.getElementById("reader-menu-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleReaderMenu();
+});
+
+document.getElementById("reader-scroll").addEventListener("click", async () => {
+  const next = !isInfiniteScrollActive();
+  closeReaderMenu();
+  await applyReaderMode(next);
+});
+
+document.getElementById("reader-close").addEventListener("click", () => {
+  closeReaderView();
 });
 
 document.getElementById("reader-prev").addEventListener("click", () => readerTurn("left"));
 document.getElementById("reader-next").addEventListener("click", () => readerTurn("right"));
 
+document.addEventListener("click", (e) => {
+  const wrap = document.querySelector(".reader-menu-wrap");
+  if (!wrap || wrap.contains(e.target)) return;
+  closeReaderMenu();
+});
+
 document.addEventListener("keydown", (e) => {
   if (!readerIsOpen()) return;
   if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable)) {
+    return;
+  }
+  if (e.key === "Escape") {
+    closeReaderMenu();
     return;
   }
   if (e.key === "ArrowLeft") {
