@@ -377,13 +377,11 @@ async function openDetail(id) {
             <button type="button" id="review-find-all">Replace all</button>
             <button type="button" id="review-find-close">Close</button>
           </div>
-          <div class="review-md-split">
-            <textarea id="review-md-editor" spellcheck="false" placeholder="Loading…"></textarea>
-            <div id="review-md-preview" class="review-md-preview" aria-live="polite"></div>
-          </div>
+          <textarea id="review-md-editor" spellcheck="false" placeholder="Loading…"></textarea>
           <div class="review-actions">
             <button type="button" id="btn-save-md">Save markdown</button>
             <span id="review-dirty" class="review-dirty" hidden>Unsaved changes</span>
+            <button type="button" id="btn-preview-md">Preview</button>
             <a href="/api/works/${w.id}/download/markdown"><button type="button">Download MD</button></a>
             <button type="button" id="btn-confirm">Confirm → EPUB</button>
           </div>
@@ -553,7 +551,7 @@ document.getElementById("back-library").addEventListener("click", () => {
 
 /* —— Review markdown editor —— */
 let reviewSavedText = "";
-let reviewPreviewTimer = null;
+let reviewPreviewWin = null;
 
 function setReviewDirty(dirty, savedText) {
   if (typeof savedText === "string") reviewSavedText = savedText;
@@ -563,9 +561,7 @@ function setReviewDirty(dirty, savedText) {
   if (confirm) confirm.disabled = !!dirty;
 }
 
-function renderReviewPreview(md) {
-  const preview = document.getElementById("review-md-preview");
-  if (!preview) return;
+function markdownToSafeHtml(md) {
   let html = "";
   try {
     if (typeof marked !== "undefined") {
@@ -576,16 +572,100 @@ function renderReviewPreview(md) {
   } catch (e) {
     html = `<p class="error">Preview error: ${escapeHtml(e.message || String(e))}</p>`;
   }
-  if (typeof DOMPurify !== "undefined") {
-    preview.innerHTML = DOMPurify.sanitize(html);
-  } else {
-    preview.textContent = md || "";
-  }
+  if (typeof DOMPurify !== "undefined") return DOMPurify.sanitize(html);
+  return `<pre>${escapeHtml(md || "")}</pre>`;
 }
 
-function scheduleReviewPreview(editor) {
-  clearTimeout(reviewPreviewTimer);
-  reviewPreviewTimer = setTimeout(() => renderReviewPreview(editor.value), 120);
+function closeMdPreviewFloat() {
+  document.getElementById("md-preview-float")?.remove();
+}
+
+function fillMdPreviewBody(md) {
+  const body = document.getElementById("md-preview-body");
+  if (body) body.innerHTML = markdownToSafeHtml(md);
+}
+
+function openMdPreviewFloat(editor) {
+  closeMdPreviewFloat();
+  const float = document.createElement("div");
+  float.id = "md-preview-float";
+  float.className = "md-preview-float";
+  float.setAttribute("role", "dialog");
+  float.setAttribute("aria-label", "Markdown preview");
+  float.innerHTML = `
+    <div class="md-preview-float-head" id="md-preview-drag">
+      <strong>Markdown preview</strong>
+      <div class="md-preview-float-actions">
+        <button type="button" id="md-preview-refresh" title="Refresh from editor">Refresh</button>
+        <button type="button" id="md-preview-tab" title="Open in new tab">New tab</button>
+        <button type="button" id="md-preview-close" aria-label="Close preview">×</button>
+      </div>
+    </div>
+    <div id="md-preview-body" class="md-preview-body"></div>`;
+  document.body.appendChild(float);
+  fillMdPreviewBody(editor?.value || "");
+
+  document.getElementById("md-preview-close")?.addEventListener("click", closeMdPreviewFloat);
+  document.getElementById("md-preview-refresh")?.addEventListener("click", () => {
+    fillMdPreviewBody(document.getElementById("review-md-editor")?.value || "");
+  });
+  document.getElementById("md-preview-tab")?.addEventListener("click", () => {
+    openMdPreviewTab(document.getElementById("review-md-editor")?.value || "");
+  });
+
+  // Drag by header
+  const head = document.getElementById("md-preview-drag");
+  let dragging = false;
+  let ox = 0;
+  let oy = 0;
+  head?.addEventListener("pointerdown", (e) => {
+    if (e.target.closest("button")) return;
+    dragging = true;
+    const rect = float.getBoundingClientRect();
+    ox = e.clientX - rect.left;
+    oy = e.clientY - rect.top;
+    head.setPointerCapture?.(e.pointerId);
+  });
+  head?.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    float.style.left = `${Math.max(0, e.clientX - ox)}px`;
+    float.style.top = `${Math.max(0, e.clientY - oy)}px`;
+    float.style.right = "auto";
+    float.style.bottom = "auto";
+  });
+  head?.addEventListener("pointerup", () => {
+    dragging = false;
+  });
+}
+
+function openMdPreviewTab(md) {
+  const html = markdownToSafeHtml(md);
+  const doc = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8" />
+<title>Markdown preview — Diarch</title>
+<style>
+  body { margin: 0; padding: 1.5rem max(1rem, calc(50vw - 18rem));
+    font: 1.05rem/1.6 system-ui, sans-serif; background: #0f1814; color: #e8efe6; }
+  h1,h2,h3,h4 { color: #c4a35a; font-family: Palatino, Georgia, serif; }
+  a { color: #e8b87a; } pre { overflow: auto; padding: .75rem; background: #0a100e;
+    border: 1px solid #2d4038; border-radius: 3px; }
+  blockquote { margin: .5rem 0; padding-left: .75rem; border-left: 3px solid #c4a35a; color: #9aaf9f; }
+  code { font-family: ui-monospace, monospace; font-size: .9em; }
+</style></head><body>${html}</body></html>`;
+  if (reviewPreviewWin && !reviewPreviewWin.closed) {
+    reviewPreviewWin.document.open();
+    reviewPreviewWin.document.write(doc);
+    reviewPreviewWin.document.close();
+    reviewPreviewWin.focus();
+    return;
+  }
+  reviewPreviewWin = window.open("", "diarch-md-preview");
+  if (!reviewPreviewWin) {
+    alert("Pop-up blocked — allow pop-ups for Diarch to open preview in a new tab.");
+    return;
+  }
+  reviewPreviewWin.document.open();
+  reviewPreviewWin.document.write(doc);
+  reviewPreviewWin.document.close();
 }
 
 function mdWrapSelection(editor, before, after = before) {
@@ -696,18 +776,18 @@ function wireReviewMarkdownEditor(workId, msg) {
   const confirmBtn = document.getElementById("btn-confirm");
   if (confirmBtn) confirmBtn.disabled = false;
 
+  closeMdPreviewFloat();
+
   fetch(`/api/works/${workId}/content/markdown`, { credentials: "include" })
     .then(async (res) => {
       editor.value = res.ok ? await res.text() : "";
       if (!res.ok) msg(`Could not load markdown (${res.status})`, true);
       setReviewDirty(false, editor.value);
-      renderReviewPreview(editor.value);
     })
     .catch((e) => msg(e.message || String(e), true));
 
   editor.addEventListener("input", () => {
     setReviewDirty(editor.value !== reviewSavedText);
-    scheduleReviewPreview(editor);
   });
 
   document.querySelectorAll("[data-md-cmd]").forEach((btn) => {
@@ -746,6 +826,10 @@ function wireReviewMarkdownEditor(workId, msg) {
     }
     setReviewDirty(false, editor.value);
     msg("Markdown saved (still needs confirm)");
+  });
+
+  document.getElementById("btn-preview-md")?.addEventListener("click", () => {
+    openMdPreviewFloat(editor);
   });
 
   const findNext = () => {
