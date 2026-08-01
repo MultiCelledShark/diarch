@@ -356,8 +356,14 @@ async function openDetail(id) {
         <div id="meta-hits" class="meta-hits" hidden></div>
       </form>
       <p class="muted">${hasEpub ? "EPUB ready" : "No EPUB yet"} · ${hasMd ? "Markdown ready" : "No Markdown"} · ${hasAudio ? "M4B ready" : (w.needs_audio ? "Needs audio" : "No audio")} · Direction: ${escapeHtml(w.reading_direction)}${w.needs_review ? " · Needs review" : ""}${w.needs_cover ? " · Needs cover" : ""}</p>
+      ${hasAudio ? `
+        <div class="detail-audio">
+          <audio id="detail-audio" controls preload="metadata"
+            src="/api/works/${w.id}/audio/${escapeHtml((audio.relative_path || "book.m4b").split("/").pop() || "book.m4b")}"></audio>
+        </div>` : ""}
       <div class="actions">
         ${hasEpub || hasMd ? `<button type="button" id="btn-read">Read</button>` : ""}
+        ${hasAudio ? `<button type="button" id="btn-listen">${hasEpub || hasMd ? "Listen" : "Play audiobook"}</button>` : ""}
         <button type="button" id="btn-refresh-meta">Refresh metadata</button>
         <label class="btn-file">Replace / import file <input type="file" id="import-file" accept=".epub,.pdf,.md,.markdown" hidden /></label>
         ${hasEpub ? `<a href="/api/works/${w.id}/download/epub"><button type="button">Download EPUB</button></a>` : ""}
@@ -465,6 +471,7 @@ async function openDetail(id) {
   });
 
   document.getElementById("btn-read")?.addEventListener("click", () => openReader(w, hasEpub, hasMd, audio));
+  document.getElementById("btn-listen")?.addEventListener("click", () => openReader(w, hasEpub, hasMd, audio));
   document.getElementById("btn-refresh-meta")?.addEventListener("click", async () => {
     msg("Refreshing from EPUB / ISBN…");
     try {
@@ -1295,12 +1302,13 @@ async function openReader(w, hasEpub, hasMd, audio) {
   applyReaderTypography(loadTypo());
   document.getElementById("reader-title").textContent = w.title;
   setReaderProgress("");
+  const audioOnly = !!audio && !hasEpub && !hasMd;
   const preferScroll = !!state.settings?.reader_infinite_scroll && hasMd;
-  const useMd = preferScroll || (!hasEpub && hasMd);
+  const useMd = !audioOnly && (preferScroll || (!hasEpub && hasMd));
   setInfiniteScrollActive(useMd);
-  setReaderChrome(useMd);
-  document.getElementById("epub-area").hidden = useMd;
-  document.getElementById("md-area").hidden = !useMd;
+  setReaderChrome(useMd || audioOnly);
+  document.getElementById("epub-area").hidden = useMd || audioOnly;
+  document.getElementById("md-area").hidden = !useMd || audioOnly;
   setTocEnabled(false);
   renderTocList([]);
 
@@ -1314,6 +1322,7 @@ async function openReader(w, hasEpub, hasMd, audio) {
     audioEl.removeAttribute("src");
   }
 
+  if (audioOnly) return;
   if (useMd) await loadMarkdown(w.id);
   else if (hasEpub) await loadEpub(w);
 }
