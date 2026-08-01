@@ -1,4 +1,4 @@
-use diarch_import::{export_needs_tts_queue, ingest_file, zip_markdown_bundle};
+use diarch_import::{export_needs_tts_queue, ingest_file, zip_markdown_bundle, TtsQueueItem};
 use std::path::Path;
 use tempfile::tempdir;
 use uuid::Uuid;
@@ -56,9 +56,22 @@ async fn export_needs_tts_queue_copies_epubs() {
     let id = Uuid::new_v4();
     tokio::fs::create_dir_all(lib.join(id.to_string())).await.unwrap();
     tokio::fs::write(lib.join(id.to_string()).join("book.epub"), b"PK").await.unwrap();
-    let n = export_needs_tts_queue(&lib, &queue, &[id]).await.unwrap();
-    assert_eq!(n, 1);
-    assert!(queue.join(format!("{id}.epub")).exists());
+    let files = export_needs_tts_queue(
+        &lib,
+        &queue,
+        &[TtsQueueItem {
+            work_id: id,
+            title: "A Covenant of Ice".into(),
+            authors: "Author".into(),
+        }],
+    )
+    .await
+    .unwrap();
+    assert_eq!(files.len(), 1);
+    assert!(queue
+        .join(format!("A Covenant of Ice--{}.epub", id.as_simple()))
+        .exists());
+    assert!(queue.join("manifest.json").exists());
 }
 
 #[tokio::test]
@@ -80,9 +93,18 @@ async fn pandoc_markdown_to_epub_when_available() {
     tokio::fs::write(&src, b"# Chapter\n\nHello Diarch.\n").await.unwrap();
     let imported = ingest_file(&lib, id, &src, "book.md").await.unwrap();
     assert!(imported.needs_review);
-    let epub = diarch_import::confirm_markdown_to_epub(&lib, id).await.unwrap();
+    let epub = diarch_import::confirm_markdown_to_epub(
+        &lib,
+        id,
+        Some("Hello Title"),
+        Some("Ada Lovelace"),
+    )
+    .await
+    .unwrap();
     assert!(epub.exists());
     assert!(epub.metadata().unwrap().len() > 100);
+    let meta = diarch_import::read_epub_metadata(&epub).unwrap();
+    assert_eq!(meta.title.as_deref(), Some("Hello Title"));
 }
 
 fn tools_available() -> bool {
@@ -157,7 +179,7 @@ async fn pdf_ingest_quarantines_and_makes_markdown() {
     );
 
     // confirm deletes quarantine PDF
-    let epub = diarch_import::confirm_markdown_to_epub(&lib, id)
+    let epub = diarch_import::confirm_markdown_to_epub(&lib, id, Some("PDF Book"), None)
         .await
         .expect("confirm");
     assert!(epub.exists());

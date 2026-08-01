@@ -507,6 +507,7 @@ dependencies = [
  "anyhow",
  "diarch-core",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",

@@ -154,8 +154,16 @@ async fn run_confirm(state: &Arc<AppState>, job: &diarch_core::Job) -> Result<Op
     unsafe {
         libc_nice(10);
     }
-    let epub =
-        diarch_import::confirm_markdown_to_epub(&state.config.library_dir(), work_id).await?;
+    let work = state.db.get_work(work_id).await?;
+    let title = work.as_ref().map(|w| w.title.as_str());
+    let authors = work.as_ref().map(|w| w.authors.as_str());
+    let epub = diarch_import::confirm_markdown_to_epub(
+        &state.config.library_dir(),
+        work_id,
+        title,
+        authors,
+    )
+    .await?;
     register_asset(
         state,
         work_id,
@@ -165,7 +173,7 @@ async fn run_confirm(state: &Arc<AppState>, job: &diarch_core::Job) -> Result<Op
         &epub,
     )
     .await?;
-    if let Some(mut work) = state.db.get_work(work_id).await? {
+    if let Some(mut work) = work {
         work.needs_review = false;
         if work.status == diarch_core::ReadingStatus::Wishlist {
             work.status = diarch_core::ReadingStatus::Unread;

@@ -545,7 +545,13 @@ async fn ingest_markdown(library_root: &Path, work_id: Uuid, source: &Path) -> R
 }
 
 /// After markdown is confirmed, export EPUB and drop any leftover PDF.
-pub async fn confirm_markdown_to_epub(library_root: &Path, work_id: Uuid) -> Result<PathBuf> {
+/// Pass SQLite `title` / `authors` so pandoc does not default the EPUB title to `"book"`.
+pub async fn confirm_markdown_to_epub(
+    library_root: &Path,
+    work_id: Uuid,
+    title: Option<&str>,
+    authors: Option<&str>,
+) -> Result<PathBuf> {
     let md = work_markdown_path(library_root, work_id);
     if !md.exists() {
         return Err(anyhow!("no markdown to confirm"));
@@ -560,6 +566,7 @@ pub async fn confirm_markdown_to_epub(library_root: &Path, work_id: Uuid) -> Res
         .arg(&epub)
         .arg("--to=epub3")
         .stdin(Stdio::null());
+    apply_pandoc_book_metadata(&mut cmd, title, authors);
     if media.exists() {
         // resource path for images referenced from md
         cmd.arg(format!("--resource-path={}", media.display()));
@@ -578,6 +585,43 @@ pub async fn confirm_markdown_to_epub(library_root: &Path, work_id: Uuid) -> Res
     let _ = tokio::fs::remove_file(pdf).await;
 
     Ok(epub)
+}
+
+fn apply_pandoc_book_metadata(cmd: &mut Command, title: Option<&str>, authors: Option<&str>) {
+    let title = title.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("Untitled");
+    // Pandoc 3 defaults missing title to "book" — always set from library metadata.
+    cmd.arg("-M").arg(format!("title:{title}"));
+    if let Some(a) = authors.map(str::trim).filter(|s| !s.is_empty()) {
+        cmd.arg("-M").arg(format!("author:{a}"));
+    }
+}
+
+/// Copy/rewrite an on-disk `book.epub` to `dest` with SQLite title (and authors) in OPF metadata.
+/// Filename should already be human-readable; metadata fixes ebook2audiobook / Calibre queues.
+pub async fn export_epub_with_metadata(
+    src_epub: &Path,
+    dest_epub: &Path,
+    title: &str,
+    authors: &str,
+) -> Result<()> {
+    if let Some(parent) = dest_epub.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let mut cmd = Command::new("pandoc");
+    cmd.arg(src_epub)
+        .arg("-o")
+        .arg(dest_epub)
+        .arg("--to=epub3")
+        .stdin(Stdio::null());
+    apply_pandoc_book_metadata(&mut cmd, Some(title), Some(authors));
+    match cmd.status().await {
+        Ok(st) if st.success() && dest_epub.exists() => Ok(()),
+        Ok(_) | Err(_) => {
+            // Fallback: named copy still beats a folder of book.epub
+            tokio::fs::copy(src_epub, dest_epub).await?;
+            Ok(())
+        }
+    }
 }
 
 /// Extract cover image from an EPUB into `dest` (typically `cover.jpg`).
@@ -810,21 +854,66 @@ fn walkdir_simple(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
+/// One work to stage into the ebook2audiobook input queue.
+#[derive(Debug, Clone)]
+pub struct TtsQueueItem {
+    pub work_id: Uuid,
+    pub title: String,
+    pub authors: String,
+}
+
 /// Export EPUBs marked needs_tts into a queue folder for a desktop watcher.
+/// Writes `{Title}--{work_id}.epub` with OPF title/author from SQLite (not bare `book.epub`).
+/// On-disk library files stay `book.epub`.
 /// TODO(ebook2audiobook): implement folder watcher in the ebook2audiobook project
-/// that consumes `queue/needs_tts/*.epub` and drops M4A into `queue/incoming_audio/`.
-pub async fn export_needs_tts_queue(library_root: &Path, queue_dir: &Path, work_ids: &[Uuid]) -> Result<usize> {
+/// that consumes `queue/needs_tts/*.epub` and drops M4B into `queue/incoming_audio/`.
+pub async fn export_needs_tts_queue(
+    library_root: &Path,
+    queue_dir: &Path,
+    items: &[TtsQueueItem],
+) -> Result<Vec<String>> {
     tokio::fs::create_dir_all(queue_dir).await?;
-    let mut n = 0;
-    for id in work_ids {
-        let src = library_root.join(id.to_string()).join("book.epub");
-        if src.exists() {
-            let dest = queue_dir.join(format!("{id}.epub"));
-            tokio::fs::copy(&src, &dest).await?;
-            n += 1;
+    let mut exported = Vec::new();
+    for item in items {
+        let src = library_root
+            .join(item.work_id.to_string())
+            .join("book.epub");
+        if !src.exists() {
+            continue;
         }
+        let stem = diarch_core::export_stem(&item.title);
+        let dest_name = format!("{}--{}.epub", stem, item.work_id.as_simple());
+        let dest = queue_dir.join(&dest_name);
+        export_epub_with_metadata(&src, &dest, &item.title, &item.authors).await?;
+        exported.push(dest_name);
     }
-    Ok(n)
+    // Sidecar for watchers: map export filename → work id.
+    if !exported.is_empty() {
+        let manifest: Vec<serde_json::Value> = items
+            .iter()
+            .filter(|it| {
+                library_root
+                    .join(it.work_id.to_string())
+                    .join("book.epub")
+                    .exists()
+            })
+            .map(|it| {
+                serde_json::json!({
+                    "work_id": it.work_id.to_string(),
+                    "title": it.title,
+                    "authors": it.authors,
+                    "file": format!("{}--{}.epub", diarch_core::export_stem(&it.title), it.work_id.as_simple()),
+                })
+            })
+            .collect();
+        let manifest_path = queue_dir.join("manifest.json");
+        tokio::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap_or_else(|_| b"[]".to_vec()),
+        )
+        .await?;
+    }
+    Ok(exported)
 }
 
 #[cfg(test)]

@@ -124,6 +124,7 @@ document.querySelectorAll("button.nav").forEach((b) => {
     if (v === "to-read") await loadToRead();
     if (v === "wishlist") await loadWishlist();
     if (v === "attention") await loadAttention();
+    if (v === "integrations") await loadIntegrations();
     if (v === "admin") await loadAdmin();
     if (v === "settings") fillSettings();
   });
@@ -363,6 +364,11 @@ async function openDetail(id) {
         <div class="detail-audio">
           <audio id="detail-audio" controls preload="metadata"
             src="/api/works/${w.id}/audio/${escapeHtml((audio.relative_path || "book.m4b").split("/").pop() || "book.m4b")}"></audio>
+          <label class="audio-speed">
+            Speed
+            <input type="range" id="detail-audio-speed" min="0.25" max="2.5" step="0.05" value="1" />
+            <span id="detail-audio-speed-val">1.00×</span>
+          </label>
         </div>` : ""}
       <div class="actions">
         ${hasEpub || hasMd ? `<button type="button" id="btn-read">Read</button>` : ""}
@@ -479,6 +485,10 @@ async function openDetail(id) {
 
   document.getElementById("btn-read")?.addEventListener("click", () => openReader(w, hasEpub, hasMd, audio));
   document.getElementById("btn-listen")?.addEventListener("click", () => openReader(w, hasEpub, hasMd, audio));
+  if (hasAudio) {
+    const detailAudio = document.getElementById("detail-audio");
+    wireAudioSpeed(detailAudio, "detail-audio-speed", "detail-audio-speed-val");
+  }
   document.getElementById("btn-refresh-meta")?.addEventListener("click", async () => {
     msg("Refreshing from EPUB / ISBN…");
     try {
@@ -1374,13 +1384,15 @@ async function openReader(w, hasEpub, hasMd, audio) {
   setTocEnabled(false);
   renderTocList([]);
 
+  const audioWrap = document.getElementById("audio-wrap");
   const audioEl = document.getElementById("audio-player");
   if (audio) {
-    audioEl.hidden = false;
+    audioWrap.hidden = false;
     const name = (audio.relative_path || "book.m4b").split("/").pop() || "book.m4b";
     audioEl.src = `/api/works/${w.id}/audio/${name}`;
+    wireAudioSpeed(audioEl, "audio-speed", "audio-speed-val");
   } else {
-    audioEl.hidden = true;
+    audioWrap.hidden = true;
     audioEl.removeAttribute("src");
   }
 
@@ -1780,9 +1792,57 @@ function renderIntegrations(health) {
       } catch (e) {
         alert(e.message || String(e));
       }
-      await loadAdmin();
+      await loadIntegrations();
     });
   });
+}
+
+function renderRemarkableStatus(st) {
+  const el = document.getElementById("rm-status");
+  const link = document.getElementById("rm-connect-link");
+  if (link && st?.connect_url) link.href = st.connect_url;
+  if (!el) return;
+  if (!st) {
+    el.textContent = "Could not load reMarkable status";
+    el.classList.add("error");
+    return;
+  }
+  el.classList.remove("error");
+  const parts = [];
+  parts.push(st.rmapi_installed ? "rmapi installed" : "rmapi missing");
+  parts.push(st.authenticated ? "cloud authenticated" : "not authenticated");
+  if (st.detail) parts.push(st.detail);
+  el.textContent = parts.join(" · ");
+  if (!st.authenticated || !st.rmapi_installed) el.classList.add("error");
+}
+
+async function loadRemarkableStatus() {
+  try {
+    const st = await api("/api/remarkable/status");
+    renderRemarkableStatus(st);
+    return st;
+  } catch (e) {
+    renderRemarkableStatus(null);
+    const msg = document.getElementById("rm-auth-msg");
+    if (msg) {
+      msg.textContent = e.message || String(e);
+      msg.classList.add("error");
+    }
+    return null;
+  }
+}
+
+async function loadIntegrations() {
+  await loadRemarkableStatus();
+  try {
+    const health = await api("/api/integrations");
+    renderIntegrations(health);
+  } catch (e) {
+    const tbody = document.querySelector("#integrations-table tbody");
+    if (tbody) {
+      tbody.innerHTML = `<tr><td colspan="5" class="error">${escapeHtml(e.message || String(e))}</td></tr>`;
+    }
+  }
 }
 
 async function loadAdmin() {
@@ -1795,8 +1855,6 @@ async function loadAdmin() {
         `<li><strong>${escapeHtml(u.username)}</strong>${u.is_admin ? " · admin" : " · reader"}</li>`
     )
     .join("");
-  const health = await api("/api/integrations");
-  renderIntegrations(health);
 }
 
 document.getElementById("user-form").addEventListener("submit", async (e) => {
@@ -1814,6 +1872,33 @@ document.getElementById("user-form").addEventListener("submit", async (e) => {
   await loadAdmin();
 });
 
+document.getElementById("rm-auth-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById("rm-auth-msg");
+  const code = String(document.getElementById("rm-code").value || "")
+    .trim()
+    .toLowerCase();
+  msg.classList.remove("error");
+  msg.textContent = "Connecting…";
+  try {
+    const st = await api("/api/remarkable/auth", {
+      method: "POST",
+      json: { code },
+    });
+    document.getElementById("rm-code").value = "";
+    renderRemarkableStatus(st);
+    msg.textContent = st.authenticated
+      ? "Connected. You can Send to reMarkable from a work with an EPUB."
+      : "Saved, but still not authenticated — try a fresh code.";
+    await loadIntegrations();
+  } catch (err) {
+    msg.textContent = err.message || String(err);
+    msg.classList.add("error");
+  }
+});
+
+document.getElementById("btn-rm-refresh").addEventListener("click", () => loadRemarkableStatus());
+
 document.getElementById("btn-sg-sync").addEventListener("click", async () => {
   const report = document.getElementById("sg-sync-report");
   report.hidden = false;
@@ -1825,7 +1910,7 @@ document.getElementById("btn-sg-sync").addEventListener("click", async () => {
       `SG books: ${r.sg_count ?? 0} · matched: ${r.matched ?? 0} · ` +
       `missing locally: ${r.missing_locally ?? 0} · needs add on SG: ${r.needs_add ?? 0}` +
       (r.audio_only_remote ? ` · SG audio-only: ${r.audio_only_remote}` : "");
-    await loadAdmin();
+    await loadIntegrations();
   } catch (e) {
     report.textContent = e.message || String(e);
     report.classList.add("error");
@@ -1834,8 +1919,31 @@ document.getElementById("btn-sg-sync").addEventListener("click", async () => {
 
 document.getElementById("btn-tts-export").addEventListener("click", async () => {
   const r = await api("/api/queue/needs_tts/export", { method: "POST" });
-  alert(JSON.stringify(r));
+  const files = Array.isArray(r.files) ? r.files : [];
+  const list = files.length
+    ? files.map((f) => `• ${f}`).join("\n")
+    : "(no EPUBs with needs_tts)";
+  alert(`Exported ${r.exported ?? 0} titled EPUB(s) to queue/needs_tts:\n${list}`);
 });
+
+function wireAudioSpeed(audioEl, rangeId, labelId) {
+  if (!audioEl) return;
+  const range = document.getElementById(rangeId);
+  const label = document.getElementById(labelId);
+  if (!range || !label) return;
+  const saved = Number(localStorage.getItem("diarch-audio-speed") || "1");
+  const initial = Number.isFinite(saved) ? Math.min(2.5, Math.max(0.25, saved)) : 1;
+  range.value = String(initial);
+  const apply = () => {
+    const rate = Number(range.value);
+    audioEl.playbackRate = rate;
+    label.textContent = `${rate.toFixed(2)}×`;
+    localStorage.setItem("diarch-audio-speed", String(rate));
+  };
+  range.oninput = apply;
+  audioEl.onloadedmetadata = apply;
+  apply();
+}
 
 document.getElementById("btn-probe").addEventListener("click", async () => {
   const btn = document.getElementById("btn-probe");
@@ -1843,9 +1951,10 @@ document.getElementById("btn-probe").addEventListener("click", async () => {
   try {
     const health = await api("/api/integrations/probe", { method: "POST" });
     renderIntegrations(health);
+    await loadRemarkableStatus();
   } catch (e) {
     alert(e.message || String(e));
-    await loadAdmin();
+    await loadIntegrations();
   } finally {
     btn.disabled = false;
   }

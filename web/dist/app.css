@@ -556,9 +556,39 @@ main { padding: 1.25rem; }
   font-variant-numeric: tabular-nums;
   font-size: 0.85rem;
 }
-#audio-player { width: 100%; flex-shrink: 0; }
+#audio-player { width: 100%; }
 .detail-audio { margin: 0.75rem 0 0.25rem; max-width: 42rem; }
 .detail-audio audio { width: 100%; }
+.audio-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  width: 100%;
+  flex-shrink: 0;
+  padding: 0.5rem 0.75rem 0.65rem;
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+}
+.audio-wrap audio { width: 100%; }
+.audio-speed {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.audio-speed input[type="range"] {
+  flex: 1;
+  max-width: 16rem;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.audio-speed span {
+  min-width: 3.2rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
 
 .health-table {
   width: 100%;
@@ -587,6 +617,20 @@ main { padding: 1.25rem; }
 .health-broken { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 50%, var(--line)); }
 .health-unknown { color: var(--muted); }
 #sg-sync-report { margin: 0.75rem 0 0; }
+.rm-steps {
+  margin: 0.75rem 0 1rem;
+  padding-left: 1.25rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+.rm-steps a { color: var(--accent); }
+#rm-code {
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  letter-spacing: 0.12em;
+  text-transform: lowercase;
+  max-width: 14rem;
+}
+#rm-auth-msg { margin-top: 0.75rem; }
 
 @media (max-width: 720px) {
   .detail { grid-template-columns: 1fr; }

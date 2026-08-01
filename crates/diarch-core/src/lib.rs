@@ -306,6 +306,68 @@ pub fn titles_match(a: &str, b: &str) -> bool {
     normalize_title(a) == normalize_title(b)
 }
 
+/// On-disk library files stay canonical (`book.epub`, `book.md`, …).
+/// Outbound names (download, reMarkable, queue export) come from SQLite title at export time.
+pub fn export_stem(title: &str) -> String {
+    let mut s: String = title
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+    while s.contains("--") {
+        s = s.replace("--", "-");
+    }
+    s = s
+        .split_whitespace()
+        .map(|w| w.trim_matches('-'))
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    while s.ends_with('.') {
+        s.pop();
+    }
+    if s.len() > 120 {
+        s.truncate(120);
+        s = s.trim_end_matches([' ', '-', '.']).to_string();
+    }
+    if s.is_empty() {
+        "Untitled".into()
+    } else {
+        s
+    }
+}
+
+/// `{export_stem(title)}.{ext}` — e.g. `A Covenant of Ice.epub`.
+pub fn export_filename(title: &str, extension: &str) -> String {
+    let ext = extension.trim().trim_start_matches('.');
+    if ext.is_empty() {
+        export_stem(title)
+    } else {
+        format!("{}.{}", export_stem(title), ext)
+    }
+}
+
+/// `Content-Disposition: attachment` value using a sanitized SQLite title.
+/// Header values must be ASCII; non-ASCII title chars become `_`.
+pub fn content_disposition_attachment(title: &str, extension: &str) -> String {
+    let name: String = export_filename(title, extension)
+        .chars()
+        .map(|c| {
+            if c == '"' {
+                '_'
+            } else if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("attachment; filename=\"{name}\"")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,5 +425,16 @@ mod tests {
     fn title_matching_ignores_punctuation_and_case() {
         assert!(titles_match("The Eye of the World!", "the eye of the world"));
         assert!(!titles_match("Dune", "Dune Messiah"));
+    }
+
+    #[test]
+    fn export_filename_from_sqlite_title() {
+        assert_eq!(
+            export_filename("A Covenant of Ice", "epub"),
+            "A Covenant of Ice.epub"
+        );
+        assert_eq!(export_stem("Foo/Bar: Baz?"), "Foo-Bar Baz");
+        assert_eq!(export_stem("   "), "Untitled");
+        assert!(content_disposition_attachment("Ice", "epub").contains("Ice.epub"));
     }
 }

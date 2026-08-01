@@ -34,6 +34,7 @@
           <button data-view="library" class="nav active">Library</button>
           <button data-view="wishlist" class="nav">Wishlist</button>
           <button data-view="attention" class="nav">Attention</button>
+          <button data-view="integrations" class="nav">Integrations</button>
           <button data-view="admin" class="nav" id="nav-admin" hidden>Admin</button>
           <button data-view="settings" class="nav">Settings</button>
         </nav>
@@ -115,20 +116,32 @@
           <div id="attention-list" class="cards"></div>
         </div>
 
-        <div id="view-admin" class="view" hidden>
+        <div id="view-integrations" class="view" hidden>
           <div class="panel">
-            <h2>Users</h2>
-            <form id="user-form" class="form-grid">
-              <label>Username <input name="username" required /></label>
-              <label>Password <input name="password" type="password" required /></label>
-              <label><input type="checkbox" name="is_admin" /> Admin</label>
-              <button type="submit">Create user</button>
+            <h2>reMarkable</h2>
+            <p class="muted">Send EPUBs from a work’s detail page. Requires <code>rmapi</code> on the server and a one-time cloud login.</p>
+            <p id="rm-status" class="muted">Checking…</p>
+            <ol class="rm-steps">
+              <li>
+                <a id="rm-connect-link" href="https://my.remarkable.com/device/browser/connect" target="_blank" rel="noopener noreferrer">Open reMarkable connect page</a>
+                and generate an 8-character code (stay logged into your reMarkable account).
+              </li>
+              <li>Paste the code here and connect:</li>
+            </ol>
+            <form id="rm-auth-form" class="form-grid">
+              <label>One-time code
+                <input name="code" id="rm-code" maxlength="8" minlength="8" autocomplete="one-time-code" spellcheck="false" placeholder="abcdefgh" required pattern="[A-Za-z0-9]{8}" />
+              </label>
+              <div class="row">
+                <button type="submit" id="btn-rm-auth">Connect tablet</button>
+                <button type="button" id="btn-rm-refresh">Refresh status</button>
+              </div>
             </form>
-            <ul id="user-list"></ul>
+            <p id="rm-auth-msg" class="muted" aria-live="polite"></p>
           </div>
           <div class="panel">
             <h2>Integrations</h2>
-            <p class="muted">StoryGraph pull + flags, reMarkable via <code>rmapi</code> (must be on PATH and authenticated), and tool probes. Scrapers/CLI can break when upstream changes. On the server, install <code>rmapi</code> the same way — see deploy docs.</p>
+            <p class="muted">Health probes for tools and remote services. Scrapers/CLI can break when upstream changes.</p>
             <div class="row">
               <button type="button" id="btn-sg-sync">Sync StoryGraph</button>
               <button type="button" id="btn-probe">Probe all</button>
@@ -141,6 +154,19 @@
               </thead>
               <tbody></tbody>
             </table>
+          </div>
+        </div>
+
+        <div id="view-admin" class="view" hidden>
+          <div class="panel">
+            <h2>Users</h2>
+            <form id="user-form" class="form-grid">
+              <label>Username <input name="username" required /></label>
+              <label>Password <input name="password" type="password" required /></label>
+              <label><input type="checkbox" name="is_admin" /> Admin</label>
+              <button type="submit">Create user</button>
+            </form>
+            <ul id="user-list"></ul>
           </div>
         </div>
 
@@ -228,7 +254,14 @@
               </form>
             </aside>
           </div>
-          <audio id="audio-player" controls hidden></audio>
+          <div id="audio-wrap" class="audio-wrap" hidden>
+            <audio id="audio-player" controls></audio>
+            <label class="audio-speed">
+              Speed
+              <input type="range" id="audio-speed" min="0.25" max="2.5" step="0.05" value="1" />
+              <span id="audio-speed-val">1.00×</span>
+            </label>
+          </div>
         </div>
       </main>
     </section>

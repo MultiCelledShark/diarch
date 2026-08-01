@@ -90,7 +90,9 @@ sudo chmod 755 /usr/local/bin/rmapi
 /usr/local/bin/rmapi version
 ```
 
-Authenticate **once as the `diarch` service user**:
+Prefer authenticating from the web UI: **Integrations → reMarkable** (open the connect URL, paste the 8-character code). Diarch writes the same token file `rmapi` uses (`RMAPI_CONFIG`).
+
+CLI alternative as the `diarch` service user:
 
 ```bash
 # Paste the 8-char code from https://my.remarkable.com/device/browser/connect
@@ -98,7 +100,7 @@ sudo -u diarch -H env RMAPI_CONFIG=/var/lib/diarch/.rmapi /usr/local/bin/rmapi
 sudo -u diarch -H env RMAPI_CONFIG=/var/lib/diarch/.rmapi /usr/local/bin/rmapi ls
 ```
 
-Without this login, **Send to reMarkable** fails even if Admin → Integrations shows the binary as present.
+Without this login, **Send to reMarkable** fails even if Integrations shows `rmapi` installed.
 
 ## Optional env on the unit
 

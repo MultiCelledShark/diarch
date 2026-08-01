@@ -1210,6 +1210,40 @@ async fn integrations_probe_and_list() {
 }
 
 #[tokio::test]
+async fn remarkable_status_and_auth_validation_for_any_user() {
+    let (_dir, app, state) = test_app().await;
+    let admin = login(&app, "admin", "adminpass").await;
+    let (status, _, _) = json_req(
+        &app,
+        "POST",
+        "/api/users",
+        Some(&admin),
+        Some(json!({"username":"reader1","password":"readerpass","is_admin":false})),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let reader = login(&app, "reader1", "readerpass").await;
+
+    let (status, st, _) =
+        json_req(&app, "GET", "/api/remarkable/status", Some(&reader), None).await;
+    assert_eq!(status, 200, "{st}");
+    assert!(st["connect_url"].as_str().unwrap().contains("my.remarkable.com"));
+    assert!(st.get("authenticated").is_some());
+    assert!(st.get("rmapi_installed").is_some());
+
+    let (status, body, _) = json_req(
+        &app,
+        "POST",
+        "/api/remarkable/auth",
+        Some(&reader),
+        Some(json!({"code":"short"})),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    let _ = state;
+}
+
+#[tokio::test]
 async fn remarkable_send_without_epub_reports_error() {
     let (_dir, app, _) = test_app().await;
     let token = login(&app, "admin", "adminpass").await;

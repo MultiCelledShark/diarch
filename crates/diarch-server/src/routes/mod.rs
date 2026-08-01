@@ -74,6 +74,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/integrations", get(list_integrations))
         .route("/api/integrations/probe", post(probe_integrations))
         .route("/api/integrations/{name}/repair", post(repair_integration))
+        .route("/api/remarkable/status", get(remarkable_status))
+        .route("/api/remarkable/auth", post(remarkable_auth))
         .route("/api/storygraph/sync", post(sg_sync))
         .route("/api/queue/needs_tts/export", post(export_tts_queue))
         .route("/", get(index))
@@ -988,6 +990,18 @@ async fn confirm_review(
     Ok(Json(serde_json::json!({ "job_id": job.id })))
 }
 
+async fn work_title(state: &AppState, id: Uuid) -> String {
+    state
+        .db
+        .get_work(id)
+        .await
+        .ok()
+        .flatten()
+        .map(|w| w.title)
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| "Untitled".into())
+}
+
 async fn download_epub(
     AuthUser(user): AuthUser,
     State(state): State<Arc<AppState>>,
@@ -1000,17 +1014,14 @@ async fn download_epub(
     let data = tokio::fs::read(&path)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, "application/epub+zip"),
-            (
-                header::CONTENT_DISPOSITION,
-                "attachment; filename=\"book.epub\"",
-            ),
-        ],
-        data,
-    )
-        .into_response())
+    let title = work_title(&state, id).await;
+    let disp = diarch_core::content_disposition_attachment(&title, "epub");
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/epub+zip")
+        .header(header::CONTENT_DISPOSITION, disp)
+        .body(axum::body::Body::from(data))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
 }
 
 async fn download_md(
@@ -1027,17 +1038,14 @@ async fn download_md(
     let data = tokio::fs::read(&out)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, "application/zip"),
-            (
-                header::CONTENT_DISPOSITION,
-                "attachment; filename=\"book-md.zip\"",
-            ),
-        ],
-        data,
-    )
-        .into_response())
+    let title = work_title(&state, id).await;
+    let disp = diarch_core::content_disposition_attachment(&title, "md.zip");
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/zip")
+        .header(header::CONTENT_DISPOSITION, disp)
+        .body(axum::body::Body::from(data))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
 }
 
 async fn get_cover(
@@ -1944,7 +1952,7 @@ async fn get_job(
 }
 
 async fn list_integrations(
-    AdminUser(_): AdminUser,
+    AuthUser(_): AuthUser,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<diarch_core::IntegrationHealth>>, StatusCode> {
     state
@@ -1956,7 +1964,7 @@ async fn list_integrations(
 }
 
 async fn probe_integrations(
-    AdminUser(_): AdminUser,
+    AuthUser(_): AuthUser,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<diarch_core::IntegrationHealth>>, StatusCode> {
     crate::fixer::probe_all(&state).await;
@@ -1969,7 +1977,7 @@ async fn probe_integrations(
 }
 
 async fn repair_integration(
-    AdminUser(_): AdminUser,
+    AuthUser(_): AuthUser,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Json<serde_json::Value> {
@@ -1979,8 +1987,30 @@ async fn repair_integration(
     }
 }
 
+async fn remarkable_status(
+    AuthUser(_): AuthUser,
+) -> Json<crate::remarkable::RemarkableStatus> {
+    Json(crate::remarkable::status())
+}
+
+#[derive(Deserialize)]
+struct RemarkableAuthReq {
+    code: String,
+}
+
+async fn remarkable_auth(
+    AuthUser(_): AuthUser,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<RemarkableAuthReq>,
+) -> Result<Json<crate::remarkable::RemarkableStatus>, (StatusCode, String)> {
+    crate::remarkable::authenticate(&state, &body.code)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+}
+
 async fn sg_sync(
-    AdminUser(_): AdminUser,
+    AuthUser(_): AuthUser,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<crate::storygraph::SyncReport>, (StatusCode, String)> {
     crate::storygraph::sync_flags(&state)
@@ -1990,7 +2020,7 @@ async fn sg_sync(
 }
 
 async fn export_tts_queue(
-    AdminUser(_): AdminUser,
+    AuthUser(_): AuthUser,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let works = state
@@ -1998,16 +2028,24 @@ async fn export_tts_queue(
         .works_needing_tts()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let ids: Vec<_> = works.iter().map(|w| w.id).collect();
-    let n = diarch_import::export_needs_tts_queue(
+    let items: Vec<_> = works
+        .iter()
+        .map(|w| diarch_import::TtsQueueItem {
+            work_id: w.id,
+            title: w.title.clone(),
+            authors: w.authors.clone(),
+        })
+        .collect();
+    let files = diarch_import::export_needs_tts_queue(
         &state.config.library_dir(),
         &state.config.data_dir.join("queue/needs_tts"),
-        &ids,
+        &items,
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({
-        "exported": n,
+        "exported": files.len(),
+        "files": files,
         "todo": "Desktop watcher for ebook2audiobook should consume queue/needs_tts — see docs/TODO-ebook2audiobook-watcher.md"
     })))
 }

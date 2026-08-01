@@ -139,18 +139,19 @@ async fn probe_storygraph(state: &AppState) {
 }
 
 async fn probe_remarkable(state: &AppState) {
-    if crate::remarkable::rmapi_available() {
+    let st = crate::remarkable::status();
+    if st.rmapi_installed && st.authenticated {
         let _ = state
             .db
             .set_integration_health("remarkable", "ok", None, true)
             .await;
-    } else if state.config.remarkable_token.is_some() {
+    } else if st.rmapi_installed {
         let _ = state
             .db
             .set_integration_health(
                 "remarkable",
                 "degraded",
-                Some("token set; install rmapi for uploads"),
+                Some("rmapi installed; authenticate via Integrations"),
                 false,
             )
             .await;
@@ -160,7 +161,7 @@ async fn probe_remarkable(state: &AppState) {
             .set_integration_health(
                 "remarkable",
                 "degraded",
-                Some("rmapi not installed"),
+                Some(st.detail.as_deref().unwrap_or("rmapi not installed")),
                 false,
             )
             .await;
@@ -269,10 +270,13 @@ pub async fn repair(state: &AppState, name: &str) -> Result<(), String> {
         }
         "remarkable" => {
             probe_remarkable(state).await;
-            if crate::remarkable::rmapi_available() {
-                Ok(())
-            } else {
+            let st = crate::remarkable::status();
+            if !st.rmapi_installed {
                 Err("install rmapi on PATH".into())
+            } else if !st.authenticated {
+                Err("authenticate via Integrations (reMarkable connect code)".into())
+            } else {
+                Ok(())
             }
         }
         "localai" => {

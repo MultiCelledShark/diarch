@@ -18,7 +18,7 @@ Default admin: `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` (defaults `admin` / `ad
 
 ## Locked product rules
 
-- **Canonical storage:** EPUB + Markdown(+media) + optional M4B. PDFs only in the import box (not retained).
+- **Canonical storage:** EPUB + Markdown(+media) + optional M4B as `book.epub` / `book.md` / `book.m4b` under `library/<work-id>/`. PDFs only in the import box (not retained). **Exports** (download, reMarkable, TTS queue) take the human filename from the SQLite title at export time — do not rename on-disk assets.
 - **PDF path:** PDF → OCR (`ocrmypdf`) → Markdown via pdftohtml+pandoc (`needs_review`) → confirm → EPUB via pandoc.
 - **EPUB path:** store EPUB; derive Markdown with pandoc.
 - **Taxonomy:** multi-code on every work; **primary** = most specific subgenre (e.g. Epic Fantasy `8201`).
@@ -50,18 +50,18 @@ Default admin: `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` (defaults `admin` / `ad
 | **3 Readers** | **Complete** | epub.js + MD scroll + manga RTL; TOC panel; full typography suite (palette/font/size/line-height/margins/justify); review MD toolbar + live preview |
 | **4 Metadata / covers / wishlist** | **Complete** | OL + Google Books + LoC; ISBN authors fixed; remote cover fetch; wishlist enrich + barcode; extract/placeholder/upload covers. LocalAI/Hermes deferred → Phase 8 |
 | **5 Audio** | **Complete** | Canonical `book.m4b` upload + Range stream; Audible AAX→M4B server job (`DIARCH_AUDIBLE_KEY` + ffmpeg, same flags as audible2m4b). Transcription stubbed → Phase 8 |
-| **6 StoryGraph / reMarkable / fixer** | **Complete** | SG pull from currently-reading / to-read / books-read (+ profile fallback); match clears/sets flags; manual clear on detail; rmapi send to `Diarch/` folder; Admin health table + Probe all / Repair; env docs. Scrapers/CLI remain upstream-fragile |
+| **6 StoryGraph / reMarkable / fixer** | **Complete** | SG pull + flags; Integrations for all users (health, Probe, SG sync); reMarkable connect URL + in-app 8-char code auth; rmapi send to `Diarch/`; Keystone dep docs. Scrapers/CLI remain upstream-fragile |
 | **7 Android / KOReader** | Not done | Docs/stubs only |
 | **8 Deferred AI + skipped polish** | Not started | Circle-back: LocalAI/Hermes covers, staged approve, and other optionals parked below |
 | **Regression tests** | Done | `cargo test --workspace` (core/db/import/server; Phase 6 coverage included) |
 
 ### What you should see after login
 
-1. Top bar: **Diarch** · Library · Wishlist · Attention · Admin · Settings · username · Logout  
+1. Top bar: **Diarch** · Library · Wishlist · Attention · **Integrations** · Admin · Settings · username · Logout  
 2. **Library** with **Import** (EPUB/PDF/MD and `.m4b`/`.aax` audiobooks)  
 3. Book cards after import, or empty-state guidance  
 4. Work detail: editable title/authors/status/taxonomy/year list; grant by username (admin); **Upload audiobook**; **Send to reMarkable** when EPUB exists; clear StoryGraph flags after you update SG  
-5. **Admin → Integrations**: health table, Probe all, Sync StoryGraph
+5. **Integrations** (all users): reMarkable connect URL + code entry, health table, Probe all, Sync StoryGraph
 
 Restart `cargo run -p diarch-server` after pulling UI changes (assets are embedded at compile time), then hard-refresh the browser.
 
