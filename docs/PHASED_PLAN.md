@@ -102,6 +102,7 @@ diarch-server (Axum) ── SQLite ── /var/lib/diarch/library
 | `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` | Bootstrap admin |
 | `DIARCH_LOCALAI_URL` / `DIARCH_HERMES_URL` | Cover generation |
 | `DIARCH_AUDIBLE_KEY` | Audible activation bytes for AAX → M4B (never commit) |
+| `DIARCH_GOOGLE_BOOKS_KEY` | Google Books API key (optional; avoids unauthenticated 429) |
 | `DIARCH_STORYGRAPH_USER` / `DIARCH_STORYGRAPH_COOKIE` | SG pull |
 | `DIARCH_REMARKABLE_TOKEN` | Optional; prefer `rmapi` on PATH |
 | `DIARCH_SHOW_AUDIO_GAPS` | Soft audio-gap badges |

@@ -29,6 +29,7 @@ pub async fn build_state(config: Config) -> Result<Arc<AppState>> {
         "ocrmypdf",
         "ffmpeg",
         "openlibrary",
+        "googlebooks",
         "loc",
         "storygraph",
         "remarkable",

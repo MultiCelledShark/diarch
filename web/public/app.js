@@ -528,25 +528,50 @@ async function openDetail(id) {
     const isbn = String(fd.get("isbn") || "").trim();
     const title = String(fd.get("title") || "").trim();
     const authors = String(fd.get("authors") || "").trim();
-    msg(isbn ? `Looking up ISBN ${isbn}…` : "Searching Open Library / LoC…");
+    msg(isbn ? `Looking up ISBN ${isbn}…` : "Searching Open Library / Google Books / LoC…");
     showMetaHits([]);
     try {
+      let providerNote = "";
       if (isbn) {
-        const hit = await api(`/api/metadata/isbn/${encodeURIComponent(isbn)}`);
-        if (hit) {
+        const report = await api(`/api/metadata/isbn/${encodeURIComponent(isbn)}`);
+        const hit = report?.hit ?? (report?.title ? report : null);
+        if (hit && hit.title) {
           await applyMetaHit(hit);
           return;
         }
+        const providers = Array.isArray(report?.providers) ? report.providers : [];
+        const errors = providers.filter((p) => p.status === "error");
+        const misses = providers.filter((p) => p.status === "miss").map((p) => p.name);
+        if (errors.length) {
+          providerNote = errors
+            .map((p) => `${p.name}: ${p.detail || "error"}`)
+            .join("; ");
+          msg(`ISBN lookup issue (${providerNote}). Trying title search…`, true);
+        } else if (misses.length) {
+          providerNote = `ISBN not in ${misses.join("/")}`;
+          msg(`${providerNote}. Trying title search…`);
+        }
       }
       if (!title) {
-        msg("No metadata match found", true);
+        msg(
+          providerNote
+            ? `${providerNote}; no title to search`
+            : "No metadata match found",
+          true
+        );
         return;
       }
       const q = new URLSearchParams({ title });
       if (authors) q.set("author", authors);
       const hits = await api(`/api/metadata/search?${q}`);
       if (!Array.isArray(hits) || !hits.length) {
-        msg("No metadata match found", true);
+        const base = providerNote
+          ? `${providerNote}; title search also empty`
+          : "No metadata match found";
+        const hint = /rate limited|DIARCH_GOOGLE_BOOKS_KEY/i.test(providerNote)
+          ? " — set DIARCH_GOOGLE_BOOKS_KEY for Google Books quota"
+          : "";
+        msg(base + hint, true);
         return;
       }
       if (hits.length === 1) {

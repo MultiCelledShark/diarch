@@ -1131,3 +1131,46 @@ async fn delete_work_removes_row_and_files() {
     assert_eq!(status, 404);
     let _ = dir;
 }
+
+#[tokio::test]
+async fn metadata_isbn_report_has_providers() {
+    let (_dir, app, _) = test_app().await;
+    let token = login(&app, "admin", "adminpass").await;
+    // Nonsense ISBN: Open Library miss; Google may be miss or error (429).
+    let (status, body, _) = json_req(
+        &app,
+        "GET",
+        "/api/metadata/isbn/0000000000000",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.get("hit").is_some() || body["hit"].is_null());
+    let providers = body["providers"].as_array().expect("providers array");
+    assert!(!providers.is_empty(), "{body}");
+    let names: Vec<_> = providers
+        .iter()
+        .filter_map(|p| p["name"].as_str())
+        .collect();
+    assert!(names.contains(&"openlibrary"), "{names:?}");
+    assert!(names.contains(&"googlebooks"), "{names:?}");
+    for p in providers {
+        let st = p["status"].as_str().unwrap_or("");
+        assert!(
+            matches!(st, "hit" | "miss" | "error"),
+            "bad status {st} in {p}"
+        );
+        if st == "error" && p["name"] == "googlebooks" {
+            let detail = p["detail"].as_str().unwrap_or("");
+            assert!(
+                detail.contains("rate limited")
+                    || detail.contains("DIARCH_GOOGLE_BOOKS_KEY")
+                    || detail.contains("forbidden")
+                    || detail.contains("HTTP"),
+                "{detail}"
+            );
+        }
+    }
+    assert!(body["hit"].is_null(), "expected no hit for fake ISBN: {body}");
+}

@@ -1848,8 +1848,8 @@ async fn meta_isbn(
     AuthUser(_): AuthUser,
     State(state): State<Arc<AppState>>,
     Path(isbn): Path<String>,
-) -> Result<Json<Option<metadata::MetaHit>>, StatusCode> {
-    metadata::lookup_isbn(&state, &isbn)
+) -> Result<Json<metadata::LookupReport>, StatusCode> {
+    metadata::lookup_isbn_report(&state, &isbn)
         .await
         .map(Json)
         .map_err(|_| StatusCode::BAD_GATEWAY)

@@ -18,6 +18,21 @@ pub struct MetaHit {
     pub cover_url: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProviderStatus {
+    pub name: String,
+    /// `hit` | `miss` | `error`
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LookupReport {
+    pub hit: Option<MetaHit>,
+    pub providers: Vec<ProviderStatus>,
+}
+
 /// Combined local (EPUB) + Open Library subjects mapped onto Diarch codes.
 #[derive(Debug, Clone, Default)]
 pub struct TaxonomyHint {
@@ -30,33 +45,149 @@ pub struct TaxonomyHint {
     pub authors: Option<String>,
 }
 
+#[derive(Debug)]
+enum ProviderOutcome {
+    Hit(MetaHit),
+    Miss,
+    Error(String),
+}
+
+fn google_books_volumes_url(state: &AppState, query: &str) -> String {
+    let mut url = format!(
+        "https://www.googleapis.com/books/v1/volumes?q={}",
+        urlencoding_encode(query)
+    );
+    if let Some(key) = state.config.google_books_key.as_deref() {
+        url.push_str("&key=");
+        url.push_str(&urlencoding_encode(key));
+    }
+    url
+}
+
+/// Classify Google Books HTTP status for diagnostics / tests.
+pub fn classify_google_http(status: u16) -> (&'static str, Option<&'static str>) {
+    match status {
+        200..=299 => ("ok", None),
+        429 => (
+            "error",
+            Some("rate limited — set DIARCH_GOOGLE_BOOKS_KEY or retry later"),
+        ),
+        403 => (
+            "error",
+            Some("forbidden — check DIARCH_GOOGLE_BOOKS_KEY / API quota"),
+        ),
+        _ => ("error", Some("HTTP error from Google Books")),
+    }
+}
+
 pub async fn lookup_isbn(state: &AppState, isbn: &str) -> Result<Option<MetaHit>> {
+    Ok(lookup_isbn_report(state, isbn).await?.hit)
+}
+
+pub async fn lookup_isbn_report(state: &AppState, isbn: &str) -> Result<LookupReport> {
     let isbn = isbn.replace('-', "");
+    let mut providers = Vec::new();
     if isbn.is_empty() {
-        return Ok(None);
+        return Ok(LookupReport {
+            hit: None,
+            providers,
+        });
     }
-    if let Some(hit) = open_library_books_api(state, &isbn).await? {
-        let _ = state
-            .db
-            .set_integration_health("openlibrary", "ok", None, true)
-            .await;
-        return Ok(Some(hit));
+
+    match open_library_isbn_outcome(state, &isbn).await {
+        ProviderOutcome::Hit(hit) => {
+            let _ = state
+                .db
+                .set_integration_health("openlibrary", "ok", None, true)
+                .await;
+            providers.push(ProviderStatus {
+                name: "openlibrary".into(),
+                status: "hit".into(),
+                detail: None,
+            });
+            return Ok(LookupReport {
+                hit: Some(hit),
+                providers,
+            });
+        }
+        ProviderOutcome::Miss => {
+            providers.push(ProviderStatus {
+                name: "openlibrary".into(),
+                status: "miss".into(),
+                detail: None,
+            });
+        }
+        ProviderOutcome::Error(detail) => {
+            let _ = state
+                .db
+                .set_integration_health("openlibrary", "degraded", Some(&detail), false)
+                .await;
+            providers.push(ProviderStatus {
+                name: "openlibrary".into(),
+                status: "error".into(),
+                detail: Some(detail),
+            });
+        }
     }
-    if let Some(hit) = open_library(state, &isbn).await? {
-        let _ = state
-            .db
-            .set_integration_health("openlibrary", "ok", None, true)
-            .await;
-        return Ok(Some(hit));
+
+    match google_books_isbn_outcome(state, &isbn).await {
+        ProviderOutcome::Hit(hit) => {
+            let _ = state
+                .db
+                .set_integration_health("googlebooks", "ok", None, true)
+                .await;
+            providers.push(ProviderStatus {
+                name: "googlebooks".into(),
+                status: "hit".into(),
+                detail: None,
+            });
+            return Ok(LookupReport {
+                hit: Some(hit),
+                providers,
+            });
+        }
+        ProviderOutcome::Miss => {
+            providers.push(ProviderStatus {
+                name: "googlebooks".into(),
+                status: "miss".into(),
+                detail: None,
+            });
+        }
+        ProviderOutcome::Error(detail) => {
+            let health = if detail.contains("rate limited") {
+                "degraded"
+            } else {
+                "broken"
+            };
+            let _ = state
+                .db
+                .set_integration_health("googlebooks", health, Some(&detail), false)
+                .await;
+            providers.push(ProviderStatus {
+                name: "googlebooks".into(),
+                status: "error".into(),
+                detail: Some(detail),
+            });
+        }
     }
-    if let Some(hit) = google_books_isbn(state, &isbn).await? {
-        let _ = state
-            .db
-            .set_integration_health("googlebooks", "ok", None, true)
-            .await;
-        return Ok(Some(hit));
+
+    Ok(LookupReport {
+        hit: None,
+        providers,
+    })
+}
+
+async fn open_library_isbn_outcome(state: &AppState, isbn: &str) -> ProviderOutcome {
+    match open_library_books_api(state, isbn).await {
+        Ok(Some(hit)) => return ProviderOutcome::Hit(hit),
+        Ok(None) => {}
+        Err(e) => return ProviderOutcome::Error(e.to_string()),
     }
-    Ok(None)
+    match open_library(state, isbn).await {
+        Ok(Some(hit)) => ProviderOutcome::Hit(hit),
+        Ok(None) => ProviderOutcome::Miss,
+        Err(e) => ProviderOutcome::Error(e.to_string()),
+    }
 }
 
 /// Download a cover image by ISBN (Open Library covers, then Google Books).
@@ -109,7 +240,7 @@ async fn fetch_ol_cover_by_isbn(state: &AppState, isbn: &str) -> Result<Option<V
 }
 
 async fn fetch_google_books_cover(state: &AppState, isbn: &str) -> Result<Option<Vec<u8>>> {
-    let url = format!("https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}");
+    let url = google_books_volumes_url(state, &format!("isbn:{isbn}"));
     let resp = state.http.get(&url).send().await?;
     if !resp.status().is_success() {
         return Ok(None);
@@ -317,25 +448,33 @@ async fn open_library(state: &AppState, isbn: &str) -> Result<Option<MetaHit>> {
     }))
 }
 
-async fn google_books_isbn(state: &AppState, isbn: &str) -> Result<Option<MetaHit>> {
-    let url = format!("https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}");
+async fn google_books_isbn_outcome(state: &AppState, isbn: &str) -> ProviderOutcome {
+    let url = google_books_volumes_url(state, &format!("isbn:{isbn}"));
     let resp = match state.http.get(&url).send().await {
         Ok(r) => r,
-        Err(e) => {
-            let _ = state
-                .db
-                .set_integration_health("googlebooks", "broken", Some(&e.to_string()), false)
-                .await;
-            return Ok(None);
-        }
+        Err(e) => return ProviderOutcome::Error(e.to_string()),
     };
-    if !resp.status().is_success() {
-        return Ok(None);
+    let code = resp.status().as_u16();
+    let (kind, detail) = classify_google_http(code);
+    if kind == "error" {
+        return ProviderOutcome::Error(
+            detail
+                .unwrap_or("HTTP error from Google Books")
+                .to_string(),
+        );
     }
-    let v: Value = resp.json().await?;
-    let Some(item) = v.pointer("/items/0/volumeInfo") else {
-        return Ok(None);
+    let v: Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => return ProviderOutcome::Error(e.to_string()),
     };
+    match meta_hit_from_google_volume(&v, Some(isbn)) {
+        Some(hit) => ProviderOutcome::Hit(hit),
+        None => ProviderOutcome::Miss,
+    }
+}
+
+fn meta_hit_from_google_volume(v: &Value, isbn_hint: Option<&str>) -> Option<MetaHit> {
+    let item = v.pointer("/items/0/volumeInfo")?;
     let title = item
         .get("title")
         .and_then(|t| t.as_str())
@@ -369,15 +508,43 @@ async fn google_books_isbn(state: &AppState, isbn: &str) -> Result<Option<MetaHi
         .or_else(|| item.pointer("/imageLinks/smallThumbnail"))
         .and_then(|u| u.as_str())
         .map(|u| u.replace("http://", "https://").replace("zoom=1", "zoom=0"));
-    Ok(Some(MetaHit {
+    let isbn = item
+        .get("industryIdentifiers")
+        .and_then(|ids| ids.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .find(|id| {
+                    id.get("type")
+                        .and_then(|t| t.as_str())
+                        .is_some_and(|t| t == "ISBN_13" || t == "ISBN_10")
+                })
+                .and_then(|id| id.get("identifier").and_then(|i| i.as_str()))
+                .map(|s| s.replace('-', ""))
+        })
+        .or_else(|| isbn_hint.map(|s| s.to_string()));
+    Some(MetaHit {
         title,
         authors,
-        isbn: Some(isbn.to_string()),
+        isbn,
         description,
         subjects,
         source: "googlebooks".into(),
         cover_url,
-    }))
+    })
+}
+
+fn meta_hits_from_google_volumes(v: &Value, limit: usize) -> Vec<MetaHit> {
+    let Some(items) = v.get("items").and_then(|i| i.as_array()) else {
+        return vec![];
+    };
+    items
+        .iter()
+        .take(limit)
+        .filter_map(|item| {
+            let wrapped = serde_json::json!({ "items": [item] });
+            meta_hit_from_google_volume(&wrapped, None)
+        })
+        .collect()
 }
 
 pub async fn search_title(
@@ -389,12 +556,68 @@ pub async fn search_title(
     if let Ok(ol) = open_library_search(state, title, author).await {
         hits.extend(ol);
     }
+    if hits.len() < 8 {
+        if let Ok(gb) = google_books_search(state, title, author).await {
+            for hit in gb {
+                if hits.len() >= 8 {
+                    break;
+                }
+                let dup = hits.iter().any(|h| {
+                    h.title.eq_ignore_ascii_case(&hit.title)
+                        && h.authors.eq_ignore_ascii_case(&hit.authors)
+                });
+                if !dup {
+                    hits.push(hit);
+                }
+            }
+        }
+    }
     if hits.is_empty() {
         if let Ok(loc) = loc_search(state, title, author).await {
             hits.extend(loc);
         }
     }
     Ok(hits)
+}
+
+async fn google_books_search(
+    state: &AppState,
+    title: &str,
+    author: Option<&str>,
+) -> Result<Vec<MetaHit>> {
+    let mut q = format!("intitle:{}", title.trim());
+    if let Some(a) = author.map(str::trim).filter(|s| !s.is_empty()) {
+        q.push_str(" inauthor:");
+        q.push_str(a);
+    }
+    let url = google_books_volumes_url(state, &q);
+    let resp = match state.http.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = state
+                .db
+                .set_integration_health("googlebooks", "broken", Some(&e.to_string()), false)
+                .await;
+            return Ok(vec![]);
+        }
+    };
+    let code = resp.status().as_u16();
+    let (kind, detail) = classify_google_http(code);
+    if kind == "error" {
+        let msg = detail.unwrap_or("HTTP error from Google Books");
+        let health = if code == 429 { "degraded" } else { "broken" };
+        let _ = state
+            .db
+            .set_integration_health("googlebooks", health, Some(msg), false)
+            .await;
+        return Ok(vec![]);
+    }
+    let v: Value = resp.json().await?;
+    let _ = state
+        .db
+        .set_integration_health("googlebooks", "ok", None, true)
+        .await;
+    Ok(meta_hits_from_google_volumes(&v, 5))
 }
 
 async fn open_library_search(
@@ -625,4 +848,51 @@ pub async fn generate_cover_localai(
         return Ok(Some(bytes));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn google_429_classified_as_error() {
+        let (status, detail) = classify_google_http(429);
+        assert_eq!(status, "error");
+        assert!(detail.unwrap().contains("DIARCH_GOOGLE_BOOKS_KEY"));
+    }
+
+    #[test]
+    fn google_403_classified_as_error() {
+        let (status, detail) = classify_google_http(403);
+        assert_eq!(status, "error");
+        assert!(detail.unwrap().contains("forbidden"));
+    }
+
+    #[test]
+    fn google_200_classified_ok() {
+        let (status, detail) = classify_google_http(200);
+        assert_eq!(status, "ok");
+        assert!(detail.is_none());
+    }
+
+    #[test]
+    fn google_volume_parses_isbn13() {
+        let v = serde_json::json!({
+            "items": [{
+                "volumeInfo": {
+                    "title": "Example",
+                    "authors": ["A Author"],
+                    "industryIdentifiers": [
+                        {"type": "ISBN_13", "identifier": "9780140328721"}
+                    ],
+                    "imageLinks": {"thumbnail": "http://example.com/t.jpg"}
+                }
+            }]
+        });
+        let hit = meta_hit_from_google_volume(&v, None).unwrap();
+        assert_eq!(hit.title, "Example");
+        assert_eq!(hit.isbn.as_deref(), Some("9780140328721"));
+        assert_eq!(hit.source, "googlebooks");
+        assert!(hit.cover_url.unwrap().starts_with("https://"));
+    }
 }
