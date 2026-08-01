@@ -327,6 +327,25 @@ impl Db {
         Ok(row.map(|r| row_work(&r)).transpose()?)
     }
 
+    /// Remove a work and cascaded rows (codes, grants, assets, progress).
+    /// Jobs referencing the work are deleted first (FK is ON DELETE SET NULL).
+    pub async fn delete_work(&self, id: Uuid) -> Result<bool> {
+        sqlx::query("DELETE FROM jobs WHERE work_id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        let res = sqlx::query("DELETE FROM works WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Admin or creator may delete; grant-only access is not enough.
+    pub fn user_can_delete(user: &User, work: &Work) -> bool {
+        user.is_admin || work.created_by == Some(user.id)
+    }
+
     pub async fn user_can_access(&self, user: &User, work_id: Uuid) -> Result<bool> {
         if user.is_admin {
             return Ok(true);

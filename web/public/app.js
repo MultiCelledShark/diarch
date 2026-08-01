@@ -377,6 +377,9 @@ async function openDetail(id) {
           </label>
           <button type="button" id="btn-grant">Grant</button>
         ` : ""}
+        ${(state.user.is_admin || w.created_by === state.user.id)
+          ? `<button type="button" id="btn-delete-work" class="danger">Delete book</button>`
+          : ""}
       </div>
       ${w.needs_review ? `
       <section class="review-workspace" aria-label="Import review">
@@ -678,6 +681,22 @@ async function openDetail(id) {
     }
     await api(`/api/works/${w.id}/grants`, { method: "POST", json: { username } });
     msg(`Granted to ${username}`);
+  });
+
+  document.getElementById("btn-delete-work")?.addEventListener("click", async () => {
+    const ok = window.confirm(
+      `Delete “${w.title}” permanently?\n\nThis removes the book, EPUB/Markdown, audio, and cover from the library.`
+    );
+    if (!ok) return;
+    try {
+      msg("Deleting…");
+      await api(`/api/works/${w.id}`, { method: "DELETE" });
+      state.currentWork = null;
+      show("library");
+      await loadWorks();
+    } catch (e) {
+      msg(e.message || String(e), true);
+    }
   });
 }
 

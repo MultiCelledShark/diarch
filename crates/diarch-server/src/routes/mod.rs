@@ -3,7 +3,7 @@ pub mod jobs;
 use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use chrono::Utc;
@@ -36,10 +36,13 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/taxonomy", get(list_taxonomy))
         .route("/api/works", get(list_works).post(create_work))
         .route("/api/library/import", post(library_import))
-        .route("/api/works/{id}", get(get_work).put(update_work))
+        .route(
+            "/api/works/{id}",
+            get(get_work).put(update_work).delete(delete_work),
+        )
         .route("/api/works/{id}/codes", put(set_codes))
         .route("/api/works/{id}/grants", get(list_grants).post(add_grant))
-        .route("/api/works/{id}/grants/{user_id}", axum::routing::delete(revoke_grant))
+        .route("/api/works/{id}/grants/{user_id}", delete(revoke_grant))
         .route("/api/works/{id}/import", post(import_file))
         .route("/api/works/{id}/confirm", post(confirm_review))
         .route("/api/works/{id}/download/epub", get(download_epub))
@@ -346,6 +349,55 @@ struct UpdateWorkReq {
     clear_sg_review_dirty: Option<bool>,
     clear_sg_needs_add: Option<bool>,
     clear_sg_audio_only_remote: Option<bool>,
+}
+
+async fn delete_work(
+    AuthUser(user): AuthUser,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
+        return Err((StatusCode::FORBIDDEN, "forbidden".into()));
+    }
+    let work = state
+        .db
+        .get_work(id)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "db error".into()))?
+        .ok_or((StatusCode::NOT_FOUND, "not found".into()))?;
+    if !diarch_db::Db::user_can_delete(&user, &work) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "only the creator or an admin can delete this work".into(),
+        ));
+    }
+    let work_dir = state.config.work_dir(id);
+    let removed = state
+        .db
+        .delete_work(id)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "delete failed".into()))?;
+    if !removed {
+        return Err((StatusCode::NOT_FOUND, "not found".into()));
+    }
+    if work_dir.exists() {
+        let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    }
+    // Quarantine uploads named `{work_id}-…`
+    let imports = state.config.data_dir.join("imports");
+    if let Ok(mut rd) = tokio::fs::read_dir(&imports).await {
+        let prefix = format!("{id}-");
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&prefix)
+            {
+                let _ = tokio::fs::remove_file(entry.path()).await;
+            }
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn update_work(

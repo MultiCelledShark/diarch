@@ -63,6 +63,11 @@ button {
   font: inherit;
 }
 button:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+button.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+button.danger:hover { background: color-mix(in srgb, var(--danger) 18%, transparent); }
 button.nav {
   border-color: transparent;
   color: var(--muted);

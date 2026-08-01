@@ -113,8 +113,15 @@ pub async fn aax_to_m4b(src: &Path, dest: &Path, activation_bytes: &str) -> Resu
         }
     }
 
-    // Write to a temp sibling then rename so a failed convert does not leave a partial book.m4b.
-    let tmp = dest.with_extension("m4b.partial");
+    // Temp must keep a .m4b extension so ffmpeg can pick the ipod/mp4 muxer
+    // (`book.m4b.partial` fails with "Unable to choose an output format").
+    let tmp = {
+        let stem = dest
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("book");
+        dest.with_file_name(format!("{stem}.partial.m4b"))
+    };
     let _ = tokio::fs::remove_file(&tmp).await;
 
     let output = Command::new("ffmpeg")
@@ -137,6 +144,8 @@ pub async fn aax_to_m4b(src: &Path, dest: &Path, activation_bytes: &str) -> Resu
             "copy",
             "-movflags",
             "faststart",
+            "-f",
+            "ipod",
         ])
         .arg(&tmp)
         .stdout(Stdio::null())
@@ -246,6 +255,15 @@ mod tests {
     #[test]
     fn book_m4b_name() {
         assert_eq!(BOOK_M4B, "book.m4b");
+    }
+
+    #[test]
+    fn partial_temp_keeps_m4b_extension() {
+        let dest = Path::new("/tmp/audio/book.m4b");
+        let stem = dest.file_stem().and_then(|s| s.to_str()).unwrap();
+        let tmp = dest.with_file_name(format!("{stem}.partial.m4b"));
+        assert_eq!(tmp.extension().and_then(|e| e.to_str()), Some("m4b"));
+        assert_ne!(tmp, dest);
     }
 
     #[test]

@@ -168,3 +168,17 @@ async fn created_by_grants_owner_access_without_explicit_grant() {
     let listed = db.list_works_for_user(&user, Some("wishlist"), None).await.unwrap();
     assert_eq!(listed.len(), 1);
 }
+
+#[tokio::test]
+async fn delete_work_cascades_and_hides() {
+    let (_dir, db) = fresh_db().await;
+    let admin = db.create_user("admin", "pw", true).await.unwrap();
+    let work = sample_work(Some(admin.id), ReadingStatus::Unread);
+    db.create_work(&work, &[8201], Some(admin.id)).await.unwrap();
+    db.create_job("import", Some(work.id)).await.unwrap();
+    assert!(db.get_work(work.id).await.unwrap().is_some());
+    assert!(db.delete_work(work.id).await.unwrap());
+    assert!(db.get_work(work.id).await.unwrap().is_none());
+    assert!(!db.delete_work(work.id).await.unwrap());
+    assert!(diarch_db::Db::user_can_delete(&admin, &work));
+}

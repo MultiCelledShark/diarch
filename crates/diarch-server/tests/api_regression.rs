@@ -1101,3 +1101,33 @@ async fn library_import_aax_without_key_fails() {
         "{msg}"
     );
 }
+
+#[tokio::test]
+async fn delete_work_removes_row_and_files() {
+    let (dir, app, state) = test_app().await;
+    let token = login(&app, "admin", "adminpass").await;
+    let (status, work, _) = json_req(
+        &app,
+        "POST",
+        "/api/works",
+        Some(&token),
+        Some(json!({"title":"Delete Me","authors":"A"})),
+    )
+    .await;
+    assert_eq!(status, 201, "{work}");
+    let id = work["id"].as_str().unwrap();
+    let work_dir = state.config.data_dir.join("library").join(id);
+    tokio::fs::create_dir_all(&work_dir).await.unwrap();
+    tokio::fs::write(work_dir.join("book.epub"), b"epub").await.unwrap();
+    assert!(work_dir.join("book.epub").exists());
+
+    let (status, body, _) =
+        json_req(&app, "DELETE", &format!("/api/works/{id}"), Some(&token), None).await;
+    assert_eq!(status, 204, "{body}");
+    assert!(!work_dir.exists());
+
+    let (status, _, _) =
+        json_req(&app, "GET", &format!("/api/works/{id}"), Some(&token), None).await;
+    assert_eq!(status, 404);
+    let _ = dir;
+}
