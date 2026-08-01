@@ -40,6 +40,51 @@ pub fn ffprobe_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Tail of ffmpeg stderr for errors (skip progress spam; prefer end over header dump).
+fn ffmpeg_error_snippet(stderr: &str, activation_bytes: &str) -> String {
+    let scrubbed = stderr.replace(activation_bytes, "[redacted]");
+    let lines: Vec<&str> = scrubbed
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !(t.starts_with("frame=") || t.starts_with("size=") || t.is_empty())
+        })
+        .collect();
+    let joined = if lines.len() > 40 {
+        lines[lines.len().saturating_sub(40)..].join("\n")
+    } else {
+        lines.join("\n")
+    };
+    let chars: Vec<char> = joined.chars().collect();
+    if chars.len() <= 900 {
+        joined
+    } else {
+        chars[chars.len() - 900..].iter().collect()
+    }
+}
+
+fn free_bytes_for(path: &Path) -> Option<u64> {
+    let check = if path.exists() {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| Path::new(".").to_path_buf())
+    };
+    let out = std::process::Command::new("df")
+        .args(["-B1", "--output=avail"])
+        .arg(&check)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse::<u64>().ok())
+        .next_back()
+}
+
 /// Convert Audible AAX → DRM-free M4B (stream copy, chapters preserved).
 pub async fn aax_to_m4b(src: &Path, dest: &Path, activation_bytes: &str) -> Result<()> {
     if activation_bytes.is_empty() {
@@ -54,6 +99,20 @@ pub async fn aax_to_m4b(src: &Path, dest: &Path, activation_bytes: &str) -> Resu
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
+
+    let src_len = tokio::fs::metadata(src).await?.len();
+    // faststart rewrites the file: need ~2× output (~same as AAX) free, plus headroom.
+    let need = src_len.saturating_mul(2).saturating_add(64 * 1024 * 1024);
+    if let Some(avail) = free_bytes_for(dest.parent().unwrap_or(dest)) {
+        if avail < need {
+            bail!(
+                "not enough free disk for AAX→M4B (need ~{} MiB, have {} MiB). Free space and retry.",
+                need / (1024 * 1024),
+                avail / (1024 * 1024)
+            );
+        }
+    }
+
     // Write to a temp sibling then rename so a failed convert does not leave a partial book.m4b.
     let tmp = dest.with_extension("m4b.partial");
     let _ = tokio::fs::remove_file(&tmp).await;
@@ -89,12 +148,15 @@ pub async fn aax_to_m4b(src: &Path, dest: &Path, activation_bytes: &str) -> Resu
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         let _ = tokio::fs::remove_file(&tmp).await;
-        // Do not echo activation bytes if ffmpeg ever prints the command line.
-        let scrubbed = err.replace(activation_bytes, "[redacted]");
+        let snippet = ffmpeg_error_snippet(&err, activation_bytes);
+        let disk_hint = free_bytes_for(dest.parent().unwrap_or(dest))
+            .map(|a| format!("; free disk {} MiB", a / (1024 * 1024)))
+            .unwrap_or_default();
         bail!(
-            "ffmpeg AAX→M4B failed (exit {:?}): {}",
+            "ffmpeg AAX→M4B failed (exit {:?}){}: {}",
             output.status.code(),
-            scrubbed.chars().take(800).collect::<String>()
+            disk_hint,
+            snippet
         );
     }
 
@@ -184,5 +246,17 @@ mod tests {
     #[test]
     fn book_m4b_name() {
         assert_eq!(BOOK_M4B, "book.m4b");
+    }
+
+    #[test]
+    fn error_snippet_prefers_tail() {
+        let mut s = String::from("header checksum line\n");
+        for i in 0..60 {
+            s.push_str(&format!("Chapter detail {i}\n"));
+        }
+        s.push_str("No space left on device\n");
+        let snip = ffmpeg_error_snippet(&s, "deadbeef");
+        assert!(snip.contains("No space left on device"), "{snip}");
+        assert!(!snip.contains("header checksum"));
     }
 }
