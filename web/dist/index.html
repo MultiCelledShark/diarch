@@ -128,10 +128,19 @@
           </div>
           <div class="panel">
             <h2>Integrations</h2>
-            <button id="btn-sg-sync">Sync StoryGraph</button>
-            <button id="btn-tts-export">Export needs_tts queue</button>
-            <button id="btn-probe">Refresh health</button>
-            <pre id="integrations"></pre>
+            <p class="muted">StoryGraph pull + flags, reMarkable via <code>rmapi</code> (must be on PATH and authenticated), and tool probes. Scrapers/CLI can break when upstream changes. On the server, install <code>rmapi</code> the same way — see deploy docs.</p>
+            <div class="row">
+              <button type="button" id="btn-sg-sync">Sync StoryGraph</button>
+              <button type="button" id="btn-probe">Probe all</button>
+              <button type="button" id="btn-tts-export">Export needs_tts queue</button>
+            </div>
+            <p id="sg-sync-report" class="muted" hidden></p>
+            <table class="health-table" id="integrations-table">
+              <thead>
+                <tr><th>Name</th><th>Status</th><th>Last ok</th><th>Detail</th><th></th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
           </div>
         </div>
 

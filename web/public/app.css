@@ -560,6 +560,34 @@ main { padding: 1.25rem; }
 .detail-audio { margin: 0.75rem 0 0.25rem; max-width: 42rem; }
 .detail-audio audio { width: 100%; }
 
+.health-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+  font-size: 0.9rem;
+}
+.health-table th,
+.health-table td {
+  text-align: left;
+  padding: 0.45rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+.health-table th { color: var(--muted); font-weight: 500; }
+.health-table code { font-size: 0.85rem; }
+.health-status {
+  display: inline-block;
+  font-size: 0.75rem;
+  border: 1px solid var(--line);
+  padding: 0.1rem 0.4rem;
+  text-transform: lowercase;
+}
+.health-ok { color: #8fbf8f; border-color: #3d5c3d; }
+.health-degraded { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); }
+.health-broken { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 50%, var(--line)); }
+.health-unknown { color: var(--muted); }
+#sg-sync-report { margin: 0.75rem 0 0; }
+
 @media (max-width: 720px) {
   .detail { grid-template-columns: 1fr; }
   .review-workspace { grid-template-columns: 1fr; }

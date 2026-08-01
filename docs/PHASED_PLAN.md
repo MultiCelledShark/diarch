@@ -50,17 +50,18 @@ Default admin: `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` (defaults `admin` / `ad
 | **3 Readers** | **Complete** | epub.js + MD scroll + manga RTL; TOC panel; full typography suite (palette/font/size/line-height/margins/justify); review MD toolbar + live preview |
 | **4 Metadata / covers / wishlist** | **Complete** | OL + Google Books + LoC; ISBN authors fixed; remote cover fetch; wishlist enrich + barcode; extract/placeholder/upload covers. LocalAI/Hermes deferred → Phase 8 |
 | **5 Audio** | **Complete** | Canonical `book.m4b` upload + Range stream; Audible AAX→M4B server job (`DIARCH_AUDIBLE_KEY` + ffmpeg, same flags as audible2m4b). Transcription stubbed → Phase 8 |
-| **6 StoryGraph / reMarkable / fixer** | API/MVP done | Pull+flags, rmapi send, health probes. Scrapers/CLI are fragile |
+| **6 StoryGraph / reMarkable / fixer** | **Complete** | SG pull from currently-reading / to-read / books-read (+ profile fallback); match clears/sets flags; manual clear on detail; rmapi send to `Diarch/` folder; Admin health table + Probe all / Repair; env docs. Scrapers/CLI remain upstream-fragile |
 | **7 Android / KOReader** | Not done | Docs/stubs only |
 | **8 Deferred AI + skipped polish** | Not started | Circle-back: LocalAI/Hermes covers, staged approve, and other optionals parked below |
-| **Regression tests** | Done | `cargo test --workspace` (~32 tests) |
+| **Regression tests** | Done | `cargo test --workspace` (core/db/import/server; Phase 6 coverage included) |
 
 ### What you should see after login
 
 1. Top bar: **Diarch** · Library · Wishlist · Attention · Admin · Settings · username · Logout  
 2. **Library** with **Import** (EPUB/PDF/MD and `.m4b`/`.aax` audiobooks)  
 3. Book cards after import, or empty-state guidance  
-4. Work detail: editable title/authors/status/taxonomy/year list; grant by username (admin); **Upload audiobook** on an existing work
+4. Work detail: editable title/authors/status/taxonomy/year list; grant by username (admin); **Upload audiobook**; **Send to reMarkable** when EPUB exists; clear StoryGraph flags after you update SG  
+5. **Admin → Integrations**: health table, Probe all, Sync StoryGraph
 
 Restart `cargo run -p diarch-server` after pulling UI changes (assets are embedded at compile time), then hard-refresh the browser.
 
@@ -71,7 +72,7 @@ Restart `cargo run -p diarch-server` after pulling UI changes (assets are embedd
 1. **UX harden** — empty states (in progress), year reading list UI, grant UX without pasting UUIDs.
 2. **Transcription** — Phase 8 when LocalAI/Hermes is ready (UI stubbed in Phase 5).
 3. **ebook2audiobook watcher** — desktop TTS → `queue/incoming_audio` as `.m4b`.
-4. **Deploy** — musl/Debian 13 → Keystone systemd.
+4. **Deploy** — musl/Debian 13 → Keystone systemd (deps: pandoc, ocrmypdf, tesseract, poppler-utils, ffmpeg, rmapi — see `deploy/debian/README.md`).
 5. **Android** — thin client.
 6. **KOReader** — optional sync.
 
@@ -104,7 +105,7 @@ diarch-server (Axum) ── SQLite ── /var/lib/diarch/library
 | `DIARCH_AUDIBLE_KEY` | Audible activation bytes for AAX → M4B (never commit) |
 | `DIARCH_GOOGLE_BOOKS_KEY` | Google Books API key (optional; avoids unauthenticated 429) |
 | `DIARCH_STORYGRAPH_USER` / `DIARCH_STORYGRAPH_COOKIE` | SG pull |
-| `DIARCH_REMARKABLE_TOKEN` | Optional; prefer `rmapi` on PATH |
+| `DIARCH_REMARKABLE_TOKEN` | Unused for upload; **`rmapi` required** on laptop and Keystone |
 | `DIARCH_SHOW_AUDIO_GAPS` | Soft audio-gap badges |
 
 ---
@@ -129,6 +130,7 @@ Parked until LocalAI / Hermes (or equivalent) is ready on Keystone, and until ea
 | Phase 3 | Richer MD review editor (CodeMirror/Monaco) if toolbar+preview is not enough |
 | Phase 4 | Cover “reset to placeholder” / regenerate SVG from current title+authors |
 | Phase 4 | Attention one-click clear for soft flags without opening detail |
+| Phase 4 | **Fix metadata search / enrich** — new/indie ISBNs often missing from OL; Google needs `DIARCH_GOOGLE_BOOKS_KEY`; broaden providers / UX so Enrich is reliable beyond “not in catalog” |
 | Product | ebook2audiobook desktop watcher — [TODO-ebook2audiobook-watcher.md](TODO-ebook2audiobook-watcher.md) |
 | Phase 5 | Real audiobook transcription (LocalAI/Hermes or local ASR) — UI stub only today |
 | Later | Anything else deliberately deferred from Phases 5–7 that should not live in those phases’ MVP |

@@ -72,6 +72,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/jobs", get(list_jobs))
         .route("/api/jobs/{id}", get(get_job))
         .route("/api/integrations", get(list_integrations))
+        .route("/api/integrations/probe", post(probe_integrations))
         .route("/api/integrations/{name}/repair", post(repair_integration))
         .route("/api/storygraph/sync", post(sg_sync))
         .route("/api/queue/needs_tts/export", post(export_tts_queue))
@@ -1954,6 +1955,19 @@ async fn list_integrations(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+async fn probe_integrations(
+    AdminUser(_): AdminUser,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<diarch_core::IntegrationHealth>>, StatusCode> {
+    crate::fixer::probe_all(&state).await;
+    state
+        .db
+        .list_integration_health()
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 async fn repair_integration(
     AdminUser(_): AdminUser,
     State(state): State<Arc<AppState>>,
@@ -1968,11 +1982,11 @@ async fn repair_integration(
 async fn sg_sync(
     AdminUser(_): AdminUser,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<crate::storygraph::SyncReport>, StatusCode> {
+) -> Result<Json<crate::storygraph::SyncReport>, (StatusCode, String)> {
     crate::storygraph::sync_flags(&state)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::BAD_GATEWAY)
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))
 }
 
 async fn export_tts_queue(

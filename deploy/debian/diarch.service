@@ -6,10 +6,19 @@ After=network.target
 Type=simple
 User=diarch
 Group=diarch
+# Ensure rmapi (reMarkable send) is findable; auth tokens live under data dir.
+Environment=PATH=/usr/local/bin:/usr/bin
+Environment=HOME=/var/lib/diarch
+Environment=RMAPI_CONFIG=/var/lib/diarch/.rmapi
 Environment=DIARCH_LISTEN=0.0.0.0:8083
 Environment=DIARCH_DATA_DIR=/var/lib/diarch
 Environment=DIARCH_ADMIN_USER=admin
 Environment=DIARCH_ADMIN_PASS=change-me
+# Optional secrets (prefer EnvironmentFile=/etc/diarch.env chmod 600):
+# Environment=DIARCH_AUDIBLE_KEY=
+# Environment=DIARCH_GOOGLE_BOOKS_KEY=
+# Environment=DIARCH_STORYGRAPH_USER=
+# Environment=DIARCH_STORYGRAPH_COOKIE=
 ExecStart=/usr/local/bin/diarch
 Restart=on-failure
 RestartSec=3
@@ -19,6 +28,7 @@ CPUQuota=50%
 
 # Create user once: sudo useradd --system --home /var/lib/diarch --shell /usr/sbin/nologin diarch
 # sudo chown -R diarch:diarch /var/lib/diarch
+# Apt + rmapi + auth: see deploy/debian/README.md dependency checklist
 
 [Install]
 WantedBy=multi-user.target

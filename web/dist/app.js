@@ -201,6 +201,9 @@ function renderCards(el, works, empty = {}) {
     if (w.needs_review) badges.push("review");
     if (w.needs_cover) badges.push("needs cover");
     if (state.settings?.show_audio_gaps && w.needs_audio) badges.push("no audio");
+    if (w.sg_review_dirty) badges.push("update SG");
+    if (w.sg_needs_add) badges.push("add to SG");
+    if (w.sg_audio_only_remote) badges.push("SG audio only");
     if (w.is_manga) badges.push("manga");
     card.innerHTML = `
       <img src="/api/works/${w.id}/cover?v=${encodeURIComponent(w.updated_at || "")}" alt="" loading="lazy" onerror="this.style.opacity=0.25" />
@@ -355,7 +358,7 @@ async function openDetail(id) {
         </div>
         <div id="meta-hits" class="meta-hits" hidden></div>
       </form>
-      <p class="muted">${hasEpub ? "EPUB ready" : "No EPUB yet"} · ${hasMd ? "Markdown ready" : "No Markdown"} · ${hasAudio ? "M4B ready" : (w.needs_audio ? "Needs audio" : "No audio")} · Direction: ${escapeHtml(w.reading_direction)}${w.needs_review ? " · Needs review" : ""}${w.needs_cover ? " · Needs cover" : ""}</p>
+      <p class="muted">${hasEpub ? "EPUB ready" : "No EPUB yet"} · ${hasMd ? "Markdown ready" : "No Markdown"} · ${hasAudio ? "M4B ready" : (w.needs_audio ? "Needs audio" : "No audio")} · Direction: ${escapeHtml(w.reading_direction)}${w.needs_review ? " · Needs review" : ""}${w.needs_cover ? " · Needs cover" : ""}${w.sg_matched ? " · On StoryGraph" : ""}${w.sg_review_dirty ? " · Update SG review" : ""}${w.sg_needs_add ? " · Add to StoryGraph" : ""}${w.sg_audio_only_remote ? " · SG audio, missing local" : ""}</p>
       ${hasAudio ? `
         <div class="detail-audio">
           <audio id="detail-audio" controls preload="metadata"
@@ -368,9 +371,13 @@ async function openDetail(id) {
         <label class="btn-file">Replace / import file <input type="file" id="import-file" accept=".epub,.pdf,.md,.markdown" hidden /></label>
         ${hasEpub ? `<a href="/api/works/${w.id}/download/epub"><button type="button">Download EPUB</button></a>` : ""}
         ${hasMd ? `<a href="/api/works/${w.id}/download/markdown"><button type="button">Download MD</button></a>` : ""}
+        ${hasEpub ? `<button type="button" id="btn-remarkable">Send to reMarkable</button>` : ""}
         <button type="button" id="btn-fetch-cover"${w.isbn ? "" : " disabled title=\"Add an ISBN first\""}>Fetch cover</button>
         <label class="btn-file">Upload cover <input type="file" id="cover-file" accept="image/*" hidden /></label>
         ${w.needs_cover ? `<button type="button" id="btn-clear-needs-cover">Dismiss needs cover</button>` : ""}
+        ${w.sg_review_dirty ? `<button type="button" id="btn-clear-sg-review" title="Clear after you update StoryGraph">Clear SG review flag</button>` : ""}
+        ${w.sg_needs_add ? `<button type="button" id="btn-clear-sg-add" title="Clear after you add this book on StoryGraph">Clear add-to-SG flag</button>` : ""}
+        ${w.sg_audio_only_remote ? `<button type="button" id="btn-clear-sg-audio">Dismiss SG audio gap</button>` : ""}
         <label class="btn-file">Upload audiobook (.m4b / .aax) <input type="file" id="audio-file" accept=".m4b,.aax,audio/mp4" hidden /></label>
         <button type="button" id="btn-transcribe" disabled title="Transcription isn’t ready yet (needs LocalAI/Hermes — Phase 8)">Transcribe</button>
         ${state.user.is_admin ? `
@@ -607,6 +614,36 @@ async function openDetail(id) {
     });
     msg("Cleared needs_cover");
     await openDetail(w.id);
+  });
+  async function clearSgFlag(flag, label) {
+    await api(`/api/works/${w.id}/flags/clear`, {
+      method: "POST",
+      json: { flags: [flag] },
+    });
+    msg(label);
+    await openDetail(w.id);
+  }
+  document.getElementById("btn-clear-sg-review")?.addEventListener("click", () =>
+    clearSgFlag("sg_review_dirty", "Cleared StoryGraph review flag")
+  );
+  document.getElementById("btn-clear-sg-add")?.addEventListener("click", () =>
+    clearSgFlag("sg_needs_add", "Cleared add-to-StoryGraph flag")
+  );
+  document.getElementById("btn-clear-sg-audio")?.addEventListener("click", () =>
+    clearSgFlag("sg_audio_only_remote", "Cleared SG audio gap flag")
+  );
+  document.getElementById("btn-remarkable")?.addEventListener("click", async () => {
+    msg("Sending EPUB to reMarkable via rmapi…");
+    try {
+      const r = await api(`/api/works/${w.id}/remarkable`, { method: "POST" });
+      if (!r?.ok) {
+        msg(r?.error || "reMarkable send failed", true);
+        return;
+      }
+      msg("Sent to reMarkable (Diarch folder)");
+    } catch (e) {
+      msg(e.message || String(e), true);
+    }
   });
   if (w.needs_review) {
     wireReviewMarkdownEditor(w.id, msg);
@@ -1709,6 +1746,45 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
   alert("Saved");
 });
 
+function renderIntegrations(health) {
+  const tbody = document.querySelector("#integrations-table tbody");
+  if (!tbody) return;
+  if (!Array.isArray(health) || !health.length) {
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">No health rows yet — run Probe all</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = health
+    .map((h) => {
+      const st = h.status || "unknown";
+      const okAt = h.last_ok_at
+        ? new Date(h.last_ok_at).toLocaleString()
+        : "—";
+      return `<tr>
+        <td><code>${escapeHtml(h.name)}</code></td>
+        <td><span class="health-status health-${escapeHtml(st)}">${escapeHtml(st)}</span></td>
+        <td class="muted">${escapeHtml(okAt)}</td>
+        <td class="muted">${escapeHtml(h.last_error || "")}</td>
+        <td><button type="button" class="btn-repair" data-name="${escapeHtml(h.name)}">Repair</button></td>
+      </tr>`;
+    })
+    .join("");
+  tbody.querySelectorAll(".btn-repair").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const name = btn.dataset.name;
+      btn.disabled = true;
+      try {
+        const r = await api(`/api/integrations/${encodeURIComponent(name)}/repair`, {
+          method: "POST",
+        });
+        if (!r?.ok) alert(r?.error || `Repair failed for ${name}`);
+      } catch (e) {
+        alert(e.message || String(e));
+      }
+      await loadAdmin();
+    });
+  });
+}
+
 async function loadAdmin() {
   if (!state.user.is_admin) return;
   state.users = await api("/api/users");
@@ -1720,7 +1796,7 @@ async function loadAdmin() {
     )
     .join("");
   const health = await api("/api/integrations");
-  document.getElementById("integrations").textContent = JSON.stringify(health, null, 2);
+  renderIntegrations(health);
 }
 
 document.getElementById("user-form").addEventListener("submit", async (e) => {
@@ -1739,8 +1815,21 @@ document.getElementById("user-form").addEventListener("submit", async (e) => {
 });
 
 document.getElementById("btn-sg-sync").addEventListener("click", async () => {
-  const r = await api("/api/storygraph/sync", { method: "POST" });
-  document.getElementById("integrations").textContent = JSON.stringify(r, null, 2);
+  const report = document.getElementById("sg-sync-report");
+  report.hidden = false;
+  report.classList.remove("error");
+  report.textContent = "Syncing StoryGraph…";
+  try {
+    const r = await api("/api/storygraph/sync", { method: "POST" });
+    report.textContent =
+      `SG books: ${r.sg_count ?? 0} · matched: ${r.matched ?? 0} · ` +
+      `missing locally: ${r.missing_locally ?? 0} · needs add on SG: ${r.needs_add ?? 0}` +
+      (r.audio_only_remote ? ` · SG audio-only: ${r.audio_only_remote}` : "");
+    await loadAdmin();
+  } catch (e) {
+    report.textContent = e.message || String(e);
+    report.classList.add("error");
+  }
 });
 
 document.getElementById("btn-tts-export").addEventListener("click", async () => {
@@ -1749,11 +1838,17 @@ document.getElementById("btn-tts-export").addEventListener("click", async () => 
 });
 
 document.getElementById("btn-probe").addEventListener("click", async () => {
-  const health = await api("/api/integrations");
-  for (const h of health) {
-    await api(`/api/integrations/${h.name}/repair`, { method: "POST" });
+  const btn = document.getElementById("btn-probe");
+  btn.disabled = true;
+  try {
+    const health = await api("/api/integrations/probe", { method: "POST" });
+    renderIntegrations(health);
+  } catch (e) {
+    alert(e.message || String(e));
+    await loadAdmin();
+  } finally {
+    btn.disabled = false;
   }
-  await loadAdmin();
 });
 
 boot();

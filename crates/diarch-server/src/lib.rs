@@ -27,6 +27,7 @@ pub async fn build_state(config: Config) -> Result<Arc<AppState>> {
     for name in [
         "pandoc",
         "ocrmypdf",
+        "pdftohtml",
         "ffmpeg",
         "openlibrary",
         "googlebooks",

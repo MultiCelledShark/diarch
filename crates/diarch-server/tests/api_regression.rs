@@ -1174,3 +1174,118 @@ async fn metadata_isbn_report_has_providers() {
     }
     assert!(body["hit"].is_null(), "expected no hit for fake ISBN: {body}");
 }
+
+#[tokio::test]
+async fn integrations_probe_and_list() {
+    let (_dir, app, _) = test_app().await;
+    let token = login(&app, "admin", "adminpass").await;
+    let (status, health, _) =
+        json_req(&app, "POST", "/api/integrations/probe", Some(&token), None).await;
+    assert_eq!(status, 200, "{health}");
+    let rows = health.as_array().expect("health array");
+    assert!(!rows.is_empty());
+    let names: Vec<_> = rows
+        .iter()
+        .filter_map(|h| h["name"].as_str())
+        .collect();
+    for expected in ["pandoc", "storygraph", "remarkable", "ffmpeg", "pdftohtml"] {
+        assert!(names.contains(&expected), "missing {expected} in {names:?}");
+    }
+
+    let (status, listed, _) =
+        json_req(&app, "GET", "/api/integrations", Some(&token), None).await;
+    assert_eq!(status, 200, "{listed}");
+    assert!(listed.as_array().unwrap().len() >= rows.len());
+
+    let (status, repair, _) = json_req(
+        &app,
+        "POST",
+        "/api/integrations/pandoc/repair",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{repair}");
+    assert_eq!(repair["ok"], true);
+}
+
+#[tokio::test]
+async fn remarkable_send_without_epub_reports_error() {
+    let (_dir, app, _) = test_app().await;
+    let token = login(&app, "admin", "adminpass").await;
+    let (status, work, _) = json_req(
+        &app,
+        "POST",
+        "/api/works",
+        Some(&token),
+        Some(json!({"title":"No Epub","authors":"A"})),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let id = work["id"].as_str().unwrap();
+    let (status, body, _) = json_req(
+        &app,
+        "POST",
+        &format!("/api/works/{id}/remarkable"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["ok"], false);
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(err.contains("EPUB") || err.contains("epub") || err.contains("rmapi"), "{err}");
+}
+
+#[tokio::test]
+async fn clear_storygraph_flags_via_flags_endpoint() {
+    let (_dir, app, state) = test_app().await;
+    let token = login(&app, "admin", "adminpass").await;
+    let (status, work, _) = json_req(
+        &app,
+        "POST",
+        "/api/works",
+        Some(&token),
+        Some(json!({"title":"Flagged","authors":"A"})),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let id = work["id"].as_str().unwrap();
+    let uuid = uuid::Uuid::parse_str(id).unwrap();
+    let mut w = state.db.get_work(uuid).await.unwrap().unwrap();
+    w.sg_review_dirty = true;
+    w.sg_needs_add = true;
+    w.sg_audio_only_remote = true;
+    state.db.update_work(&w).await.unwrap();
+
+    let (status, _, _) = json_req(
+        &app,
+        "POST",
+        &format!("/api/works/{id}/flags/clear"),
+        Some(&token),
+        Some(json!({
+            "flags": ["sg_review_dirty", "sg_needs_add", "sg_audio_only_remote"]
+        })),
+    )
+    .await;
+    assert_eq!(status, 204);
+
+    let (status, detail, _) =
+        json_req(&app, "GET", &format!("/api/works/{id}"), Some(&token), None).await;
+    assert_eq!(status, 200, "{detail}");
+    assert_eq!(detail["work"]["sg_review_dirty"], false);
+    assert_eq!(detail["work"]["sg_needs_add"], false);
+    assert_eq!(detail["work"]["sg_audio_only_remote"], false);
+}
+
+#[tokio::test]
+async fn storygraph_sync_without_credentials_is_empty_ok() {
+    let (_dir, app, _) = test_app().await;
+    let token = login(&app, "admin", "adminpass").await;
+    let (status, body, _) =
+        json_req(&app, "POST", "/api/storygraph/sync", Some(&token), None).await;
+    // No DIARCH_STORYGRAPH_USER → empty pull, still a report.
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["sg_count"], 0);
+    assert!(body["books"].as_array().unwrap().is_empty());
+}
