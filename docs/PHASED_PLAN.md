@@ -58,9 +58,9 @@ Default admin: `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` (defaults `admin` / `ad
 ### What you should see after login
 
 1. Top bar: **Diarch** · Library · Wishlist · Attention · Admin · Settings · username · Logout  
-2. **Library** with an **Import ebook** dropzone (EPUB primary)  
+2. **Library** with **Import** (EPUB/PDF/MD and `.m4b`/`.aax` audiobooks)  
 3. Book cards after import, or empty-state guidance  
-4. Work detail: editable title/authors/status/taxonomy/year list; grant by username (admin)
+4. Work detail: editable title/authors/status/taxonomy/year list; grant by username (admin); **Upload audiobook** on an existing work
 
 Restart `cargo run -p diarch-server` after pulling UI changes (assets are embedded at compile time), then hard-refresh the browser.
 

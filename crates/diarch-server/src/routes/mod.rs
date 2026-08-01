@@ -9,7 +9,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use chrono::Utc;
 use diarch_core::taxonomy::suggest_primary;
 use diarch_core::{
-    infer_manga, AssetKind, ReadingProgress, ReadingStatus, Work, WorkAsset,
+    infer_manga, AssetKind, ReadingProgress, ReadingStatus, User, Work, WorkAsset,
 };
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
@@ -140,9 +140,6 @@ async fn logout(
 async fn me(AuthUser(user): AuthUser) -> Json<User> {
     Json(user)
 }
-
-// re-export User in scope
-use diarch_core::User;
 
 async fn list_users(AdminUser(_): AdminUser, State(state): State<Arc<AppState>>) -> Result<Json<Vec<User>>, StatusCode> {
     state
@@ -589,12 +586,13 @@ async fn import_file(
     Ok(Json(serde_json::json!({ "job_id": job.id })))
 }
 
-/// Create a work and queue file import in one step (primary Library → Import EPUB flow).
+/// Create a work and queue file import in one step (Library → Import).
+/// Accepts ebook (.epub/.pdf/.md) or audiobook (.m4b/.aax).
 async fn library_import(
     AuthUser(user): AuthUser,
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
-) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
     let mut saved: Option<(String, Vec<u8>)> = None;
     let mut primary_code: Option<i32> = None;
     let mut title_override: Option<String> = None;
@@ -603,12 +601,15 @@ async fn library_import(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .map_err(|_| (StatusCode::BAD_REQUEST, "bad multipart".into()))?
     {
         let field_name = field.name().unwrap_or("").to_string();
         if field_name == "file" || field.file_name().is_some() {
             let name = field.file_name().unwrap_or("book.epub").to_string();
-            let data = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+            let data = field
+                .bytes()
+                .await
+                .map_err(|_| (StatusCode::BAD_REQUEST, "bad file body".into()))?;
             saved = Some((name, data.to_vec()));
         } else if field_name == "primary_code" {
             let text = field.text().await.unwrap_or_default();
@@ -626,7 +627,27 @@ async fn library_import(
         }
     }
 
-    let (name, data) = saved.ok_or(StatusCode::BAD_REQUEST)?;
+    let (name, data) = saved.ok_or((StatusCode::BAD_REQUEST, "file required".into()))?;
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".mp3") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "MP3 is not supported; use .m4b or Audible .aax".into(),
+        ));
+    }
+    if lower.ends_with(".aax") || lower.ends_with(".m4b") || lower.ends_with(".m4a") {
+        return library_import_audio(
+            &state,
+            &user,
+            name,
+            data,
+            title_override,
+            authors_override,
+            primary_code,
+        )
+        .await;
+    }
+
     let stem = FsPath::new(&name)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -642,11 +663,16 @@ async fn library_import(
         .join(format!("peek-{}", Uuid::new_v4()));
     tokio::fs::create_dir_all(state.config.data_dir.join("imports"))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "imports dir failed".into(),
+            )
+        })?;
     tokio::fs::write(&tmp_peek, &data)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let meta = if name.to_ascii_lowercase().ends_with(".epub") {
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "peek write failed".into()))?;
+    let meta = if lower.ends_with(".epub") {
         diarch_import::read_epub_metadata(&tmp_peek).unwrap_or_default()
     } else {
         diarch_import::EpubMeta::default()
@@ -711,10 +737,15 @@ async fn library_import(
         .db
         .create_work(&work, &codes, Some(user.id))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "create work failed".into(),
+            )
+        })?;
     tokio::fs::create_dir_all(state.config.work_dir(work.id))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "mkdir work failed".into()))?;
     let svg = crate::metadata::placeholder_cover_svg(&work.title, &work.authors);
     let _ = tokio::fs::write(state.config.work_dir(work.id).join("cover.svg"), svg).await;
 
@@ -725,14 +756,14 @@ async fn library_import(
         .join(format!("{}-{}", work.id, name));
     tokio::fs::write(&dest, &data)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "store import failed".into()))?;
     let _ = tokio::fs::remove_file(&tmp_peek).await;
 
     let job = state
         .db
         .create_job("import", Some(work.id))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "job create failed".into()))?;
     let _ = state
         .db
         .update_job(
@@ -747,6 +778,143 @@ async fn library_import(
         Json(serde_json::json!({
             "work": work,
             "job_id": job.id,
+            "kind": "import",
+        })),
+    ))
+}
+
+/// Library Import for audiobook-only files: create work + attach M4B or queue AAX convert.
+async fn library_import_audio(
+    state: &Arc<AppState>,
+    user: &User,
+    name: String,
+    data: Vec<u8>,
+    title_override: Option<String>,
+    authors_override: Option<String>,
+    primary_code: Option<i32>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let lower = name.to_ascii_lowercase();
+    let stem = FsPath::new(&name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Untitled")
+        .replace('_', " ")
+        .replace('-', " ");
+
+    let is_aax = lower.ends_with(".aax");
+    if is_aax {
+        if state.config.audible_key.as_deref().unwrap_or("").is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "DIARCH_AUDIBLE_KEY is not set; cannot convert AAX".into(),
+            ));
+        }
+        if !crate::audio::ffmpeg_available() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "ffmpeg not found on PATH; required for AAX → M4B".into(),
+            ));
+        }
+    }
+
+    let now = Utc::now();
+    let codes = primary_code.map(|p| vec![p]).unwrap_or_default();
+    let primary = primary_code.or_else(|| diarch_core::taxonomy::suggest_primary(&codes));
+    let work = Work {
+        id: Uuid::new_v4(),
+        title: title_override.unwrap_or(stem),
+        authors: authors_override.unwrap_or_default(),
+        isbn: None,
+        description: None,
+        status: ReadingStatus::Unread,
+        primary_code: primary,
+        year_list: None,
+        rating: None,
+        review: None,
+        reading_direction: "ltr".into(),
+        is_manga: false,
+        needs_review: false,
+        needs_cover: true,
+        needs_tts: false,
+        needs_audio: is_aax, // cleared when convert finishes
+        needs_transcription: false,
+        sg_review_dirty: false,
+        sg_needs_add: false,
+        sg_audio_only_remote: false,
+        sg_matched: false,
+        sg_book_id: None,
+        created_by: Some(user.id),
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .create_work(&work, &codes, Some(user.id))
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "create work failed".into(),
+            )
+        })?;
+    let work_dir = state.config.work_dir(work.id);
+    tokio::fs::create_dir_all(&work_dir)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "mkdir work failed".into()))?;
+    let svg = crate::metadata::placeholder_cover_svg(&work.title, &work.authors);
+    let _ = tokio::fs::write(work_dir.join("cover.svg"), svg).await;
+
+    if is_aax {
+        let aax_path = work_dir.join("import.aax");
+        tokio::fs::write(&aax_path, &data)
+            .await
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to store AAX".into()))?;
+        let job = state
+            .db
+            .create_job("aax_to_m4b", Some(work.id))
+            .await
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "job create failed".into()))?;
+        let _ = state
+            .db
+            .update_job(job.id, "pending", Some("import.aax"))
+            .await;
+        return Ok((
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "work": work,
+                "job_id": job.id,
+                "kind": "aax_to_m4b",
+                "message": "Converting AAX → M4B",
+            })),
+        ));
+    }
+
+    // .m4b / .m4a → attach immediately as book.m4b
+    let audio_dir = work_dir.join("audio");
+    tokio::fs::create_dir_all(&audio_dir)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "mkdir audio failed".into()))?;
+    let dest = audio_dir.join(crate::audio::BOOK_M4B);
+    tokio::fs::write(&dest, &data)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "write m4b failed".into()))?;
+    let asset = WorkAsset {
+        id: Uuid::new_v4(),
+        work_id: work.id,
+        kind: AssetKind::Audio,
+        relative_path: format!("audio/{}", crate::audio::BOOK_M4B),
+        mime: Some("audio/mp4".into()),
+        bytes: Some(data.len() as i64),
+        created_at: Utc::now(),
+    };
+    let _ = state.db.add_asset(&asset).await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "work": work,
+            "job_id": serde_json::Value::Null,
+            "kind": "m4b",
         })),
     ))
 }

@@ -7,3 +7,5 @@
 *.swp
 .DS_Store
 /web/node_modules
+.env
+.env.local

@@ -26,6 +26,8 @@ Open `http://127.0.0.1:8083` — default listen `0.0.0.0:8083`.
 
 ## Environment
 
+Optional local file: copy [`.env.example`](.env.example) → `.env` (gitignored). `dotenvy` loads it on startup; real process env still wins.
+
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `DIARCH_LISTEN` | `0.0.0.0:8083` | Bind address |

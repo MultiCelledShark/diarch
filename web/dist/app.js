@@ -225,7 +225,13 @@ function setImportStatus(text, isError = false) {
 
 async function importLibraryFile(file) {
   if (!file) return;
-  setImportStatus(`Uploading ${file.name}…`);
+  const lower = file.name.toLowerCase();
+  const isAudio = lower.endsWith(".aax") || lower.endsWith(".m4b") || lower.endsWith(".m4a");
+  setImportStatus(
+    isAudio && lower.endsWith(".aax")
+      ? `Uploading AAX “${file.name}” for convert…`
+      : `Uploading ${file.name}…`
+  );
   const fd = new FormData();
   fd.append("file", file);
   try {
@@ -236,16 +242,28 @@ async function importLibraryFile(file) {
     });
     if (!res.ok) throw new Error(await res.text());
     const j = await res.json();
-    setImportStatus(`Importing “${j.work.title}”…`);
+    const finish = async () => {
+      setImportStatus(`Imported “${j.work.title}”. Opening…`);
+      await loadWorks();
+      await openDetail(j.work.id);
+      setImportStatus("");
+    };
+    // M4B attach has no background job; AAX/ebook import poll until done.
+    if (!j.job_id) {
+      await finish();
+      return;
+    }
+    setImportStatus(
+      j.kind === "aax_to_m4b"
+        ? `Converting AAX “${j.work.title}”…`
+        : `Importing “${j.work.title}”…`
+    );
     await pollJob(j.job_id, async (job) => {
       if (job.status === "failed") {
         setImportStatus(`Import failed: ${job.detail || "unknown error"}`, true);
         return;
       }
-      setImportStatus(`Imported “${j.work.title}”. Opening…`);
-      await loadWorks();
-      await openDetail(j.work.id);
-      setImportStatus("");
+      await finish();
     });
   } catch (e) {
     setImportStatus(e.message || String(e), true);

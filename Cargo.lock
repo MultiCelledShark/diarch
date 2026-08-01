@@ -528,6 +528,7 @@ dependencies = [
  "diarch-core",
  "diarch-db",
  "diarch-import",
+ "dotenvy",
  "futures",
  "http-body-util",
  "reqwest",

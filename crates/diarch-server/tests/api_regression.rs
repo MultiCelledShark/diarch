@@ -1018,3 +1018,86 @@ async fn mp3_audio_upload_rejected() {
     let msg = String::from_utf8_lossy(&bytes);
     assert!(msg.to_ascii_lowercase().contains("mp3"), "{msg}");
 }
+
+#[tokio::test]
+async fn library_import_m4b_creates_work_with_audio() {
+    let (_dir, app, _) = test_app().await;
+    let token = login(&app, "admin", "adminpass").await;
+    let fake = b"ftypM4B library import bytes!!!!";
+    let boundary = "----libAudioBoundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"HailMary.m4b\"\r\nContent-Type: audio/mp4\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(fake);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/library/import")
+        .header("cookie", format!("diarch_session={token}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), 201, "library m4b import");
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let j: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(j["kind"], "m4b");
+    assert!(j["job_id"].is_null());
+    assert_eq!(j["work"]["title"], "HailMary");
+    let id = j["work"]["id"].as_str().unwrap();
+
+    let (status, detail, _) =
+        json_req(&app, "GET", &format!("/api/works/{id}"), Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(detail["work"]["needs_audio"], false);
+    let kinds: Vec<_> = detail["assets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["kind"].as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"audio"), "{kinds:?}");
+}
+
+#[tokio::test]
+async fn library_import_aax_without_key_fails() {
+    let (_dir, app, _) = test_app().await;
+    let token = login(&app, "admin", "adminpass").await;
+    let boundary = "----libAaxBoundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"book.aax\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(b"not-a-real-aax");
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/library/import")
+        .header("cookie", format!("diarch_session={token}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), 400);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let msg = String::from_utf8_lossy(&bytes);
+    assert!(
+        msg.contains("DIARCH_AUDIBLE_KEY") || msg.contains("activation"),
+        "{msg}"
+    );
+}
