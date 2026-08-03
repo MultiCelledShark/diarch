@@ -69,10 +69,10 @@ Restart `cargo run -p diarch-server` after pulling UI changes (assets are embedd
 
 ## Suggested next work (priority)
 
-1. **Deploy / exercise Phase 8 on Keystone** — Generate cover + Approve against TrueNAS LocalAI; long-audiobook transcription timing.
-2. **ebook2audiobook watcher** — desktop TTS → `queue/incoming_audio` as `.m4b`.
-3. **Deploy** — musl/Debian 13 → Keystone systemd (deps: pandoc, ocrmypdf, tesseract, poppler-utils, ffmpeg/ffprobe, rmapi — see [`deploy/debian/README.md`](../deploy/debian/README.md)).
-4. **Android / KOReader** — deferred (Phase 7).
+1. **Deploy to Keystone** — musl (or Debian-built) `diarch` binary + systemd unit; apt deps + `rmapi` per [`deploy/debian/README.md`](../deploy/debian/README.md); secrets via `/etc/diarch.env`.
+2. **Exercise Phase 8 on Keystone** — Generate cover + Approve against TrueNAS LocalAI; long-audiobook transcription timing; Integrations Probe all green.
+3. **Android / KOReader** — deferred (Phase 7).
+4. **ebook2audiobook watcher** — separate desktop project; TTS → `queue/incoming_audio` as `.m4b` — see [TODO-ebook2audiobook-watcher.md](TODO-ebook2audiobook-watcher.md).
 
 ---
 
