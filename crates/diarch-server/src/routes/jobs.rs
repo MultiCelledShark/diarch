@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use diarch_core::{AssetKind, WorkAsset};
 use std::sync::Arc;
@@ -16,18 +16,7 @@ pub async fn process_one(state: &Arc<AppState>) -> Result<()> {
         "import" => run_import(state, &job).await,
         "confirm_epub" => run_confirm(state, &job).await,
         "aax_to_m4b" => run_aax_to_m4b(state, &job).await,
-        "transcribe" => {
-            // Phase 8 / LocalAI — keep stub honest.
-            state
-                .db
-                .update_job(
-                    job.id,
-                    "failed",
-                    Some("transcription isn’t ready yet (needs LocalAI/Hermes — Phase 8)"),
-                )
-                .await?;
-            return Ok(());
-        }
+        "transcribe" => run_transcribe(state, &job).await,
         other => Err(anyhow!("unknown job kind: {other}")),
     };
 
@@ -216,6 +205,38 @@ async fn run_aax_to_m4b(state: &Arc<AppState>, job: &diarch_core::Job) -> Result
         .set_integration_health("ffmpeg", "ok", None, true)
         .await;
     Ok(Some("aax converted to book.m4b".into()))
+}
+
+async fn run_transcribe(state: &Arc<AppState>, job: &diarch_core::Job) -> Result<Option<String>> {
+    let work_id = job.work_id.ok_or_else(|| anyhow!("transcribe missing work_id"))?;
+    if state.config.localai_url.is_none() && state.config.hermes_url.is_none() {
+        bail!("DIARCH_LOCALAI_URL not set");
+    }
+    if !crate::audio::ffmpeg_available() || !crate::audio::ffprobe_available() {
+        bail!("ffmpeg/ffprobe required for transcription chunking");
+    }
+    let work_dir = state.config.work_dir(work_id);
+    let detail = crate::localai::transcribe_audiobook(state, &work_dir).await?;
+    let dest = work_dir.join("transcript.txt");
+    register_asset(
+        state,
+        work_id,
+        AssetKind::Media,
+        "transcript.txt",
+        "text/plain",
+        &dest,
+    )
+    .await?;
+    if let Some(mut work) = state.db.get_work(work_id).await? {
+        work.needs_transcription = false;
+        work.updated_at = Utc::now();
+        state.db.update_work(&work).await?;
+    }
+    let _ = state
+        .db
+        .set_integration_health("localai", "ok", None, true)
+        .await;
+    Ok(Some(detail))
 }
 
 async fn register_asset(

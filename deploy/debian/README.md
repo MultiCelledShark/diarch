@@ -51,7 +51,7 @@ AAX convert needs free disk under `/var/lib/diarch` (temp `.m4b` beside the work
 | StoryGraph sync | `DIARCH_STORYGRAPH_USER`, `DIARCH_STORYGRAPH_COOKIE` (`remember_user_token`) | Outbound HTTPS to `app.thestorygraph.com` |
 | Google Books enrich | `DIARCH_GOOGLE_BOOKS_KEY` | Outbound HTTPS to `googleapis.com` (unauthenticated quota is easy to hit) |
 | Open Library / LoC | none | Outbound HTTPS to `openlibrary.org`, Library of Congress |
-| LocalAI / Hermes covers + transcription | `DIARCH_LOCALAI_URL` / `DIARCH_HERMES_URL` | **Phase 8** — not required yet |
+| LocalAI / Hermes covers + transcription | `DIARCH_LOCALAI_URL`, optional `DIARCH_LOCALAI_IMAGE_MODEL` / `DIARCH_LOCALAI_TRANSCRIBE_MODEL` / `DIARCH_HERMES_URL` | Reachable from Keystone (TrueNAS LocalAI or local) |
 
 Outbound HTTPS from Keystone is required for metadata enrich, StoryGraph pull, cover fetch, and rmapi cloud auth/upload. Library browse/read of already-imported files works offline.
 
@@ -111,8 +111,10 @@ Environment=DIARCH_AUDIBLE_KEY=your-activation-bytes
 Environment=DIARCH_GOOGLE_BOOKS_KEY=your-google-books-key
 Environment=DIARCH_STORYGRAPH_USER=your_sg_username
 Environment=DIARCH_STORYGRAPH_COOKIE=remember_user_token_value
-# Phase 8:
-# Environment=DIARCH_LOCALAI_URL=http://127.0.0.1:8080
+# Phase 8 LocalAI (TrueNAS example):
+# Environment=DIARCH_LOCALAI_URL=http://192.168.0.104:30286
+# Environment=DIARCH_LOCALAI_IMAGE_MODEL=flux.2-klein-4b
+# Environment=DIARCH_LOCALAI_TRANSCRIBE_MODEL=nemo-parakeet-tdt-0.6b
 ```
 
 Prefer a root-owned `EnvironmentFile=/etc/diarch.env` (`chmod 600`) instead of putting secrets in the unit file if the unit is world-readable.

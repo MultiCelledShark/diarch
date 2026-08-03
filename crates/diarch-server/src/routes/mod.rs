@@ -51,9 +51,13 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/works/{id}/cover/fetch", post(fetch_cover))
         .route("/api/works/{id}/cover/generate", post(generate_cover))
         .route("/api/works/{id}/cover/prompt", get(cover_prompt))
+        .route("/api/works/{id}/cover/candidate", get(get_cover_candidate))
+        .route("/api/works/{id}/cover/approve", post(approve_cover_candidate))
+        .route("/api/works/{id}/cover/discard", post(discard_cover_candidate))
         .route("/api/works/{id}/audio", post(upload_audio))
         .route("/api/works/{id}/audio/chapters", get(audio_chapters))
         .route("/api/works/{id}/transcribe", post(request_transcribe))
+        .route("/api/works/{id}/transcript", get(get_transcript))
         .route("/api/works/{id}/audio/{filename}", get(stream_audio))
         .route("/api/works/{id}/progress", get(get_progress).put(put_progress))
         .route(
@@ -324,11 +328,19 @@ async fn get_work(
     let codes = state.db.work_codes(id).await.unwrap_or_default();
     let assets = state.db.list_assets(id).await.unwrap_or_default();
     let has_import_pdf = state.config.work_dir(id).join("import.pdf").exists();
+    let has_cover_candidate = state
+        .config
+        .work_dir(id)
+        .join(diarch_core::Config::cover_candidate_name())
+        .exists();
+    let has_transcript = state.config.work_dir(id).join("transcript.txt").exists();
     Ok(Json(serde_json::json!({
         "work": work,
         "codes": codes,
         "assets": assets,
         "has_import_pdf": has_import_pdf,
+        "has_cover_candidate": has_cover_candidate,
+        "has_transcript": has_transcript,
     })))
 }
 
@@ -1190,28 +1202,39 @@ async fn generate_cover(
         .map(|c| c.to_string())
         .unwrap_or_else(|| "general".into());
     let prompt = metadata::cover_prompt(&work.title, &work.authors, &genre);
-    // LocalAI/Hermes not wired for Phase 4 — leave endpoint stubbed.
     if state.config.localai_url.is_none() && state.config.hermes_url.is_none() {
         return Ok(Json(serde_json::json!({
             "ok": false,
             "prompt": prompt,
-            "message": "LocalAI/Hermes not configured; use Fetch cover or Upload"
+            "message": "LocalAI not configured — set DIARCH_LOCALAI_URL"
         })));
     }
-    match metadata::generate_cover_localai(&state, &prompt)
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?
-    {
-        Some(bytes) => {
-            apply_cover_bytes(&state, id, &bytes)
+    match metadata::generate_cover_localai(&state, &prompt).await {
+        Ok(Some(bytes)) => {
+            let dest = state
+                .config
+                .work_dir(id)
+                .join(diarch_core::Config::cover_candidate_name());
+            tokio::fs::write(&dest, &bytes)
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            Ok(Json(serde_json::json!({ "ok": true, "prompt": prompt })))
+            // Staged: do not touch cover.jpg or needs_cover until approve.
+            Ok(Json(serde_json::json!({
+                "ok": true,
+                "staged": true,
+                "prompt": prompt,
+                "bytes": bytes.len()
+            })))
         }
-        None => Ok(Json(serde_json::json!({
+        Ok(None) => Ok(Json(serde_json::json!({
             "ok": false,
             "prompt": prompt,
-            "message": "LocalAI/Hermes unavailable; use Fetch cover or Upload"
+            "message": "LocalAI unavailable; use Fetch cover or Upload"
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({
+            "ok": false,
+            "prompt": prompt,
+            "message": e.to_string()
         }))),
     }
 }
@@ -1237,6 +1260,67 @@ async fn cover_prompt(
     Ok(Json(serde_json::json!({
         "prompt": metadata::cover_prompt(&work.title, &work.authors, &genre)
     })))
+}
+
+async fn get_cover_candidate(
+    AuthUser(user): AuthUser,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, StatusCode> {
+    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let p = state
+        .config
+        .work_dir(id)
+        .join(diarch_core::Config::cover_candidate_name());
+    let data = tokio::fs::read(&p)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/jpeg"),
+            (header::CACHE_CONTROL, "private, no-store"),
+        ],
+        data,
+    )
+        .into_response())
+}
+
+async fn approve_cover_candidate(
+    AuthUser(user): AuthUser,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let dir = state.config.work_dir(id);
+    let candidate = dir.join(diarch_core::Config::cover_candidate_name());
+    let data = tokio::fs::read(&candidate)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    apply_cover_bytes(&state, id, &data)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = tokio::fs::remove_file(&candidate).await;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn discard_cover_candidate(
+    AuthUser(user): AuthUser,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, StatusCode> {
+    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let candidate = state
+        .config
+        .work_dir(id)
+        .join(diarch_core::Config::cover_candidate_name());
+    let _ = tokio::fs::remove_file(&candidate).await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn upload_audio(
@@ -1377,15 +1461,64 @@ async fn request_transcribe(
     if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
         return Err(StatusCode::FORBIDDEN);
     }
-    if state.db.get_work(id).await.ok().flatten().is_none() {
+    let Some(mut work) = state.db.get_work(id).await.ok().flatten() else {
         return Err(StatusCode::NOT_FOUND);
+    };
+    if state.config.localai_url.is_none() && state.config.hermes_url.is_none() {
+        return Ok(Json(serde_json::json!({
+            "ok": false,
+            "ready": false,
+            "message": "LocalAI not configured — set DIARCH_LOCALAI_URL"
+        })));
     }
-    // Stub until Phase 8 LocalAI/Hermes transcription.
+    let m4b = state
+        .config
+        .work_dir(id)
+        .join("audio")
+        .join(crate::audio::BOOK_M4B);
+    if !m4b.exists() {
+        return Ok(Json(serde_json::json!({
+            "ok": false,
+            "ready": true,
+            "message": "No book.m4b to transcribe — upload an audiobook first"
+        })));
+    }
+    work.needs_transcription = true;
+    work.updated_at = Utc::now();
+    let _ = state.db.update_work(&work).await;
+    let job = state
+        .db
+        .create_job("transcribe", Some(id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({
-        "ok": false,
-        "ready": false,
-        "message": "Transcription isn’t ready yet (needs LocalAI/Hermes — Phase 8)"
+        "ok": true,
+        "ready": true,
+        "job_id": job.id,
+        "message": "Transcription queued (chunked via LocalAI; may take a while)"
     })))
+}
+
+async fn get_transcript(
+    AuthUser(user): AuthUser,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, StatusCode> {
+    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let path = state.config.work_dir(id).join("transcript.txt");
+    let data = tokio::fs::read(&path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let title = work_title(&state, id).await;
+    let disp = diarch_core::content_disposition_attachment(&title, "transcript.txt");
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::CONTENT_DISPOSITION, disp)
+        .body(axum::body::Body::from(data))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
 }
 
 async fn stream_audio(

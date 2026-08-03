@@ -796,58 +796,44 @@ pub fn cover_prompt(title: &str, authors: &str, genre: &str) -> String {
     )
 }
 
+/// Generate cover bytes via LocalAI/Hermes. Returns `None` when URL unset.
 pub async fn generate_cover_localai(
     state: &AppState,
     prompt: &str,
 ) -> Result<Option<Vec<u8>>> {
-    // Kept for future LocalAI/Hermes wiring; returns None when unset.
-    let Some(base) = state.config.localai_url.as_ref() else {
+    if state.config.localai_url.is_none() && state.config.hermes_url.is_none() {
         return Ok(None);
-    };
-    if let Some(hermes) = state.config.hermes_url.as_ref() {
-        let body = serde_json::json!({
-            "task": "generate_book_cover",
-            "prompt": prompt
-        });
-        let resp = state.http.post(format!("{hermes}/cover")).json(&body).send().await;
-        if let Ok(r) = resp {
-            if r.status().is_success() {
-                let bytes = r.bytes().await?;
-                let _ = state
-                    .db
-                    .set_integration_health("localai", "ok", None, true)
-                    .await;
-                return Ok(Some(bytes.to_vec()));
-            }
+    }
+    match crate::localai::generate_cover_bytes(state, prompt).await {
+        Ok(bytes) => {
+            let _ = state
+                .db
+                .set_integration_health("localai", "ok", None, true)
+                .await;
+            Ok(Some(bytes))
+        }
+        Err(e) => {
+            let _ = state
+                .db
+                .set_integration_health(
+                    "localai",
+                    "broken",
+                    Some(&truncate_err(&e.to_string(), 200)),
+                    false,
+                )
+                .await;
+            Err(e)
         }
     }
-    let url = format!("{base}/v1/images/generations");
-    let body = serde_json::json!({
-        "prompt": prompt,
-        "size": "512x768"
-    });
-    let resp = state.http.post(&url).json(&body).send().await?;
-    if !resp.status().is_success() {
-        let _ = state
-            .db
-            .set_integration_health("localai", "broken", Some("image gen failed"), false)
-            .await;
-        return Ok(None);
+}
+
+fn truncate_err(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        s.to_string()
+    } else {
+        chars[..max].iter().collect::<String>() + "…"
     }
-    let v: Value = resp.json().await?;
-    if let Some(b64) = v
-        .pointer("/data/0/b64_json")
-        .and_then(|x| x.as_str())
-    {
-        use base64::Engine as _;
-        let bytes = base64::engine::general_purpose::STANDARD.decode(b64)?;
-        let _ = state
-            .db
-            .set_integration_health("localai", "ok", None, true)
-            .await;
-        return Ok(Some(bytes));
-    }
-    Ok(None)
 }
 
 #[cfg(test)]

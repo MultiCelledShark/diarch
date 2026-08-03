@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod auth;
 pub mod fixer;
+pub mod localai;
 pub mod metadata;
 pub mod remarkable;
 pub mod routes;
@@ -41,11 +42,11 @@ pub async fn build_state(config: Config) -> Result<Arc<AppState>> {
             .set_integration_health(name, "unknown", None, false)
             .await;
     }
-    Ok(Arc::new(AppState {
-        db,
-        config,
-        http: reqwest::Client::new(),
-    }))
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .build()?;
+    Ok(Arc::new(AppState { db, config, http }))
 }
 
 /// HTTP router used by the binary and integration tests.

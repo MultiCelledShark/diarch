@@ -51,8 +51,8 @@ Default admin: `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` (defaults `admin` / `ad
 | **4 Metadata / covers / wishlist** | **Complete** | OL + Google Books + LoC; ISBN authors fixed; remote cover fetch; wishlist enrich + barcode; extract/placeholder/upload covers. LocalAI/Hermes deferred → Phase 8 |
 | **5 Audio** | **Complete** | Canonical `book.m4b` upload + Range stream; Audible AAX→M4B server job (`DIARCH_AUDIBLE_KEY` + ffmpeg, same flags as audible2m4b). Transcription stubbed → Phase 8 |
 | **6 StoryGraph / reMarkable / fixer** | **Complete** | SG pull + flags; Integrations for all users (health, Probe, SG sync); reMarkable connect URL + in-app 8-char code auth; rmapi send to `Diarch/`; Keystone dep docs. Scrapers/CLI remain upstream-fragile |
-| **7 Android / KOReader** | Not done | Docs/stubs only |
-| **8 Deferred AI + skipped polish** | Not started | Circle-back: LocalAI/Hermes covers, staged approve, and other optionals parked below |
+| **7 Android / KOReader** | Skipped for now | Docs/stubs only — deferred |
+| **8 Deferred AI + polish** | **In progress** | LocalAI covers (staged approve), transcription, health probe |
 | **Regression tests** | Done | `cargo test --workspace` (core/db/import/server; Phase 6 coverage included) |
 
 ### What you should see after login
@@ -69,12 +69,11 @@ Restart `cargo run -p diarch-server` after pulling UI changes (assets are embedd
 
 ## Suggested next work (priority)
 
-1. **UX harden** — empty states (in progress), year reading list UI, grant UX without pasting UUIDs.
-2. **Transcription** — Phase 8 when LocalAI/Hermes is ready (UI stubbed in Phase 5).
+1. **Phase 8 finish** — exercise Generate cover + Approve against TrueNAS LocalAI; long-audiobook transcription timing; remaining polish below.
+2. **UX harden** — empty states (in progress), year reading list UI, grant UX without pasting UUIDs.
 3. **ebook2audiobook watcher** — desktop TTS → `queue/incoming_audio` as `.m4b`.
 4. **Deploy** — musl/Debian 13 → Keystone systemd (deps: pandoc, ocrmypdf, tesseract, poppler-utils, ffmpeg, rmapi — see `deploy/debian/README.md`).
-5. **Android** — thin client.
-6. **KOReader** — optional sync.
+5. **Android / KOReader** — deferred (Phase 7).
 
 ---
 
@@ -101,7 +100,9 @@ diarch-server (Axum) ── SQLite ── /var/lib/diarch/library
 | `DIARCH_LISTEN` | Bind address (default `0.0.0.0:8083`) |
 | `DIARCH_DATA_DIR` | Data root |
 | `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` | Bootstrap admin |
-| `DIARCH_LOCALAI_URL` / `DIARCH_HERMES_URL` | Cover generation |
+| `DIARCH_LOCALAI_URL` / `DIARCH_HERMES_URL` | LocalAI base (+ optional Hermes cover shim) |
+| `DIARCH_LOCALAI_IMAGE_MODEL` | Image model (default `flux.2-klein-4b` when URL set) |
+| `DIARCH_LOCALAI_TRANSCRIBE_MODEL` | ASR model (default `nemo-parakeet-tdt-0.6b` when URL set) |
 | `DIARCH_AUDIBLE_KEY` | Audible activation bytes for AAX → M4B (never commit) |
 | `DIARCH_GOOGLE_BOOKS_KEY` | Google Books API key (optional; avoids unauthenticated 429) |
 | `DIARCH_STORYGRAPH_USER` / `DIARCH_STORYGRAPH_COOKIE` | SG pull |
@@ -110,17 +111,23 @@ diarch-server (Axum) ── SQLite ── /var/lib/diarch/library
 
 ---
 
-## Phase 8 — Deferred AI + skipped polish (circle-back)
+## Phase 8 — AI integration + polish
 
-Parked until LocalAI / Hermes (or equivalent) is ready on Keystone, and until earlier phases are polished enough to care. Do **not** block Phases 5–7 on this.
+LocalAI on the LAN (e.g. TrueNAS) drives covers and transcription. Phase 7 (Android / KOReader) is skipped for now.
 
 ### LocalAI / Hermes covers
 
-- Wire `DIARCH_LOCALAI_URL` / `DIARCH_HERMES_URL` for real image generation (stubs already exist: `POST /api/works/{id}/cover/generate`, `GET …/cover/prompt`).
-- Web UI: **Generate cover** on work detail; show prompt; show result.
-- **Staged approve:** write candidate to e.g. `cover.candidate.jpg` (or blob), preview beside current cover, then **Approve → `cover.jpg`** / Discard. Do not overwrite `cover.jpg` until approve.
+- Wire `DIARCH_LOCALAI_URL` (+ optional `DIARCH_LOCALAI_IMAGE_MODEL`, `DIARCH_HERMES_URL`) for image generation (`POST /api/works/{id}/cover/generate`, `GET …/cover/prompt`).
+- Web UI: **Generate cover** on work detail; show prompt; show candidate.
+- **Staged approve:** write `cover.candidate.jpg`, preview beside current cover, then **Approve → `cover.jpg`** / Discard. Do not overwrite `cover.jpg` until approve.
 - Clear `needs_cover` only on approve (or explicit dismiss).
-- Health probe row for LocalAI/Hermes in Admin integrations.
+- Health probe row for LocalAI in Integrations (`/v1/models`).
+
+### Transcription
+
+- **Transcribe** queues a `transcribe` job when `book.m4b` exists and LocalAI is configured.
+- Worker chunks audio (~10 min) via ffmpeg and calls LocalAI `/v1/audio/transcriptions` (`DIARCH_LOCALAI_TRANSCRIBE_MODEL`).
+- Result: `transcript.txt` (+ download link on work detail).
 
 ### Other optionals skipped earlier
 
@@ -132,10 +139,7 @@ Parked until LocalAI / Hermes (or equivalent) is ready on Keystone, and until ea
 | Phase 4 | Attention one-click clear for soft flags without opening detail |
 | Phase 4 | **Fix metadata search / enrich** — new/indie ISBNs often missing from OL; Google needs `DIARCH_GOOGLE_BOOKS_KEY`; broaden providers / UX so Enrich is reliable beyond “not in catalog” |
 | Product | ebook2audiobook desktop watcher — [TODO-ebook2audiobook-watcher.md](TODO-ebook2audiobook-watcher.md) |
-| Phase 5 | Real audiobook transcription (LocalAI/Hermes or local ASR) — UI stub only today |
-| Later | Anything else deliberately deferred from Phases 5–7 that should not live in those phases’ MVP |
-
-Audible / transcription / Android / KOReader stay owned by Phases 5 and 7; list them here only if they get deferred out of those phases later.
+| Phase 7 | Android thin client / KOReader sync — deferred |
 
 ---
 

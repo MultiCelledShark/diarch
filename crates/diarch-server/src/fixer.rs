@@ -169,39 +169,11 @@ async fn probe_remarkable(state: &AppState) {
 }
 
 async fn probe_localai(state: &AppState) {
-    let Some(base) = state.config.localai_url.as_ref() else {
-        let _ = state
-            .db
-            .set_integration_health(
-                "localai",
-                "degraded",
-                Some("DIARCH_LOCALAI_URL not set (Phase 8)"),
-                false,
-            )
-            .await;
-        return;
-    };
-    let url = format!("{}/readyz", base.trim_end_matches('/'));
-    match state.http.get(&url).send().await {
-        Ok(r) if r.status().is_success() => {
-            let _ = state
-                .db
-                .set_integration_health("localai", "ok", None, true)
-                .await;
-        }
-        Ok(_) | Err(_) => {
-            // Many LocalAI builds lack /readyz; treat configured URL as degraded-ok.
-            let _ = state
-                .db
-                .set_integration_health(
-                    "localai",
-                    "degraded",
-                    Some("URL set; probe inconclusive (Phase 8)"),
-                    false,
-                )
-                .await;
-        }
-    }
+    let (status, detail, auto) = crate::localai::probe(state).await;
+    let _ = state
+        .db
+        .set_integration_health("localai", &status, detail.as_deref(), auto)
+        .await;
 }
 
 async fn probe_audible(state: &AppState) {

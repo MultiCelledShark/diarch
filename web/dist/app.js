@@ -322,7 +322,18 @@ async function openDetail(id) {
   const codes = data.codes || [];
 
   document.getElementById("detail").innerHTML = `
-    <img src="/api/works/${w.id}/cover?t=${Date.now()}" alt="" />
+    <div class="detail-covers">
+      <img src="/api/works/${w.id}/cover?t=${Date.now()}" alt="" />
+      ${data.has_cover_candidate ? `
+        <div class="cover-candidate">
+          <p class="muted">AI candidate</p>
+          <img src="/api/works/${w.id}/cover/candidate?t=${Date.now()}" alt="Candidate cover" />
+          <div class="row">
+            <button type="button" id="btn-approve-cover">Approve cover</button>
+            <button type="button" id="btn-discard-cover">Discard</button>
+          </div>
+        </div>` : ""}
+    </div>
     <div>
       <form id="detail-form" class="form-grid detail-form">
         <label>Title <input name="title" value="${escapeHtml(w.title)}" required /></label>
@@ -359,7 +370,8 @@ async function openDetail(id) {
         </div>
         <div id="meta-hits" class="meta-hits" hidden></div>
       </form>
-      <p class="muted">${hasEpub ? "EPUB ready" : "No EPUB yet"} · ${hasMd ? "Markdown ready" : "No Markdown"} · ${hasAudio ? "M4B ready" : (w.needs_audio ? "Needs audio" : "No audio")} · Direction: ${escapeHtml(w.reading_direction)}${w.needs_review ? " · Needs review" : ""}${w.needs_cover ? " · Needs cover" : ""}${w.sg_matched ? " · On StoryGraph" : ""}${w.sg_review_dirty ? " · Update SG review" : ""}${w.sg_needs_add ? " · Add to StoryGraph" : ""}${w.sg_audio_only_remote ? " · SG audio, missing local" : ""}</p>
+      <p class="muted">${hasEpub ? "EPUB ready" : "No EPUB yet"} · ${hasMd ? "Markdown ready" : "No Markdown"} · ${hasAudio ? "M4B ready" : (w.needs_audio ? "Needs audio" : "No audio")} · Direction: ${escapeHtml(w.reading_direction)}${w.needs_review ? " · Needs review" : ""}${w.needs_cover ? " · Needs cover" : ""}${data.has_transcript ? " · Transcript ready" : (w.needs_transcription ? " · Transcribing…" : "")}${w.sg_matched ? " · On StoryGraph" : ""}${w.sg_review_dirty ? " · Update SG review" : ""}${w.sg_needs_add ? " · Add to StoryGraph" : ""}${w.sg_audio_only_remote ? " · SG audio, missing local" : ""}</p>
+      <p id="cover-prompt" class="muted cover-prompt" hidden></p>
       ${hasAudio ? `
         <div class="detail-audio">
           <audio id="detail-audio" controls preload="metadata"
@@ -379,13 +391,15 @@ async function openDetail(id) {
         ${hasMd ? `<a href="/api/works/${w.id}/download/markdown"><button type="button">Download MD</button></a>` : ""}
         ${hasEpub ? `<button type="button" id="btn-remarkable">Send to reMarkable</button>` : ""}
         <button type="button" id="btn-fetch-cover"${w.isbn ? "" : " disabled title=\"Add an ISBN first\""}>Fetch cover</button>
+        <button type="button" id="btn-generate-cover" title="Generate via LocalAI (staged — approve before it replaces the cover)">Generate cover</button>
         <label class="btn-file">Upload cover <input type="file" id="cover-file" accept="image/*" hidden /></label>
         ${w.needs_cover ? `<button type="button" id="btn-clear-needs-cover">Dismiss needs cover</button>` : ""}
         ${w.sg_review_dirty ? `<button type="button" id="btn-clear-sg-review" title="Clear after you update StoryGraph">Clear SG review flag</button>` : ""}
         ${w.sg_needs_add ? `<button type="button" id="btn-clear-sg-add" title="Clear after you add this book on StoryGraph">Clear add-to-SG flag</button>` : ""}
         ${w.sg_audio_only_remote ? `<button type="button" id="btn-clear-sg-audio">Dismiss SG audio gap</button>` : ""}
         <label class="btn-file">Upload audiobook (.m4b / .aax) <input type="file" id="audio-file" accept=".m4b,.aax,audio/mp4" hidden /></label>
-        <button type="button" id="btn-transcribe" disabled title="Transcription isn’t ready yet (needs LocalAI/Hermes — Phase 8)">Transcribe</button>
+        <button type="button" id="btn-transcribe"${hasAudio ? "" : " disabled title=\"Upload an audiobook first\""}>Transcribe</button>
+        ${data.has_transcript ? `<a href="/api/works/${w.id}/transcript"><button type="button">Download transcript</button></a>` : ""}
         ${state.user.is_admin ? `
           <label>Grant access
             <select id="grant-user">
@@ -611,6 +625,62 @@ async function openDetail(id) {
         return;
       }
       msg("Cover fetched");
+      await openDetail(w.id);
+    } catch (e) {
+      msg(e.message || String(e), true);
+    }
+  });
+
+  document.getElementById("btn-generate-cover")?.addEventListener("click", async () => {
+    const promptEl = document.getElementById("cover-prompt");
+    msg("Generating cover via LocalAI (may take a minute)…");
+    try {
+      const r = await api(`/api/works/${w.id}/cover/generate`, { method: "POST" });
+      if (r?.prompt && promptEl) {
+        promptEl.hidden = false;
+        promptEl.textContent = `Prompt: ${r.prompt}`;
+      }
+      if (!r?.ok) {
+        msg(r?.message || "Cover generation failed", true);
+        return;
+      }
+      msg("Candidate ready — approve or discard");
+      await openDetail(w.id);
+    } catch (e) {
+      msg(e.message || String(e), true);
+    }
+  });
+
+  document.getElementById("btn-approve-cover")?.addEventListener("click", async () => {
+    msg("Approving candidate cover…");
+    try {
+      const r = await api(`/api/works/${w.id}/cover/approve`, { method: "POST" });
+      if (!r?.ok) {
+        msg(r?.message || "Approve failed", true);
+        return;
+      }
+      msg("Cover approved");
+      await openDetail(w.id);
+    } catch (e) {
+      msg(e.message || String(e), true);
+    }
+  });
+
+  document.getElementById("btn-discard-cover")?.addEventListener("click", async () => {
+    await api(`/api/works/${w.id}/cover/discard`, { method: "POST" });
+    msg("Candidate discarded");
+    await openDetail(w.id);
+  });
+
+  document.getElementById("btn-transcribe")?.addEventListener("click", async () => {
+    msg("Queueing transcription…");
+    try {
+      const r = await api(`/api/works/${w.id}/transcribe`, { method: "POST" });
+      if (!r?.ok) {
+        msg(r?.message || "Transcription unavailable", true);
+        return;
+      }
+      msg(r.message || "Transcription queued");
       await openDetail(w.id);
     } catch (e) {
       msg(e.message || String(e), true);

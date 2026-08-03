@@ -44,8 +44,10 @@ Optional local file: copy [`.env.example`](.env.example) → `.env` (gitignored)
 | `DIARCH_LISTEN` | `0.0.0.0:8083` | Bind address |
 | `DIARCH_DATA_DIR` | `./data` | DB + library (Keystone: `/var/lib/diarch`) |
 | `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` | `admin` / `admin` | Bootstrap admin |
-| `DIARCH_LOCALAI_URL` | — | LocalAI base URL for covers |
-| `DIARCH_HERMES_URL` | — | Hermes agent base (optional) |
+| `DIARCH_LOCALAI_URL` | — | LocalAI base URL (covers + transcription) |
+| `DIARCH_LOCALAI_IMAGE_MODEL` | `flux.2-klein-4b` when URL set | Image model id for Generate cover |
+| `DIARCH_LOCALAI_TRANSCRIBE_MODEL` | `nemo-parakeet-tdt-0.6b` when URL set | ASR model for Transcribe |
+| `DIARCH_HERMES_URL` | — | Optional Hermes agent for covers |
 | `DIARCH_AUDIBLE_KEY` | — | Audible activation bytes for AAX → M4B |
 | `DIARCH_GOOGLE_BOOKS_KEY` | — | Google Books API key (avoids unauthenticated 429) |
 | `DIARCH_STORYGRAPH_USER` / `DIARCH_STORYGRAPH_COOKIE` | — | StoryGraph pull (`remember_user_token` cookie) |

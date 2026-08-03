@@ -13,6 +13,10 @@ pub struct Config {
     pub admin_password: String,
     pub localai_url: Option<String>,
     pub hermes_url: Option<String>,
+    /// LocalAI image model id (e.g. `flux.2-klein-4b`). Defaults when URL is set.
+    pub localai_image_model: Option<String>,
+    /// LocalAI ASR model id (e.g. `nemo-parakeet-tdt-0.6b`). Defaults when URL is set.
+    pub localai_transcribe_model: Option<String>,
     pub storygraph_cookie: Option<String>,
     pub storygraph_username: Option<String>,
     pub remarkable_token: Option<String>,
@@ -32,6 +36,8 @@ impl Default for Config {
             admin_password: "admin".into(),
             localai_url: None,
             hermes_url: None,
+            localai_image_model: None,
+            localai_transcribe_model: None,
             storygraph_cookie: None,
             storygraph_username: None,
             remarkable_token: None,
@@ -57,8 +63,14 @@ impl Config {
         if let Ok(v) = std::env::var("DIARCH_ADMIN_PASS") {
             c.admin_password = v;
         }
-        c.localai_url = std::env::var("DIARCH_LOCALAI_URL").ok();
-        c.hermes_url = std::env::var("DIARCH_HERMES_URL").ok();
+        c.localai_url = std::env::var("DIARCH_LOCALAI_URL").ok().filter(|s| !s.is_empty());
+        c.hermes_url = std::env::var("DIARCH_HERMES_URL").ok().filter(|s| !s.is_empty());
+        c.localai_image_model = std::env::var("DIARCH_LOCALAI_IMAGE_MODEL")
+            .ok()
+            .filter(|s| !s.is_empty());
+        c.localai_transcribe_model = std::env::var("DIARCH_LOCALAI_TRANSCRIBE_MODEL")
+            .ok()
+            .filter(|s| !s.is_empty());
         c.storygraph_cookie = std::env::var("DIARCH_STORYGRAPH_COOKIE").ok();
         c.storygraph_username = std::env::var("DIARCH_STORYGRAPH_USER").ok();
         c.remarkable_token = std::env::var("DIARCH_REMARKABLE_TOKEN").ok();
@@ -68,7 +80,21 @@ impl Config {
         if let Ok(v) = std::env::var("DIARCH_SHOW_AUDIO_GAPS") {
             c.show_audio_gaps = matches!(v.as_str(), "1" | "true" | "yes" | "on");
         }
+        // Sensible defaults when LocalAI is configured but models are unset.
+        if c.localai_url.is_some() {
+            if c.localai_image_model.is_none() {
+                c.localai_image_model = Some("flux.2-klein-4b".into());
+            }
+            if c.localai_transcribe_model.is_none() {
+                c.localai_transcribe_model = Some("nemo-parakeet-tdt-0.6b".into());
+            }
+        }
         c
+    }
+
+    /// Candidate cover path (staged AI generate — not live until approve).
+    pub fn cover_candidate_name() -> &'static str {
+        "cover.candidate.jpg"
     }
 
     pub fn db_path(&self) -> PathBuf {

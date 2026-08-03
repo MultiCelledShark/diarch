@@ -835,6 +835,87 @@ async fn pdf_import_put_md_confirm_api() {
 }
 
 #[tokio::test]
+async fn cover_candidate_approve_and_discard() {
+    let (dir, app, state) = test_app().await;
+    let token = login(&app, "admin", "adminpass").await;
+    let (status, work, _) = json_req(
+        &app,
+        "POST",
+        "/api/works",
+        Some(&token),
+        Some(json!({"title":"Cover Stage","authors":"A"})),
+    )
+    .await;
+    assert_eq!(status, 201, "{work}");
+    let id = work["id"].as_str().unwrap();
+    let wid: uuid::Uuid = id.parse().unwrap();
+
+    // Without LocalAI, generate reports not configured.
+    let (status, gen, _) = json_req(
+        &app,
+        "POST",
+        &format!("/api/works/{id}/cover/generate"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(gen["ok"], false);
+    assert!(gen["prompt"].as_str().unwrap().contains("Cover Stage"));
+
+    // Stage a candidate on disk as LocalAI would.
+    let candidate = state
+        .config
+        .work_dir(wid)
+        .join(diarch_core::Config::cover_candidate_name());
+    tokio::fs::create_dir_all(candidate.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&candidate, b"fake-candidate-jpeg")
+        .await
+        .unwrap();
+
+    let (status, detail, _) =
+        json_req(&app, "GET", &format!("/api/works/{id}"), Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(detail["has_cover_candidate"], true);
+    assert_eq!(detail["work"]["needs_cover"], true);
+
+    let (status, appr, _) = json_req(
+        &app,
+        "POST",
+        &format!("/api/works/{id}/cover/approve"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{appr}");
+    assert_eq!(appr["ok"], true);
+    assert!(!candidate.exists());
+    assert!(state.config.work_dir(wid).join("cover.jpg").exists());
+
+    let (status, detail, _) =
+        json_req(&app, "GET", &format!("/api/works/{id}"), Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(detail["has_cover_candidate"], false);
+    assert_eq!(detail["work"]["needs_cover"], false);
+
+    // Discard path
+    tokio::fs::write(&candidate, b"another-candidate").await.unwrap();
+    let (status, _, _) = json_req(
+        &app,
+        "POST",
+        &format!("/api/works/{id}/cover/discard"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 204);
+    assert!(!candidate.exists());
+    let _ = dir;
+}
+
+#[tokio::test]
 async fn m4b_upload_attaches_and_streams_with_range() {
     let (_dir, app, _) = test_app().await;
     let token = login(&app, "admin", "adminpass").await;
@@ -927,7 +1008,10 @@ async fn m4b_upload_attaches_and_streams_with_range() {
     .await;
     assert_eq!(status, 200);
     assert_eq!(tr["ready"], false);
-    assert!(tr["message"].as_str().unwrap().contains("Phase 8"));
+    assert!(
+        tr["message"].as_str().unwrap().contains("DIARCH_LOCALAI_URL"),
+        "{tr}"
+    );
 }
 
 #[tokio::test]
