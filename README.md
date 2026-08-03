@@ -46,6 +46,7 @@ Optional local file: copy [`.env.example`](.env.example) → `.env` (gitignored)
 | `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` | `admin` / `admin` | Bootstrap admin |
 | `DIARCH_LOCALAI_URL` | — | LocalAI base URL (covers + transcription) |
 | `DIARCH_LOCALAI_IMAGE_MODEL` | `flux.2-klein-4b` when URL set | Image model id for Generate cover |
+| `DIARCH_LOCALAI_IMAGE_SIZE` | `512x512` when URL set | Cover size (`WxH`); lower if GPU OOMs |
 | `DIARCH_LOCALAI_TRANSCRIBE_MODEL` | `nemo-parakeet-tdt-0.6b` when URL set | ASR model for Transcribe |
 | `DIARCH_HERMES_URL` | — | Optional Hermes agent for covers |
 | `DIARCH_AUDIBLE_KEY` | — | Audible activation bytes for AAX → M4B |

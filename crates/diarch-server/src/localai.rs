@@ -125,12 +125,17 @@ pub async fn generate_cover_bytes(state: &AppState, prompt: &str) -> Result<Vec<
         .localai_image_model
         .as_deref()
         .unwrap_or("flux.2-klein-4b");
+    let size = state
+        .config
+        .localai_image_size
+        .as_deref()
+        .unwrap_or("512x512");
     let http = client()?;
     let url = format!("{}/v1/images/generations", base.trim_end_matches('/'));
     let body = serde_json::json!({
         "model": model,
         "prompt": prompt,
-        "size": "512x768",
+        "size": size,
         "n": 1,
         "response_format": "b64_json"
     });
@@ -143,7 +148,12 @@ pub async fn generate_cover_bytes(state: &AppState, prompt: &str) -> Result<Vec<
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        bail!("LocalAI image gen HTTP {status}: {}", truncate(&text, 400));
+        let hint = backend_oom_hint(&http, base, model).await;
+        bail!(
+            "LocalAI image gen HTTP {status}: {}{}",
+            truncate(&text, 280),
+            hint
+        );
     }
     let v: Value = resp.json().await.context("parse LocalAI image response")?;
     if let Some(b64) = v.pointer("/data/0/b64_json").and_then(|x| x.as_str()) {
@@ -164,6 +174,35 @@ pub async fn generate_cover_bytes(state: &AppState, prompt: &str) -> Result<Vec<
         return Ok(img.bytes().await?.to_vec());
     }
     bail!("LocalAI image response missing b64_json/url");
+}
+
+/// Pull recent LocalAI backend logs and, if VRAM/OOM shows up, return a short hint.
+async fn backend_oom_hint(http: &reqwest::Client, base: &str, model: &str) -> String {
+    let url = format!(
+        "{}/api/backend-logs/{}",
+        base.trim_end_matches('/'),
+        model
+    );
+    let Ok(resp) = http.get(&url).send().await else {
+        return String::new();
+    };
+    if !resp.status().is_success() {
+        return String::new();
+    }
+    let Ok(v) = resp.json::<Value>().await else {
+        return String::new();
+    };
+    let blob = v.to_string().to_lowercase();
+    if blob.contains("out of memory")
+        || blob.contains("cudamalloc failed")
+        || blob.contains("failed to allocate")
+    {
+        return " — LocalAI GPU out of VRAM (unload other models in the LocalAI UI, or set DIARCH_LOCALAI_IMAGE_MODEL=sd-1.5-ggml / DIARCH_LOCALAI_IMAGE_SIZE=256x384)".into();
+    }
+    if blob.contains("eof") || blob.contains("connection refused") {
+        return " — LocalAI image backend crashed; check GPU VRAM and retry after unloading other models".into();
+    }
+    String::new()
 }
 
 const TRANSCRIPT_CHUNK_SECS: f64 = 600.0; // 10 minutes

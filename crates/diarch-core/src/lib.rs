@@ -17,6 +17,8 @@ pub struct Config {
     pub localai_image_model: Option<String>,
     /// LocalAI ASR model id (e.g. `nemo-parakeet-tdt-0.6b`). Defaults when URL is set.
     pub localai_transcribe_model: Option<String>,
+    /// OpenAI-style `WxH` for cover generation (default `512x512`).
+    pub localai_image_size: Option<String>,
     pub storygraph_cookie: Option<String>,
     pub storygraph_username: Option<String>,
     pub remarkable_token: Option<String>,
@@ -38,6 +40,7 @@ impl Default for Config {
             hermes_url: None,
             localai_image_model: None,
             localai_transcribe_model: None,
+            localai_image_size: None,
             storygraph_cookie: None,
             storygraph_username: None,
             remarkable_token: None,
@@ -71,6 +74,9 @@ impl Config {
         c.localai_transcribe_model = std::env::var("DIARCH_LOCALAI_TRANSCRIBE_MODEL")
             .ok()
             .filter(|s| !s.is_empty());
+        c.localai_image_size = std::env::var("DIARCH_LOCALAI_IMAGE_SIZE")
+            .ok()
+            .filter(|s| !s.is_empty());
         c.storygraph_cookie = std::env::var("DIARCH_STORYGRAPH_COOKIE").ok();
         c.storygraph_username = std::env::var("DIARCH_STORYGRAPH_USER").ok();
         c.remarkable_token = std::env::var("DIARCH_REMARKABLE_TOKEN").ok();
@@ -87,6 +93,9 @@ impl Config {
             }
             if c.localai_transcribe_model.is_none() {
                 c.localai_transcribe_model = Some("nemo-parakeet-tdt-0.6b".into());
+            }
+            if c.localai_image_size.is_none() {
+                c.localai_image_size = Some("512x512".into());
             }
         }
         c
