@@ -207,20 +207,83 @@ async fn backend_oom_hint(http: &reqwest::Client, base: &str, model: &str) -> St
 
 const TRANSCRIPT_CHUNK_SECS: f64 = 600.0; // 10 minutes
 
+/// Marker placed at the top of markdown produced from ASR so we can safely refresh it.
+pub const TRANSCRIPT_MD_MARKER: &str = "<!-- diarch:source=transcript -->";
+
+/// Format raw ASR text as Markdown for `book.md`.
+pub fn transcript_to_markdown(title: &str, authors: &str, body: &str) -> String {
+    let mut out = String::new();
+    out.push_str(TRANSCRIPT_MD_MARKER);
+    out.push('\n');
+    out.push_str(&format!("# {}\n\n", title.trim()));
+    if !authors.trim().is_empty() {
+        out.push_str(&format!("*By {}*\n\n", authors.trim()));
+    }
+    out.push_str("*Transcribed from audiobook.*\n\n---\n\n");
+    let cleaned = body
+        .replace('\r', "")
+        .lines()
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut prev_blank = false;
+    for line in cleaned.lines() {
+        let blank = line.is_empty();
+        if blank && prev_blank {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+        prev_blank = blank;
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Write `book.md` from `transcript.txt` when missing or previously transcript-sourced.
+pub async fn install_transcript_as_markdown(
+    work_dir: &Path,
+    title: &str,
+    authors: &str,
+) -> Result<bool> {
+    let transcript = work_dir.join("transcript.txt");
+    if !transcript.exists() {
+        return Ok(false);
+    }
+    let md_path = work_dir.join("book.md");
+    if md_path.exists() {
+        let existing = tokio::fs::read_to_string(&md_path).await.unwrap_or_default();
+        if !existing.contains(TRANSCRIPT_MD_MARKER) {
+            return Ok(false);
+        }
+    }
+    let body = tokio::fs::read_to_string(&transcript).await?;
+    let md = transcript_to_markdown(title, authors, &body);
+    tokio::fs::write(&md_path, md.as_bytes()).await?;
+    Ok(true)
+}
+
 /// Transcribe `book.m4b` via LocalAI, writing `transcript.txt` under the work dir.
-/// Returns a short detail string for the job row.
-pub async fn transcribe_audiobook(state: &AppState, work_dir: &Path) -> Result<String> {
+/// Optional `job_id` receives live `transcribing chunk N/M` detail updates.
+pub async fn transcribe_audiobook(
+    state: &AppState,
+    work_dir: &Path,
+    job_id: Option<uuid::Uuid>,
+) -> Result<String> {
     let base = base_url(state)?;
     let model = state
         .config
         .localai_transcribe_model
         .as_deref()
-        .unwrap_or("nemo-parakeet-tdt-0.6b");
+        .unwrap_or("whisper-base");
     let m4b = work_dir.join("audio").join(crate::audio::BOOK_M4B);
     if !m4b.exists() {
         bail!("book.m4b missing");
     }
     let duration = audio_duration_secs(&m4b).await?;
+    let total_chunks = ((duration / TRANSCRIPT_CHUNK_SECS).ceil() as usize).max(1);
     let http = client()?;
     let base = base.trim_end_matches('/');
 
@@ -232,6 +295,16 @@ pub async fn transcribe_audiobook(state: &AppState, work_dir: &Path) -> Result<S
     let mut start = 0.0_f64;
     let mut idx = 0_usize;
     while start < duration {
+        if let Some(jid) = job_id {
+            let _ = state
+                .db
+                .update_job(
+                    jid,
+                    "running",
+                    Some(&format!("transcribing chunk {}/{}", idx + 1, total_chunks)),
+                )
+                .await;
+        }
         let chunk = tmp.join(format!("chunk_{idx:04}.mp3"));
         extract_chunk(&m4b, start, TRANSCRIPT_CHUNK_SECS, &chunk).await?;
         let text = transcribe_file(&http, base, model, &chunk).await?;
@@ -406,4 +479,19 @@ fn truncate(s: &str, max: usize) -> String {
 #[allow(dead_code)]
 pub fn transcript_path(work_dir: &Path) -> PathBuf {
     work_dir.join("transcript.txt")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcript_markdown_includes_marker_and_title() {
+        let md = transcript_to_markdown("Lolcows", "Author", "Hello world.\n\nSecond para.");
+        assert!(md.starts_with(TRANSCRIPT_MD_MARKER));
+        assert!(md.contains("# Lolcows"));
+        assert!(md.contains("*By Author*"));
+        assert!(md.contains("Hello world."));
+        assert!(md.contains("Second para."));
+    }
 }

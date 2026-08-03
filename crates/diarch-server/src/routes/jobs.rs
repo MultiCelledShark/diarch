@@ -234,7 +234,8 @@ async fn run_transcribe(state: &Arc<AppState>, job: &diarch_core::Job) -> Result
         bail!("ffmpeg/ffprobe required for transcription chunking");
     }
     let work_dir = state.config.work_dir(work_id);
-    let detail = crate::localai::transcribe_audiobook(state, &work_dir).await?;
+    let mut detail =
+        crate::localai::transcribe_audiobook(state, &work_dir, Some(job.id)).await?;
     let dest = work_dir.join("transcript.txt");
     register_asset(
         state,
@@ -245,8 +246,38 @@ async fn run_transcribe(state: &Arc<AppState>, job: &diarch_core::Job) -> Result
         &dest,
     )
     .await?;
-    if let Some(mut work) = state.db.get_work(work_id).await? {
+
+    let work = state.db.get_work(work_id).await?;
+    let title = work
+        .as_ref()
+        .map(|w| w.title.as_str())
+        .unwrap_or("Untitled");
+    let authors = work.as_ref().map(|w| w.authors.as_str()).unwrap_or("");
+    let wrote_md =
+        crate::localai::install_transcript_as_markdown(&work_dir, title, authors).await?;
+    if wrote_md {
+        let md_path = work_dir.join("book.md");
+        let assets = state.db.list_assets(work_id).await.unwrap_or_default();
+        if !assets.iter().any(|a| a.kind == AssetKind::Markdown) {
+            register_asset(
+                state,
+                work_id,
+                AssetKind::Markdown,
+                "book.md",
+                "text/markdown",
+                &md_path,
+            )
+            .await?;
+        }
+        detail.push_str(" · book.md");
+    }
+
+    if let Some(mut work) = work {
         work.needs_transcription = false;
+        if wrote_md {
+            // Offer the review editor for ASR cleanup (no PDF required).
+            work.needs_review = true;
+        }
         work.updated_at = Utc::now();
         state.db.update_work(&work).await?;
     }

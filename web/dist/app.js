@@ -44,6 +44,45 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
+function parseTranscribeProgress(detail) {
+  const m = String(detail || "").match(/transcribing chunk\s+(\d+)\s*\/\s*(\d+)/i);
+  if (!m) return null;
+  const cur = Number(m[1]);
+  const total = Number(m[2]);
+  if (!Number.isFinite(cur) || !Number.isFinite(total) || total <= 0) return null;
+  return { cur, total };
+}
+
+function pollTranscribeJob(workId, jobId) {
+  if (state._transcribePoll) clearTimeout(state._transcribePoll);
+  state._transcribePoll = setTimeout(async () => {
+    if (state.currentWork?.work?.id !== workId) return;
+    try {
+      const job = await api(`/api/jobs/${jobId}`);
+      const row = document.getElementById("transcribe-progress");
+      const fill = document.getElementById("transcribe-bar-fill");
+      const text = document.getElementById("transcribe-progress-text");
+      const status = job?.status;
+      if (status === "pending" || status === "running") {
+        if (row) row.hidden = false;
+        const prog = parseTranscribeProgress(job?.detail);
+        if (prog) {
+          if (fill) fill.style.width = `${Math.max(4, Math.round((prog.cur / prog.total) * 100))}%`;
+          if (text) text.textContent = `${prog.cur}/${prog.total}`;
+        } else if (text) {
+          text.textContent = status === "pending" ? "queued" : "working…";
+        }
+        pollTranscribeJob(workId, jobId);
+        return;
+      }
+      // Finished or failed — refresh detail once for new assets / errors.
+      await openDetail(workId);
+    } catch (_) {
+      pollTranscribeJob(workId, jobId);
+    }
+  }, 2500);
+}
+
 function taxonomyLabel(code) {
   const n = state.taxonomy.find((t) => t.code === code);
   return n ? `${code} — ${n.name}` : String(code ?? "—");
@@ -324,12 +363,50 @@ async function openDetail(id) {
   const trStatus = trJob?.status || null;
   const trBusy = trStatus === "pending" || trStatus === "running";
   const trFailed = trStatus === "failed";
+  const trProgress = parseTranscribeProgress(trJob?.detail);
   let transcriptBadge = "";
   if (data.has_transcript) transcriptBadge = " · Transcript ready";
-  else if (trBusy || w.needs_transcription) transcriptBadge = " · Transcribing…";
   else if (trFailed) transcriptBadge = " · Transcription failed";
+  // In-progress status uses the inline progress row instead of badge text.
+  const mdSideReview = !!(w.needs_review && !hasImportPdf);
+  const pdfReview = !!(w.needs_review && hasImportPdf);
+  const reviewMdPane = `
+        <div class="review-pane review-md"${mdSideReview ? ' aria-label="Transcript markdown"' : ""}>
+          <h3>Markdown</h3>
+          <div class="review-md-toolbar" role="toolbar" aria-label="Markdown formatting">
+            <button type="button" data-md-cmd="bold" title="Bold (Ctrl+B)"><strong>B</strong></button>
+            <button type="button" data-md-cmd="italic" title="Italic (Ctrl+I)"><em>I</em></button>
+            <button type="button" data-md-cmd="heading" title="Heading">H</button>
+            <button type="button" data-md-cmd="link" title="Link">Link</button>
+            <button type="button" data-md-cmd="quote" title="Quote">“</button>
+            <button type="button" data-md-cmd="ul" title="Bullet list">• List</button>
+            <button type="button" data-md-cmd="ol" title="Numbered list">1. List</button>
+            <button type="button" data-md-cmd="code" title="Inline code">Code</button>
+            <button type="button" data-md-cmd="fence" title="Code block">Block</button>
+            <span class="tb-sep" aria-hidden="true"></span>
+            <button type="button" data-md-cmd="find" title="Find / Replace">Find</button>
+          </div>
+          <div id="review-find" class="review-find" hidden>
+            <input type="text" id="review-find-q" placeholder="Find" />
+            <input type="text" id="review-find-r" placeholder="Replace" />
+            <button type="button" id="review-find-next">Next</button>
+            <button type="button" id="review-find-replace">Replace</button>
+            <button type="button" id="review-find-all">Replace all</button>
+            <button type="button" id="review-find-close">Close</button>
+          </div>
+          <textarea id="review-md-editor" spellcheck="false" placeholder="Loading…"></textarea>
+          <div class="review-actions">
+            <button type="button" id="btn-save-md">Save markdown</button>
+            <span id="review-dirty" class="review-dirty" hidden>Unsaved changes</span>
+            <button type="button" id="btn-preview-md">Preview</button>
+            <a href="/api/works/${w.id}/download/markdown"><button type="button">Download MD</button></a>
+            <button type="button" id="btn-confirm">Confirm → EPUB</button>
+          </div>
+        </div>`;
 
-  document.getElementById("detail").innerHTML = `
+  const detailEl = document.getElementById("detail");
+  detailEl.classList.toggle("detail-md-side", mdSideReview);
+  detailEl.innerHTML = `
     <div class="detail-covers">
       <img src="/api/works/${w.id}/cover?t=${Date.now()}" alt="" />
       ${data.has_cover_candidate ? `
@@ -342,7 +419,7 @@ async function openDetail(id) {
           </div>
         </div>` : ""}
     </div>
-    <div>
+    <div class="detail-main">
       <form id="detail-form" class="form-grid detail-form">
         <label>Title <input name="title" value="${escapeHtml(w.title)}" required /></label>
         <label>Authors <input name="authors" value="${escapeHtml(w.authors || "")}" /></label>
@@ -379,6 +456,11 @@ async function openDetail(id) {
         <div id="meta-hits" class="meta-hits" hidden></div>
       </form>
       <p class="muted">${hasEpub ? "EPUB ready" : "No EPUB yet"} · ${hasMd ? "Markdown ready" : "No Markdown"} · ${hasAudio ? "M4B ready" : (w.needs_audio ? "Needs audio" : "No audio")} · Direction: ${escapeHtml(w.reading_direction)}${w.needs_review ? " · Needs review" : ""}${w.needs_cover ? " · Needs cover" : ""}${transcriptBadge}${w.sg_matched ? " · On StoryGraph" : ""}${w.sg_review_dirty ? " · Update SG review" : ""}${w.sg_needs_add ? " · Add to StoryGraph" : ""}${w.sg_audio_only_remote ? " · SG audio, missing local" : ""}</p>
+      <div id="transcribe-progress" class="transcribe-progress"${trBusy || w.needs_transcription ? "" : " hidden"}>
+        <span class="transcribe-label">Transcribing…</span>
+        <div class="transcribe-bar" aria-hidden="true"><i id="transcribe-bar-fill" style="width:${trProgress ? Math.max(4, Math.round((trProgress.cur / trProgress.total) * 100)) : 8}%"></i></div>
+        <span id="transcribe-progress-text" class="muted">${trProgress ? `${trProgress.cur}/${trProgress.total}` : "starting"}</span>
+      </div>
       ${trFailed && trJob?.detail ? `<p class="error">${escapeHtml(String(trJob.detail).slice(0, 280))}</p>` : ""}
       <p id="cover-prompt" class="muted cover-prompt" hidden></p>
       ${hasAudio ? `
@@ -423,50 +505,18 @@ async function openDetail(id) {
           ? `<button type="button" id="btn-delete-work" class="danger">Delete book</button>`
           : ""}
       </div>
-      ${w.needs_review ? `
+      ${pdfReview ? `
       <section class="review-workspace" aria-label="Import review">
         <div class="review-pane review-pdf">
           <h3>Source PDF</h3>
-          ${hasImportPdf
-            ? `<iframe title="Quarantined PDF" src="/api/works/${w.id}/content/pdf"></iframe>`
-            : `<p class="muted">No quarantine PDF (markdown-only import).</p>`}
+          <iframe title="Quarantined PDF" src="/api/works/${w.id}/content/pdf"></iframe>
         </div>
-        <div class="review-pane review-md">
-          <h3>Markdown</h3>
-          <div class="review-md-toolbar" role="toolbar" aria-label="Markdown formatting">
-            <button type="button" data-md-cmd="bold" title="Bold (Ctrl+B)"><strong>B</strong></button>
-            <button type="button" data-md-cmd="italic" title="Italic (Ctrl+I)"><em>I</em></button>
-            <button type="button" data-md-cmd="heading" title="Heading">H</button>
-            <button type="button" data-md-cmd="link" title="Link">Link</button>
-            <button type="button" data-md-cmd="quote" title="Quote">“</button>
-            <button type="button" data-md-cmd="ul" title="Bullet list">• List</button>
-            <button type="button" data-md-cmd="ol" title="Numbered list">1. List</button>
-            <button type="button" data-md-cmd="code" title="Inline code">Code</button>
-            <button type="button" data-md-cmd="fence" title="Code block">Block</button>
-            <span class="tb-sep" aria-hidden="true"></span>
-            <button type="button" data-md-cmd="find" title="Find / Replace">Find</button>
-          </div>
-          <div id="review-find" class="review-find" hidden>
-            <input type="text" id="review-find-q" placeholder="Find" />
-            <input type="text" id="review-find-r" placeholder="Replace" />
-            <button type="button" id="review-find-next">Next</button>
-            <button type="button" id="review-find-replace">Replace</button>
-            <button type="button" id="review-find-all">Replace all</button>
-            <button type="button" id="review-find-close">Close</button>
-          </div>
-          <textarea id="review-md-editor" spellcheck="false" placeholder="Loading…"></textarea>
-          <div class="review-actions">
-            <button type="button" id="btn-save-md">Save markdown</button>
-            <span id="review-dirty" class="review-dirty" hidden>Unsaved changes</span>
-            <button type="button" id="btn-preview-md">Preview</button>
-            <a href="/api/works/${w.id}/download/markdown"><button type="button">Download MD</button></a>
-            <button type="button" id="btn-confirm">Confirm → EPUB</button>
-          </div>
-        </div>
+        ${reviewMdPane}
       </section>
       ` : ""}
       <pre id="detail-msg"></pre>
-    </div>`;
+    </div>
+    ${mdSideReview ? reviewMdPane : ""}`;
 
   const msg = (t, isError = false) => {
     const el = document.getElementById("detail-msg");
@@ -474,11 +524,8 @@ async function openDetail(id) {
     el.classList.toggle("error", !!isError);
   };
 
-  if (trBusy) {
-    if (state._transcribePoll) clearTimeout(state._transcribePoll);
-    state._transcribePoll = setTimeout(() => {
-      if (state.currentWork?.work?.id === w.id) openDetail(w.id);
-    }, 4000);
+  if (trBusy && trJob?.id) {
+    pollTranscribeJob(w.id, trJob.id);
   } else if (state._transcribePoll) {
     clearTimeout(state._transcribePoll);
     state._transcribePoll = null;
