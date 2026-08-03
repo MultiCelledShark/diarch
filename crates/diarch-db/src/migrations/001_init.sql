@@ -110,5 +110,13 @@ CREATE TABLE IF NOT EXISTS user_settings (
 
 CREATE INDEX IF NOT EXISTS idx_works_status ON works(status);
 CREATE INDEX IF NOT EXISTS idx_works_primary ON works(primary_code);
+CREATE INDEX IF NOT EXISTS idx_works_updated ON works(updated_at);
+CREATE INDEX IF NOT EXISTS idx_works_created_by ON works(created_by);
+CREATE INDEX IF NOT EXISTS idx_works_year_list ON works(year_list);
+CREATE INDEX IF NOT EXISTS idx_works_needs_review ON works(needs_review);
+CREATE INDEX IF NOT EXISTS idx_works_needs_cover ON works(needs_cover);
+CREATE INDEX IF NOT EXISTS idx_work_assets_work ON work_assets(work_id);
+CREATE INDEX IF NOT EXISTS idx_work_assets_work_kind ON work_assets(work_id, kind);
+CREATE INDEX IF NOT EXISTS idx_jobs_work_kind ON jobs(work_id, kind);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);

@@ -6,9 +6,9 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
-pub async fn process_one(state: &Arc<AppState>) -> Result<()> {
+pub async fn process_one(state: &Arc<AppState>) -> Result<bool> {
     let Some(job) = state.db.next_pending_job().await? else {
-        return Ok(());
+        return Ok(false);
     };
     state.db.update_job(job.id, "running", job.detail.as_deref()).await?;
 
@@ -35,7 +35,7 @@ pub async fn process_one(state: &Arc<AppState>) -> Result<()> {
             }
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 async fn clear_transcription_in_progress(state: &Arc<AppState>, work_id: Uuid) {

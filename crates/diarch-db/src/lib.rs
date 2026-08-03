@@ -51,6 +51,20 @@ impl Db {
         )
         .execute(&self.pool)
         .await;
+        // Indexes are IF NOT EXISTS in 001_init; re-run safe index DDL for older DBs
+        // that already had the tables when new indexes were added.
+        for stmt in [
+            "CREATE INDEX IF NOT EXISTS idx_works_updated ON works(updated_at)",
+            "CREATE INDEX IF NOT EXISTS idx_works_created_by ON works(created_by)",
+            "CREATE INDEX IF NOT EXISTS idx_works_year_list ON works(year_list)",
+            "CREATE INDEX IF NOT EXISTS idx_works_needs_review ON works(needs_review)",
+            "CREATE INDEX IF NOT EXISTS idx_works_needs_cover ON works(needs_cover)",
+            "CREATE INDEX IF NOT EXISTS idx_work_assets_work ON work_assets(work_id)",
+            "CREATE INDEX IF NOT EXISTS idx_work_assets_work_kind ON work_assets(work_id, kind)",
+            "CREATE INDEX IF NOT EXISTS idx_jobs_work_kind ON jobs(work_id, kind)",
+        ] {
+            let _ = sqlx::query(stmt).execute(&self.pool).await;
+        }
         Ok(())
     }
 
@@ -376,42 +390,67 @@ impl Db {
         status: Option<&str>,
         attention: Option<&str>,
     ) -> Result<Vec<Work>> {
-        let rows = if user.is_admin {
-            sqlx::query("SELECT * FROM works ORDER BY updated_at DESC")
-                .fetch_all(&self.pool)
-                .await?
+        self.list_works_for_user_filtered(user, status, attention, None)
+            .await
+    }
+
+    /// List accessible works with optional status / attention / year_list filters in SQL.
+    pub async fn list_works_for_user_filtered(
+        &self,
+        user: &User,
+        status: Option<&str>,
+        attention: Option<&str>,
+        year_list: Option<i32>,
+    ) -> Result<Vec<Work>> {
+        let att_col = attention.and_then(|att| match att {
+            "needs_review" => Some("needs_review"),
+            "needs_cover" => Some("needs_cover"),
+            "needs_tts" => Some("needs_tts"),
+            "needs_audio" => Some("needs_audio"),
+            "needs_transcription" => Some("needs_transcription"),
+            "sg_review_dirty" => Some("sg_review_dirty"),
+            "sg_needs_add" => Some("sg_needs_add"),
+            "sg_audio_only_remote" => Some("sg_audio_only_remote"),
+            _ => None,
+        });
+
+        let mut qb = sqlx::QueryBuilder::new("");
+        if user.is_admin {
+            qb.push("SELECT * FROM works WHERE 1=1");
+            if let Some(st) = status {
+                qb.push(" AND status = ").push_bind(st.to_string());
+            }
+            if let Some(col) = att_col {
+                qb.push(format!(" AND {col} = 1"));
+            }
+            if let Some(y) = year_list {
+                qb.push(" AND year_list = ").push_bind(y);
+            }
+            qb.push(" ORDER BY updated_at DESC");
         } else {
-            sqlx::query(
+            qb.push(
                 "SELECT DISTINCT w.* FROM works w
                  LEFT JOIN work_grants g ON g.work_id = w.id
-                 WHERE g.user_id = ? OR w.created_by = ?
-                 ORDER BY w.updated_at DESC",
-            )
-            .bind(user.id.to_string())
-            .bind(user.id.to_string())
-            .fetch_all(&self.pool)
-            .await?
-        };
-        let mut works: Vec<Work> = rows
-            .into_iter()
-            .filter_map(|r| row_work(&r).ok())
-            .collect();
-        if let Some(st) = status {
-            works.retain(|w| w.status.as_str() == st);
+                 WHERE (g.user_id = ",
+            );
+            qb.push_bind(user.id.to_string());
+            qb.push(" OR w.created_by = ");
+            qb.push_bind(user.id.to_string());
+            qb.push(")");
+            if let Some(st) = status {
+                qb.push(" AND w.status = ").push_bind(st.to_string());
+            }
+            if let Some(col) = att_col {
+                qb.push(format!(" AND w.{col} = 1"));
+            }
+            if let Some(y) = year_list {
+                qb.push(" AND w.year_list = ").push_bind(y);
+            }
+            qb.push(" ORDER BY w.updated_at DESC");
         }
-        if let Some(att) = attention {
-            works.retain(|w| match att {
-                "needs_review" => w.needs_review,
-                "needs_cover" => w.needs_cover,
-                "needs_tts" => w.needs_tts,
-                "needs_audio" => w.needs_audio,
-                "sg_review_dirty" => w.sg_review_dirty,
-                "sg_needs_add" => w.sg_needs_add,
-                "sg_audio_only_remote" => w.sg_audio_only_remote,
-                _ => true,
-            });
-        }
-        Ok(works)
+
+        let rows = qb.build().fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().filter_map(|r| row_work(&r).ok()).collect())
     }
 
     /// Count works the user can access that are in `status`, optionally excluding one id.
@@ -421,11 +460,66 @@ impl Db {
         status: &str,
         exclude: Option<Uuid>,
     ) -> Result<usize> {
-        let works = self.list_works_for_user(user, Some(status), None).await?;
-        Ok(works
-            .iter()
-            .filter(|w| exclude.map(|id| w.id != id).unwrap_or(true))
-            .count())
+        let n: i64 = if user.is_admin {
+            let mut qb = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM works WHERE status = ");
+            qb.push_bind(status.to_string());
+            if let Some(id) = exclude {
+                qb.push(" AND id != ").push_bind(id.to_string());
+            }
+            qb.build_query_scalar().fetch_one(&self.pool).await?
+        } else {
+            let mut qb = sqlx::QueryBuilder::new(
+                "SELECT COUNT(DISTINCT w.id) FROM works w
+                 LEFT JOIN work_grants g ON g.work_id = w.id
+                 WHERE (g.user_id = ",
+            );
+            qb.push_bind(user.id.to_string());
+            qb.push(" OR w.created_by = ");
+            qb.push_bind(user.id.to_string());
+            qb.push(") AND w.status = ");
+            qb.push_bind(status.to_string());
+            if let Some(id) = exclude {
+                qb.push(" AND w.id != ").push_bind(id.to_string());
+            }
+            qb.build_query_scalar().fetch_one(&self.pool).await?
+        };
+        Ok(n as usize)
+    }
+
+    /// Per-work presence of epub / markdown / audio assets (for library cards).
+    pub async fn asset_flags_for_works(
+        &self,
+        work_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, (bool, bool, bool)>> {
+        use std::collections::HashMap;
+        let mut out: HashMap<Uuid, (bool, bool, bool)> = HashMap::new();
+        if work_ids.is_empty() {
+            return Ok(out);
+        }
+        let mut qb = sqlx::QueryBuilder::new(
+            "SELECT work_id, kind FROM work_assets WHERE work_id IN (",
+        );
+        {
+            let mut sep = qb.separated(", ");
+            for id in work_ids {
+                sep.push_bind(id.to_string());
+            }
+        }
+        qb.push(")");
+        let rows = qb.build().fetch_all(&self.pool).await?;
+        for r in rows {
+            let wid = Uuid::parse_str(&r.get::<String, _>("work_id")).ok();
+            let Some(wid) = wid else { continue };
+            let kind = r.get::<String, _>("kind");
+            let entry = out.entry(wid).or_insert((false, false, false));
+            match kind.as_str() {
+                "epub" => entry.0 = true,
+                "markdown" => entry.1 = true,
+                "audio" => entry.2 = true,
+                _ => {}
+            }
+        }
+        Ok(out)
     }
 
     pub async fn grant_work(&self, user_id: Uuid, work_id: Uuid) -> Result<()> {
@@ -454,6 +548,30 @@ impl Db {
         Ok(rows
             .into_iter()
             .filter_map(|r| Uuid::parse_str(&r.get::<String, _>("user_id")).ok())
+            .collect())
+    }
+
+    pub async fn list_grants_detailed(
+        &self,
+        work_id: Uuid,
+    ) -> Result<Vec<(Uuid, String)>> {
+        let rows = sqlx::query(
+            "SELECT g.user_id AS user_id, u.username AS username
+             FROM work_grants g
+             JOIN users u ON u.id = g.user_id
+             WHERE g.work_id = ?
+             ORDER BY u.username COLLATE NOCASE",
+        )
+        .bind(work_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let id = Uuid::parse_str(&r.get::<String, _>("user_id")).ok()?;
+                let name = r.get::<String, _>("username");
+                Some((id, name))
+            })
             .collect())
     }
 

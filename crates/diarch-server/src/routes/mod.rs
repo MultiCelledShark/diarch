@@ -200,23 +200,52 @@ async fn list_taxonomy(
 struct ListQuery {
     status: Option<String>,
     attention: Option<String>,
+    year_list: Option<i32>,
+}
+
+#[derive(Serialize)]
+struct WorkListItem {
+    #[serde(flatten)]
+    work: Work,
+    has_epub: bool,
+    has_md: bool,
+    has_audio: bool,
 }
 
 async fn list_works(
     AuthUser(user): AuthUser,
     State(state): State<Arc<AppState>>,
     Query(q): Query<ListQuery>,
-) -> Result<Json<Vec<Work>>, StatusCode> {
-    let mut works = state
+) -> Result<Json<Vec<WorkListItem>>, StatusCode> {
+    let works = state
         .db
-        .list_works_for_user(&user, q.status.as_deref(), q.attention.as_deref())
+        .list_works_for_user_filtered(
+            &user,
+            q.status.as_deref(),
+            q.attention.as_deref(),
+            q.year_list,
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if !user.show_audio_gaps || !state.config.show_audio_gaps {
-        // still return works; UI hides soft badges via settings — filter only if attention=needs_audio
-    }
-    let _ = &mut works;
-    Ok(Json(works))
+    let ids: Vec<_> = works.iter().map(|w| w.id).collect();
+    let flags = state
+        .db
+        .asset_flags_for_works(&ids)
+        .await
+        .unwrap_or_default();
+    let items = works
+        .into_iter()
+        .map(|work| {
+            let (has_epub, has_md, has_audio) = flags.get(&work.id).copied().unwrap_or((false, false, false));
+            WorkListItem {
+                work,
+                has_epub,
+                has_md,
+                has_audio,
+            }
+        })
+        .collect();
+    Ok(Json(items))
 }
 
 #[derive(Deserialize)]
@@ -364,6 +393,8 @@ struct UpdateWorkReq {
     status: Option<String>,
     primary_code: Option<i32>,
     year_list: Option<i32>,
+    /// When true, clear `year_list` (null). Takes precedence over `year_list`.
+    clear_year_list: Option<bool>,
     rating: Option<f64>,
     review: Option<String>,
     reading_direction: Option<String>,
@@ -479,7 +510,9 @@ async fn update_work(
     if let Some(p) = body.primary_code {
         work.primary_code = Some(p);
     }
-    if let Some(y) = body.year_list {
+    if body.clear_year_list.unwrap_or(false) {
+        work.year_list = None;
+    } else if let Some(y) = body.year_list {
         work.year_list = Some(y);
     }
     let mut review_changed = false;
@@ -639,13 +672,22 @@ async fn list_grants(
     AdminUser(_): AdminUser,
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
-) -> Result<Json<Vec<Uuid>>, StatusCode> {
-    state
+) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
+    let rows = state
         .db
-        .list_grants(id)
+        .list_grants_detailed(id)
         .await
-        .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(user_id, username)| {
+                serde_json::json!({
+                    "user_id": user_id,
+                    "username": username,
+                })
+            })
+            .collect(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -2074,6 +2116,7 @@ async fn clear_flags(
             "needs_audio" => work.needs_audio = false,
             "needs_cover" => work.needs_cover = false,
             "needs_review" => work.needs_review = false,
+            "needs_transcription" => work.needs_transcription = false,
             _ => {}
         }
     }

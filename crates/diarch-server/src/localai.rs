@@ -48,11 +48,15 @@ pub async fn probe(state: &AppState) -> (String, Option<String>, bool) {
         Ok(r) if r.status().is_success() => {
             let hint = match r.json::<Value>().await {
                 Ok(v) => {
-                    let n = v
-                        .get("data")
-                        .and_then(|d| d.as_array())
-                        .map(|a| a.len())
-                        .unwrap_or(0);
+                    let data = v.get("data").and_then(|d| d.as_array());
+                    let n = data.map(|a| a.len()).unwrap_or(0);
+                    let ids: Vec<&str> = data
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|m| m.get("id").and_then(|i| i.as_str()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     let img = state
                         .config
                         .localai_image_model
@@ -63,10 +67,33 @@ pub async fn probe(state: &AppState) -> (String, Option<String>, bool) {
                         .localai_transcribe_model
                         .as_deref()
                         .unwrap_or("?");
-                    Some(format!("{n} models · image={img} · asr={asr}"))
+                    let img_ok = img == "?" || ids.iter().any(|id| *id == img || id.contains(img));
+                    let asr_ok = asr == "?" || ids.iter().any(|id| *id == asr || id.contains(asr));
+                    let mut parts = vec![format!("{n} models"), format!("image={img}"), format!("asr={asr}")];
+                    if !img_ok {
+                        parts.push(format!("missing image model '{img}'"));
+                    }
+                    if !asr_ok {
+                        parts.push(format!("missing ASR model '{asr}'"));
+                    }
+                    let detail = parts.join(" · ");
+                    if img_ok && asr_ok {
+                        Some(detail)
+                    } else {
+                        // Still reachable; mark degraded via status below by returning detail
+                        // with a sentinel prefix checked by caller — return as Ok with note.
+                        Some(detail)
+                    }
                 }
                 Err(_) => None,
             };
+            let missing = hint
+                .as_deref()
+                .map(|h| h.contains("missing "))
+                .unwrap_or(false);
+            if missing {
+                return ("degraded".into(), hint, true);
+            }
             return ("ok".into(), hint, true);
         }
         Ok(r) => {

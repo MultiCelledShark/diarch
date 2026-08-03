@@ -75,10 +75,18 @@ pub fn spawn_workers(state: Arc<AppState>) {
                 _ => {}
             }
             loop {
-                if let Err(e) = routes::jobs::process_one(&st).await {
-                    tracing::warn!(error = %e, "job worker");
+                match routes::jobs::process_one(&st).await {
+                    Ok(true) => {
+                        // More jobs may be queued — drain without idle delay.
+                    }
+                    Ok(false) => {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "job worker");
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         });
     }

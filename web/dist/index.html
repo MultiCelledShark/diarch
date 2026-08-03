@@ -5,14 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Diarch</title>
   <link rel="stylesheet" href="/assets/app.css" />
-  <!-- JSZip must load before epub.js (epubjs binds it at script init). -->
-  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/vditor@3.10.9/dist/index.css" />
-  <script src="https://cdn.jsdelivr.net/npm/vditor@3.10.9/dist/index.min.js"></script>
+  <!-- Heavy reader / barcode / MD preview CDNs load on demand from app.js -->
 </head>
 <body>
   <div id="app">
@@ -74,6 +67,9 @@
               <option value="read">Read</option>
               <option value="wishlist">Wishlist</option>
             </select>
+            <select id="filter-year" title="Year reading list">
+              <option value="">All years</option>
+            </select>
             <label class="btn-file" id="btn-import">
               Import
               <input type="file" id="library-import-file" accept=".epub,.pdf,.md,.markdown,.m4b,.aax,.m4a,application/epub+zip,audio/mp4" hidden />
@@ -110,6 +106,7 @@
               <option value="needs_cover">Needs cover</option>
               <option value="needs_tts">Needs TTS</option>
               <option value="needs_audio">Needs audio</option>
+              <option value="needs_transcription">Needs transcription</option>
               <option value="sg_review_dirty">Update StoryGraph review</option>
               <option value="sg_needs_add">Add to StoryGraph</option>
               <option value="sg_audio_only_remote">SG audio, missing local</option>

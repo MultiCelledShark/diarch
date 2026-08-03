@@ -52,7 +52,7 @@ Default admin: `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` (defaults `admin` / `ad
 | **5 Audio** | **Complete** | Canonical `book.m4b` upload + Range stream; Audible AAX→M4B server job (`DIARCH_AUDIBLE_KEY` + ffmpeg, same flags as audible2m4b). Transcription stubbed → Phase 8 |
 | **6 StoryGraph / reMarkable / fixer** | **Complete** | SG pull + flags; Integrations for all users (health, Probe, SG sync); reMarkable connect URL + in-app 8-char code auth; rmapi send to `Diarch/`; Keystone dep docs. Scrapers/CLI remain upstream-fragile |
 | **7 Android / KOReader** | Skipped for now | Docs/stubs only — deferred |
-| **8 Deferred AI + polish** | **In progress** | LocalAI covers (staged approve), transcription, health probe |
+| **8 Deferred AI + polish** | **Complete*** | LocalAI covers (staged approve), transcription→MD review, health probe (model id checks), SQL list filters + indexes, lazy CDN, library year filter / grants revoke. *Live LocalAI/TrueNAS exercise still recommended on deploy.* |
 | **Regression tests** | Done | `cargo test --workspace` (core/db/import/server; Phase 6 coverage included) |
 
 ### What you should see after login
@@ -69,11 +69,10 @@ Restart `cargo run -p diarch-server` after pulling UI changes (assets are embedd
 
 ## Suggested next work (priority)
 
-1. **Phase 8 finish** — exercise Generate cover + Approve against TrueNAS LocalAI; long-audiobook transcription timing; remaining polish below.
-2. **UX harden** — empty states (in progress), year reading list UI, grant UX without pasting UUIDs.
-3. **ebook2audiobook watcher** — desktop TTS → `queue/incoming_audio` as `.m4b`.
-4. **Deploy** — musl/Debian 13 → Keystone systemd (deps: pandoc, ocrmypdf, tesseract, poppler-utils, ffmpeg, rmapi — see `deploy/debian/README.md`).
-5. **Android / KOReader** — deferred (Phase 7).
+1. **Deploy / exercise Phase 8 on Keystone** — Generate cover + Approve against TrueNAS LocalAI; long-audiobook transcription timing.
+2. **ebook2audiobook watcher** — desktop TTS → `queue/incoming_audio` as `.m4b`.
+3. **Deploy** — musl/Debian 13 → Keystone systemd (deps: pandoc, ocrmypdf, tesseract, poppler-utils, ffmpeg, rmapi — see `deploy/debian/README.md`).
+4. **Android / KOReader** — deferred (Phase 7).
 
 ---
 
@@ -128,6 +127,13 @@ LocalAI on the LAN (e.g. TrueNAS) drives covers and transcription. Phase 7 (Andr
 - **Transcribe** queues a `transcribe` job when `book.m4b` exists and LocalAI is configured.
 - Worker chunks audio (~10 min) via ffmpeg and calls LocalAI `/v1/audio/transcriptions` (`DIARCH_LOCALAI_TRANSCRIBE_MODEL`).
 - Result: `transcript.txt`; on success also writes `book.md` with `<!-- diarch:source=transcript -->` (won’t overwrite ebook-derived markdown) and sets `needs_review`.
+
+### Phase 8 polish / perf (code-complete)
+
+- SQL pushdown for library status/attention/year filters + shelf `COUNT(*)`; indexes on assets/jobs/works flags.
+- List payload includes `has_epub` / `has_md` / `has_audio` (Read button can disable without guessing).
+- Lazy-load epub.js / Vditor / ZXing / marked; parallel boot fetches; job worker drains without idle sleep when busy.
+- Year reading list filter + clearable year field; Attention `needs_transcription`; grant list + revoke; LocalAI probe notes missing configured model ids.
 
 ### Other optionals skipped earlier
 

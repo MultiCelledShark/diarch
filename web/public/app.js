@@ -108,34 +108,124 @@ async function enterApp() {
   document.getElementById("who").textContent = state.user.username;
   document.getElementById("nav-admin").hidden = !state.user.is_admin;
   show("library");
-  try {
-    state.settings = await api("/api/settings");
-  } catch {
-    state.settings = {
-      show_audio_gaps: true,
-      reader_infinite_scroll: false,
-      reader_typography: { ...TYPO_DEFAULTS },
-    };
-  }
+  const settingsP = api("/api/settings").catch(() => ({
+    show_audio_gaps: true,
+    reader_infinite_scroll: false,
+    reader_typography: { ...TYPO_DEFAULTS },
+  }));
+  const taxonomyP = api("/api/taxonomy").catch(() => []);
+  const usersP = state.user.is_admin ? api("/api/users").catch(() => []) : Promise.resolve([]);
+  const [settings, taxonomy, users] = await Promise.all([settingsP, taxonomyP, usersP]);
+  state.settings = settings;
+  state.taxonomy = taxonomy;
+  state.users = users;
   hydrateTypoFromSettings(state.settings);
-  try {
-    state.taxonomy = await api("/api/taxonomy");
-  } catch {
-    state.taxonomy = [];
-  }
-  if (state.user.is_admin) {
-    try {
-      state.users = await api("/api/users");
-    } catch {
-      state.users = [];
-    }
-  }
+  refreshYearFilterOptions();
   try {
     await loadWorks();
   } catch (e) {
     document.getElementById("work-list").innerHTML =
       `<p class="empty error">Could not load library: ${escapeHtml(e.message || String(e))}</p>`;
   }
+}
+
+function loadScriptOnce(src, globalCheck) {
+  if (globalCheck()) return Promise.resolve();
+  const key = `script:${src}`;
+  if (!state._cdnLoads) state._cdnLoads = {};
+  if (state._cdnLoads[key]) return state._cdnLoads[key];
+  state._cdnLoads[key] = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src;
+    s.async = true;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error(`Failed to load ${src}`));
+    document.head.appendChild(s);
+  });
+  return state._cdnLoads[key];
+}
+
+function loadCssOnce(href) {
+  const key = `css:${href}`;
+  if (!state._cdnLoads) state._cdnLoads = {};
+  if (state._cdnLoads[key]) return state._cdnLoads[key];
+  if (document.querySelector(`link[href="${href}"]`)) {
+    state._cdnLoads[key] = Promise.resolve();
+    return state._cdnLoads[key];
+  }
+  state._cdnLoads[key] = new Promise((resolve, reject) => {
+    const l = document.createElement("link");
+    l.rel = "stylesheet";
+    l.href = href;
+    l.onload = () => resolve();
+    l.onerror = () => reject(new Error(`Failed to load ${href}`));
+    document.head.appendChild(l);
+  });
+  return state._cdnLoads[key];
+}
+
+async function ensureEpubLibs() {
+  await loadScriptOnce(
+    "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js",
+    () => typeof JSZip !== "undefined"
+  );
+  await loadScriptOnce(
+    "https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js",
+    () => typeof ePub !== "undefined"
+  );
+}
+
+async function ensureMarkedLibs() {
+  await loadScriptOnce(
+    "https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js",
+    () => typeof marked !== "undefined"
+  );
+  await loadScriptOnce(
+    "https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js",
+    () => typeof DOMPurify !== "undefined"
+  );
+}
+
+async function ensureVditor() {
+  const cdn = "https://cdn.jsdelivr.net/npm/vditor@3.10.9";
+  await loadCssOnce(`${cdn}/dist/index.css`);
+  await loadScriptOnce(`${cdn}/dist/index.min.js`, () => typeof Vditor !== "undefined");
+}
+
+async function ensureZxing() {
+  await loadScriptOnce(
+    "https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js",
+    () => typeof ZXing !== "undefined"
+  );
+}
+
+async function refreshGrantList(workId) {
+  const el = document.getElementById("grant-list");
+  if (!el) return;
+  const grants = await api(`/api/works/${workId}/grants`);
+  if (!grants.length) {
+    el.textContent = "No shared access yet.";
+    return;
+  }
+  el.innerHTML = grants
+    .map(
+      (g) =>
+        `<div class="grant-row"><span>${escapeHtml(g.username)}</span>
+          <button type="button" class="grant-revoke" data-uid="${escapeHtml(g.user_id)}">Revoke</button></div>`
+    )
+    .join("");
+  el.querySelectorAll(".grant-revoke").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        await api(`/api/works/${workId}/grants/${btn.dataset.uid}`, { method: "DELETE" });
+        await refreshGrantList(workId);
+      } catch (e) {
+        btn.disabled = false;
+        alert(e.message || String(e));
+      }
+    });
+  });
 }
 
 document.getElementById("login-form").addEventListener("submit", async (e) => {
@@ -180,8 +270,13 @@ document.querySelectorAll("button.nav").forEach((b) => {
 
 async function loadWorks() {
   const status = document.getElementById("filter-status").value;
-  const q = status ? `?status=${encodeURIComponent(status)}` : "";
+  const year = document.getElementById("filter-year")?.value || "";
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  if (year) params.set("year_list", year);
+  const q = params.toString() ? `?${params}` : "";
   const works = await api(`/api/works${q}`);
+  if (!year) refreshYearFilterOptions(works);
   renderCards(document.getElementById("work-list"), works, {
     emptyTitle: "Your library is empty",
     emptyHint: "Import an EPUB, or add something to your wishlist.",
@@ -191,6 +286,26 @@ async function loadWorks() {
 }
 
 document.getElementById("filter-status").addEventListener("change", loadWorks);
+document.getElementById("filter-year")?.addEventListener("change", loadWorks);
+
+function refreshYearFilterOptions(worksHint) {
+  const sel = document.getElementById("filter-year");
+  if (!sel) return;
+  const current = sel.value;
+  const years = new Set();
+  const yNow = new Date().getFullYear();
+  for (let y = yNow + 1; y >= yNow - 8; y--) years.add(String(y));
+  if (Array.isArray(worksHint)) {
+    for (const w of worksHint) {
+      if (w.year_list != null && w.year_list !== "") years.add(String(w.year_list));
+    }
+  }
+  const sorted = [...years].sort((a, b) => Number(b) - Number(a));
+  sel.innerHTML =
+    `<option value="">All years</option>` +
+    sorted.map((y) => `<option value="${escapeHtml(y)}">${escapeHtml(y)} list</option>`).join("");
+  if ([...sel.options].some((o) => o.value === current)) sel.value = current;
+}
 
 async function loadCurrentlyReading() {
   const works = await api("/api/works?status=reading");
@@ -229,6 +344,7 @@ async function loadAttention() {
     "needs_cover",
     "needs_tts",
     "needs_audio",
+    "needs_transcription",
     "sg_review_dirty",
     "sg_needs_add",
     "sg_audio_only_remote",
@@ -247,12 +363,16 @@ const ATTENTION_CLEAR_LABELS = {
   needs_cover: "Dismiss cover flag",
   needs_tts: "Dismiss TTS flag",
   needs_audio: "Dismiss audio flag",
+  needs_transcription: "Dismiss transcription flag",
   sg_review_dirty: "Clear SG review flag",
   sg_needs_add: "Clear add-to-SG flag",
   sg_audio_only_remote: "Dismiss SG audio gap",
 };
 
-async function openReaderForWork(workId) {
+async function openReaderForWork(workId, hints = {}) {
+  if (hints.has_epub === false && hints.has_md === false && hints.has_audio === false) {
+    throw new Error("No EPUB, markdown, or audiobook to open yet");
+  }
   const data = await api(`/api/works/${workId}`);
   const w = data.work;
   const assets = data.assets || [];
@@ -266,6 +386,8 @@ async function openReaderForWork(workId) {
   if (!hasEpub && !hasMd && !audio) {
     throw new Error("No EPUB, markdown, or audiobook to open yet");
   }
+  if (hasEpub) await ensureEpubLibs();
+  if (hasMd || !hasEpub) await ensureMarkedLibs();
   await openReader(w, hasEpub, hasMd, audio);
 }
 
@@ -309,6 +431,7 @@ function renderCards(el, works, empty = {}) {
     if (w.is_manga) badges.push("manga");
     const onToRead = w.status === "to_read";
     const onReading = w.status === "reading";
+    const readDisabled = w.has_epub === false && w.has_md === false && w.has_audio === false;
     card.innerHTML = `
       <img src="/api/works/${w.id}/cover?v=${encodeURIComponent(w.updated_at || "")}" alt="" loading="lazy" onerror="this.style.opacity=0.25" />
       <div class="meta">
@@ -318,7 +441,7 @@ function renderCards(el, works, empty = {}) {
         ${
           readAction || libraryActions
             ? `<div class="card-actions">
-                <button type="button" class="card-act card-read" title="Open reader">Read</button>
+                <button type="button" class="card-act card-read"${readDisabled ? " disabled" : ""} title="${readDisabled ? "No EPUB, markdown, or audio yet" : "Open reader"}">Read</button>
                 ${
                   libraryActions
                     ? `<button type="button" class="card-act card-to-read"${onToRead ? " disabled" : ""} title="Add to To Read (max 9)">${onToRead ? "On To Read" : "To read"}</button>
@@ -355,10 +478,15 @@ function renderCards(el, works, empty = {}) {
     card.querySelector(".card-read")?.addEventListener("click", async (e) => {
       e.preventDefault();
       e.stopPropagation();
+      if (readDisabled) return;
       const btn = e.currentTarget;
       btn.disabled = true;
       try {
-        await openReaderForWork(w.id);
+        await openReaderForWork(w.id, {
+          has_epub: w.has_epub,
+          has_md: w.has_md,
+          has_audio: w.has_audio,
+        });
       } catch (err) {
         btn.disabled = false;
         alert(err.message || String(err));
@@ -623,14 +751,17 @@ async function openDetail(id) {
         <button type="button" id="btn-transcribe"${hasAudio && !trBusy ? "" : ` disabled title="${!hasAudio ? "Upload an audiobook first" : "Transcription already in progress"}"`}>${trFailed ? "Retry transcription" : "Transcribe"}</button>
         ${data.has_transcript ? `<a href="/api/works/${w.id}/transcript"><button type="button">Download transcript</button></a>` : ""}
         ${state.user.is_admin ? `
-          <label>Grant access
-            <select id="grant-user">
-              <option value="">Select user…</option>
-              ${state.users.filter((u) => !u.is_admin).map((u) =>
-                `<option value="${escapeHtml(u.username)}">${escapeHtml(u.username)}</option>`).join("")}
-            </select>
-          </label>
-          <button type="button" id="btn-grant">Grant</button>
+          <div class="grant-panel">
+            <label>Grant access
+              <select id="grant-user">
+                <option value="">Select user…</option>
+                ${state.users.filter((u) => !u.is_admin).map((u) =>
+                  `<option value="${escapeHtml(u.username)}">${escapeHtml(u.username)}</option>`).join("")}
+              </select>
+            </label>
+            <button type="button" id="btn-grant">Grant</button>
+            <div id="grant-list" class="grant-list muted">Loading grants…</div>
+          </div>
         ` : ""}
         ${(state.user.is_admin || w.created_by === state.user.id)
           ? `<button type="button" id="btn-delete-work" class="danger">Delete book</button>`
@@ -685,7 +816,8 @@ async function openDetail(id) {
         description: String(fd.get("description") || "").trim() || null,
         status: fd.get("status"),
         primary_code: primary,
-        year_list: yearRaw ? Number(yearRaw) : null,
+        year_list: yearRaw ? Number(yearRaw) : undefined,
+        clear_year_list: !yearRaw,
         is_manga: fd.get("is_manga") === "on",
         reading_direction: fd.get("is_manga") === "on" ? "rtl" : "ltr",
       },
@@ -698,7 +830,15 @@ async function openDetail(id) {
     await openDetail(w.id);
   });
 
-  document.getElementById("btn-read")?.addEventListener("click", () => openReader(w, hasEpub, hasMd, audio));
+  document.getElementById("btn-read")?.addEventListener("click", async () => {
+    try {
+      if (hasEpub) await ensureEpubLibs();
+      if (hasMd) await ensureMarkedLibs();
+      await openReader(w, hasEpub, hasMd, audio);
+    } catch (e) {
+      msg(e.message || String(e), true);
+    }
+  });
   document.getElementById("btn-listen")?.addEventListener("click", () => openReader(w, hasEpub, hasMd, audio));
   if (hasAudio) {
     const detailAudio = document.getElementById("detail-audio");
@@ -1069,7 +1209,15 @@ async function openDetail(id) {
     }
     await api(`/api/works/${w.id}/grants`, { method: "POST", json: { username } });
     msg(`Granted to ${username}`);
+    await refreshGrantList(w.id);
   });
+
+  if (state.user.is_admin) {
+    refreshGrantList(w.id).catch(() => {
+      const el = document.getElementById("grant-list");
+      if (el) el.textContent = "Could not load grants";
+    });
+  }
 
   document.getElementById("btn-delete-work")?.addEventListener("click", async () => {
     const ok = window.confirm(
@@ -1248,10 +1396,6 @@ function toggleReviewFind() {
 function wireReviewMarkdownEditor(workId, msg) {
   const mount = document.getElementById("review-md-vditor");
   if (!mount) return;
-  if (typeof Vditor === "undefined") {
-    msg("Markdown editor failed to load (Vditor CDN).", true);
-    return;
-  }
 
   const confirmBtn = document.getElementById("btn-confirm");
   if (confirmBtn) confirmBtn.disabled = false;
@@ -1259,6 +1403,25 @@ function wireReviewMarkdownEditor(workId, msg) {
   closeMdPreviewFloat();
   reviewFindFrom = 0;
   setReviewDirty(false, "");
+  mount.textContent = "Loading editor…";
+
+  ensureVditor()
+    .then(() => ensureMarkedLibs())
+    .then(() => initReviewVditor(workId, msg))
+    .catch((e) => {
+      mount.textContent = "";
+      msg(e.message || "Markdown editor failed to load (Vditor CDN).", true);
+    });
+}
+
+function initReviewVditor(workId, msg) {
+  const mount = document.getElementById("review-md-vditor");
+  if (!mount) return;
+  if (typeof Vditor === "undefined") {
+    msg("Markdown editor failed to load (Vditor CDN).", true);
+    return;
+  }
+  mount.textContent = "";
 
   let pendingMd = null;
   let loadError = null;
@@ -1353,8 +1516,13 @@ function wireReviewMarkdownEditor(workId, msg) {
     msg("Markdown saved (still needs confirm)");
   });
 
-  document.getElementById("btn-preview-md")?.addEventListener("click", () => {
-    openMdPreviewFloat();
+  document.getElementById("btn-preview-md")?.addEventListener("click", async () => {
+    try {
+      await ensureMarkedLibs();
+      openMdPreviewFloat();
+    } catch (e) {
+      msg(e.message || String(e), true);
+    }
   });
 
   document.getElementById("btn-md-find")?.addEventListener("click", toggleReviewFind);
@@ -2168,6 +2336,12 @@ document.getElementById("wishlist-form").addEventListener("submit", async (e) =>
 });
 
 document.getElementById("btn-scan").addEventListener("click", async () => {
+  try {
+    await ensureZxing();
+  } catch (e) {
+    alert(e.message || "Barcode library failed to load");
+    return;
+  }
   const video = document.getElementById("scan-video");
   video.hidden = false;
   const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
