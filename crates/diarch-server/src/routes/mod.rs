@@ -51,6 +51,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/works/{id}/cover", get(get_cover).post(upload_cover))
         .route("/api/works/{id}/cover/fetch", post(fetch_cover))
         .route("/api/works/{id}/cover/generate", post(generate_cover))
+        .route("/api/works/{id}/cover/placeholder", post(reset_cover_placeholder))
         .route("/api/works/{id}/cover/prompt", get(cover_prompt))
         .route("/api/works/{id}/cover/candidate", get(get_cover_candidate))
         .route("/api/works/{id}/cover/approve", post(approve_cover_candidate))
@@ -1260,6 +1261,79 @@ async fn fetch_cover(
     }
 }
 
+/// Remove raster covers / candidates and write a fresh SVG placeholder from
+/// current (or optionally provided) title + authors. Sets `needs_cover`.
+async fn reset_cover_placeholder(
+    AuthUser(user): AuthUser,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<PlaceholderCoverReq>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let mut work = state
+        .db
+        .get_work(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let title = req
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(work.title.as_str());
+    let authors = req
+        .authors
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or(work.authors.as_str());
+
+    let dir = state.config.work_dir(id);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    for name in [
+        "cover.jpg",
+        "cover.png",
+        "cover.webp",
+        diarch_core::Config::cover_candidate_name(),
+    ] {
+        let p = dir.join(name);
+        if p.exists() {
+            let _ = tokio::fs::remove_file(&p).await;
+        }
+    }
+    let svg = metadata::placeholder_cover_svg(title, authors);
+    let svg_path = dir.join("cover.svg");
+    tokio::fs::write(&svg_path, svg.as_bytes())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    work.needs_cover = true;
+    work.updated_at = Utc::now();
+    state
+        .db
+        .update_work(&work)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "needs_cover": true,
+        "path": "cover.svg"
+    })))
+}
+
+#[derive(Default, Deserialize)]
+struct PlaceholderCoverReq {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    authors: Option<String>,
+}
+
 async fn generate_cover(
     AuthUser(user): AuthUser,
     State(state): State<Arc<AppState>>,
@@ -2120,6 +2194,7 @@ async fn meta_search(
 struct Settings {
     show_audio_gaps: bool,
     reader_infinite_scroll: bool,
+    reader_typography: diarch_core::ReaderTypography,
 }
 
 async fn get_settings(
@@ -2131,9 +2206,15 @@ async fn get_settings(
         .get_reader_infinite_scroll(user.id)
         .await
         .unwrap_or(false);
+    let typo_json = state
+        .db
+        .get_reader_typography_json(user.id)
+        .await
+        .unwrap_or_else(|_| "{}".into());
     Ok(Json(Settings {
         show_audio_gaps: user.show_audio_gaps && state.config.show_audio_gaps,
         reader_infinite_scroll: scroll,
+        reader_typography: diarch_core::ReaderTypography::from_json_str(&typo_json),
     }))
 }
 
@@ -2141,6 +2222,7 @@ async fn get_settings(
 struct SettingsReq {
     show_audio_gaps: Option<bool>,
     reader_infinite_scroll: Option<bool>,
+    reader_typography: Option<diarch_core::ReaderTypography>,
 }
 
 async fn put_settings(
@@ -2159,6 +2241,17 @@ async fn put_settings(
         state
             .db
             .set_reader_infinite_scroll(user.id, v)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    if let Some(typo) = body.reader_typography {
+        let json = typo
+            .sanitize()
+            .to_json_string()
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        state
+            .db
+            .set_reader_typography_json(user.id, &json)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }

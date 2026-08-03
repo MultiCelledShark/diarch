@@ -302,7 +302,22 @@ async fn progress_and_settings_persist() {
         "PUT",
         "/api/settings",
         Some(&token),
-        Some(json!({"show_audio_gaps": false, "reader_infinite_scroll": true})),
+        Some(json!({
+            "show_audio_gaps": false,
+            "reader_infinite_scroll": true,
+            "reader_typography": {
+                "palette": "sepia",
+                "font": "literata",
+                "size": 115,
+                "lineHeight": "loose",
+                "measure": "narrow",
+                "justify": true,
+                "letterSpacing": "wide",
+                "paragraphSpacing": "roomy",
+                "indent": true,
+                "hyphenate": true
+            }
+        })),
     )
     .await;
     assert_eq!(status, 204);
@@ -310,6 +325,32 @@ async fn progress_and_settings_persist() {
     assert_eq!(status, 200);
     assert_eq!(settings["show_audio_gaps"], false);
     assert_eq!(settings["reader_infinite_scroll"], true);
+    assert_eq!(settings["reader_typography"]["palette"], "sepia");
+    assert_eq!(settings["reader_typography"]["font"], "literata");
+    assert_eq!(settings["reader_typography"]["size"], 115);
+    assert_eq!(settings["reader_typography"]["lineHeight"], "loose");
+    assert_eq!(settings["reader_typography"]["letterSpacing"], "wide");
+    assert_eq!(settings["reader_typography"]["paragraphSpacing"], "roomy");
+    assert_eq!(settings["reader_typography"]["indent"], true);
+    assert_eq!(settings["reader_typography"]["hyphenate"], true);
+
+    // Unknown enum values are sanitized to defaults.
+    let (status, _, _) = json_req(
+        &app,
+        "PUT",
+        "/api/settings",
+        Some(&token),
+        Some(json!({
+            "reader_typography": { "palette": "neon", "font": "comic", "size": 999 }
+        })),
+    )
+    .await;
+    assert_eq!(status, 204);
+    let (status, settings, _) = json_req(&app, "GET", "/api/settings", Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(settings["reader_typography"]["palette"], "dark");
+    assert_eq!(settings["reader_typography"]["font"], "serif");
+    assert_eq!(settings["reader_typography"]["size"], 200);
 }
 
 #[tokio::test]
@@ -912,6 +953,32 @@ async fn cover_candidate_approve_and_discard() {
     .await;
     assert_eq!(status, 204);
     assert!(!candidate.exists());
+
+    // Reset to SVG placeholder from current (or overridden) title/authors.
+    tokio::fs::write(state.config.work_dir(wid).join("cover.jpg"), b"keep-me")
+        .await
+        .unwrap();
+    let (status, reset, _) = json_req(
+        &app,
+        "POST",
+        &format!("/api/works/{id}/cover/placeholder"),
+        Some(&token),
+        Some(json!({"title":"Renamed Title","authors":"New Author"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{reset}");
+    assert_eq!(reset["ok"], true);
+    assert!(!state.config.work_dir(wid).join("cover.jpg").exists());
+    let svg = tokio::fs::read_to_string(state.config.work_dir(wid).join("cover.svg"))
+        .await
+        .unwrap();
+    assert!(svg.contains("Renamed Title"), "{svg}");
+    assert!(svg.contains("New Author"), "{svg}");
+    let (status, detail, _) =
+        json_req(&app, "GET", &format!("/api/works/{id}"), Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(detail["work"]["needs_cover"], true);
+
     let _ = dir;
 }
 

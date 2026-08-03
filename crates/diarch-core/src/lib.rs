@@ -403,6 +403,119 @@ pub fn content_disposition_attachment(title: &str, extension: &str) -> String {
     format!("attachment; filename=\"{name}\"")
 }
 
+/// Per-user ebook/markdown reader typography (persisted in `user_settings`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderTypography {
+    #[serde(default = "default_palette")]
+    pub palette: String,
+    #[serde(default = "default_font")]
+    pub font: String,
+    /// Percent of base size (80–200).
+    #[serde(default = "default_size")]
+    pub size: u32,
+    #[serde(default = "default_line_height")]
+    pub line_height: String,
+    #[serde(default = "default_measure")]
+    pub measure: String,
+    #[serde(default)]
+    pub justify: bool,
+    #[serde(default = "default_letter_spacing")]
+    pub letter_spacing: String,
+    #[serde(default = "default_paragraph_spacing")]
+    pub paragraph_spacing: String,
+    #[serde(default)]
+    pub indent: bool,
+    #[serde(default)]
+    pub hyphenate: bool,
+}
+
+fn default_palette() -> String {
+    "dark".into()
+}
+fn default_font() -> String {
+    "serif".into()
+}
+fn default_size() -> u32 {
+    100
+}
+fn default_line_height() -> String {
+    "normal".into()
+}
+fn default_measure() -> String {
+    "medium".into()
+}
+fn default_letter_spacing() -> String {
+    "normal".into()
+}
+fn default_paragraph_spacing() -> String {
+    "normal".into()
+}
+
+impl Default for ReaderTypography {
+    fn default() -> Self {
+        Self {
+            palette: default_palette(),
+            font: default_font(),
+            size: default_size(),
+            line_height: default_line_height(),
+            measure: default_measure(),
+            justify: false,
+            letter_spacing: default_letter_spacing(),
+            paragraph_spacing: default_paragraph_spacing(),
+            indent: false,
+            hyphenate: false,
+        }
+    }
+}
+
+impl ReaderTypography {
+    /// Clamp / whitelist fields from client JSON.
+    pub fn sanitize(mut self) -> Self {
+        const PALETTES: &[&str] = &["dark", "sepia", "light", "paper", "night", "contrast"];
+        const FONTS: &[&str] = &["serif", "sans", "mono", "dyslexia", "literata"];
+        const LINE: &[&str] = &["tight", "normal", "loose"];
+        const MEASURE: &[&str] = &["narrow", "medium", "wide"];
+        const TRACK: &[&str] = &["tight", "normal", "wide"];
+        const PARA: &[&str] = &["compact", "normal", "roomy"];
+
+        if !PALETTES.contains(&self.palette.as_str()) {
+            self.palette = default_palette();
+        }
+        if !FONTS.contains(&self.font.as_str()) {
+            self.font = default_font();
+        }
+        self.size = self.size.clamp(80, 200);
+        self.size = (self.size / 5) * 5;
+        if self.size < 80 {
+            self.size = 80;
+        }
+        if !LINE.contains(&self.line_height.as_str()) {
+            self.line_height = default_line_height();
+        }
+        if !MEASURE.contains(&self.measure.as_str()) {
+            self.measure = default_measure();
+        }
+        if !TRACK.contains(&self.letter_spacing.as_str()) {
+            self.letter_spacing = default_letter_spacing();
+        }
+        if !PARA.contains(&self.paragraph_spacing.as_str()) {
+            self.paragraph_spacing = default_paragraph_spacing();
+        }
+        self
+    }
+
+    pub fn from_json_str(s: &str) -> Self {
+        serde_json::from_str::<ReaderTypography>(s)
+            .unwrap_or_default()
+            .sanitize()
+    }
+
+    pub fn to_json_string(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(&self.clone().sanitize())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,5 +584,44 @@ mod tests {
         assert_eq!(export_stem("Foo/Bar: Baz?"), "Foo-Bar Baz");
         assert_eq!(export_stem("   "), "Untitled");
         assert!(content_disposition_attachment("Ice", "epub").contains("Ice.epub"));
+    }
+
+    #[test]
+    fn reader_typography_sanitizes_unknowns() {
+        let t = ReaderTypography {
+            palette: "neon".into(),
+            font: "comic".into(),
+            size: 173,
+            line_height: "huge".into(),
+            measure: "ultrawide".into(),
+            justify: true,
+            letter_spacing: "loose".into(),
+            paragraph_spacing: "big".into(),
+            indent: true,
+            hyphenate: true,
+        }
+        .sanitize();
+        assert_eq!(t.palette, "dark");
+        assert_eq!(t.font, "serif");
+        assert_eq!(t.size, 170);
+        assert_eq!(t.line_height, "normal");
+        assert_eq!(t.measure, "medium");
+        assert_eq!(t.letter_spacing, "normal");
+        assert_eq!(t.paragraph_spacing, "normal");
+        assert!(t.justify && t.indent && t.hyphenate);
+    }
+
+    #[test]
+    fn reader_typography_accepts_camel_case_aliases() {
+        let t = ReaderTypography::from_json_str(
+            r#"{"palette":"sepia","font":"literata","size":110,"lineHeight":"loose","letterSpacing":"wide","paragraphSpacing":"roomy","indent":true,"hyphenate":true}"#,
+        );
+        assert_eq!(t.palette, "sepia");
+        assert_eq!(t.font, "literata");
+        assert_eq!(t.size, 110);
+        assert_eq!(t.line_height, "loose");
+        assert_eq!(t.letter_spacing, "wide");
+        assert_eq!(t.paragraph_spacing, "roomy");
+        assert!(t.indent && t.hyphenate);
     }
 }

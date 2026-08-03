@@ -28,6 +28,10 @@ async function api(path, opts = {}) {
 }
 
 function show(view) {
+  if (view !== "detail") {
+    destroyReviewEditor();
+    closeMdPreviewFloat();
+  }
   document.querySelectorAll(".view").forEach((el) => (el.hidden = true));
   const el = document.getElementById(`view-${view}`);
   if (el) el.hidden = false;
@@ -107,8 +111,13 @@ async function enterApp() {
   try {
     state.settings = await api("/api/settings");
   } catch {
-    state.settings = { show_audio_gaps: true, reader_infinite_scroll: false };
+    state.settings = {
+      show_audio_gaps: true,
+      reader_infinite_scroll: false,
+      reader_typography: { ...TYPO_DEFAULTS },
+    };
   }
+  hydrateTypoFromSettings(state.settings);
   try {
     state.taxonomy = await api("/api/taxonomy");
   } catch {
@@ -176,6 +185,8 @@ async function loadWorks() {
   renderCards(document.getElementById("work-list"), works, {
     emptyTitle: "Your library is empty",
     emptyHint: "Import an EPUB, or add something to your wishlist.",
+    libraryActions: true,
+    onStatusChanged: loadWorks,
   });
 }
 
@@ -187,7 +198,8 @@ async function loadCurrentlyReading() {
   if (cap) cap.textContent = `${works.length} / 3 slots`;
   renderCards(document.getElementById("currently-reading-list"), works, {
     emptyTitle: "Nothing in progress",
-    emptyHint: "Set a book’s status to Reading (max 3) from its detail page.",
+    emptyHint: "Use Reading on a library card (max 3), or set status on the book’s detail page.",
+    readAction: true,
   });
 }
 
@@ -197,7 +209,8 @@ async function loadToRead() {
   if (cap) cap.textContent = `${works.length} / 9 slots`;
   renderCards(document.getElementById("to-read-list"), works, {
     emptyTitle: "To Read is empty",
-    emptyHint: "Promote books here from Library (status: To read, max 9).",
+    emptyHint: "Use To read on a library card (max 9), or set status on the book’s detail page.",
+    readAction: true,
   });
 }
 
@@ -212,13 +225,56 @@ async function loadWishlist() {
 async function loadAttention() {
   const att = document.getElementById("attention-filter").value;
   const works = await api(`/api/works?attention=${encodeURIComponent(att)}`);
+  const softClearable = new Set([
+    "needs_cover",
+    "needs_tts",
+    "needs_audio",
+    "sg_review_dirty",
+    "sg_needs_add",
+    "sg_audio_only_remote",
+  ]);
   renderCards(document.getElementById("attention-list"), works, {
     emptyTitle: "Nothing in this attention queue",
     emptyHint: "Flags appear here for review, covers, StoryGraph, audio gaps, etc.",
+    clearFlag: softClearable.has(att) ? att : null,
+    onCleared: loadAttention,
   });
 }
 
 document.getElementById("attention-filter").addEventListener("change", loadAttention);
+
+const ATTENTION_CLEAR_LABELS = {
+  needs_cover: "Dismiss cover flag",
+  needs_tts: "Dismiss TTS flag",
+  needs_audio: "Dismiss audio flag",
+  sg_review_dirty: "Clear SG review flag",
+  sg_needs_add: "Clear add-to-SG flag",
+  sg_audio_only_remote: "Dismiss SG audio gap",
+};
+
+async function openReaderForWork(workId) {
+  const data = await api(`/api/works/${workId}`);
+  const w = data.work;
+  const assets = data.assets || [];
+  const hasEpub = assets.some((a) => a.kind === "epub");
+  const hasMd = assets.some((a) => a.kind === "markdown");
+  const audioAssets = assets.filter((a) => a.kind === "audio");
+  const audio =
+    audioAssets.find((a) => (a.relative_path || "").endsWith("book.m4b")) ||
+    audioAssets[0] ||
+    null;
+  if (!hasEpub && !hasMd && !audio) {
+    throw new Error("No EPUB, markdown, or audiobook to open yet");
+  }
+  await openReader(w, hasEpub, hasMd, audio);
+}
+
+async function setWorkStatus(workId, status) {
+  return api(`/api/works/${workId}`, {
+    method: "PUT",
+    json: { status },
+  });
+}
 
 function renderCards(el, works, empty = {}) {
   el.innerHTML = "";
@@ -229,9 +285,15 @@ function renderCards(el, works, empty = {}) {
     </div>`;
     return;
   }
+  const clearFlag = empty.clearFlag || null;
+  const libraryActions = !!empty.libraryActions;
+  const readAction = !!empty.readAction || libraryActions;
   for (const w of works) {
     const card = document.createElement("div");
-    card.className = "card";
+    card.className =
+      "card" +
+      (clearFlag ? " card-with-clear" : "") +
+      (libraryActions || readAction ? " card-with-actions" : "");
     const badges = [];
     if (w.status && w.status !== "unread") {
       const statusLabel = { to_read: "to read", reading: "reading", read: "read", wishlist: "wishlist" }[w.status] || w.status;
@@ -245,14 +307,89 @@ function renderCards(el, works, empty = {}) {
     if (w.sg_needs_add) badges.push("add to SG");
     if (w.sg_audio_only_remote) badges.push("SG audio only");
     if (w.is_manga) badges.push("manga");
+    const onToRead = w.status === "to_read";
+    const onReading = w.status === "reading";
     card.innerHTML = `
       <img src="/api/works/${w.id}/cover?v=${encodeURIComponent(w.updated_at || "")}" alt="" loading="lazy" onerror="this.style.opacity=0.25" />
       <div class="meta">
         <strong>${escapeHtml(w.title)}</strong>
         <span>${escapeHtml(w.authors || "")}</span>
         <div>${badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join("")}</div>
-      </div>`;
+        ${
+          readAction || libraryActions
+            ? `<div class="card-actions">
+                <button type="button" class="card-act card-read" title="Open reader">Read</button>
+                ${
+                  libraryActions
+                    ? `<button type="button" class="card-act card-to-read"${onToRead ? " disabled" : ""} title="Add to To Read (max 9)">${onToRead ? "On To Read" : "To read"}</button>
+                <button type="button" class="card-act card-reading"${onReading ? " disabled" : ""} title="Add to Currently Reading (max 3)">${onReading ? "On Reading" : "Reading"}</button>`
+                    : ""
+                }
+              </div>`
+            : ""
+        }
+      </div>
+      ${
+        clearFlag
+          ? `<button type="button" class="card-clear" title="${escapeHtml(ATTENTION_CLEAR_LABELS[clearFlag] || "Clear flag")}">${escapeHtml(ATTENTION_CLEAR_LABELS[clearFlag] || "Clear")}</button>`
+          : ""
+      }`;
     card.addEventListener("click", () => openDetail(w.id));
+    card.querySelector(".card-clear")?.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        await api(`/api/works/${w.id}/flags/clear`, {
+          method: "POST",
+          json: { flags: [clearFlag] },
+        });
+        if (typeof empty.onCleared === "function") await empty.onCleared();
+        else card.remove();
+      } catch (err) {
+        btn.disabled = false;
+        alert(err.message || String(err));
+      }
+    });
+    card.querySelector(".card-read")?.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        await openReaderForWork(w.id);
+      } catch (err) {
+        btn.disabled = false;
+        alert(err.message || String(err));
+      }
+    });
+    card.querySelector(".card-to-read")?.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        await setWorkStatus(w.id, "to_read");
+        if (typeof empty.onStatusChanged === "function") await empty.onStatusChanged();
+      } catch (err) {
+        btn.disabled = false;
+        alert(err.message || String(err));
+      }
+    });
+    card.querySelector(".card-reading")?.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        await setWorkStatus(w.id, "reading");
+        if (typeof empty.onStatusChanged === "function") await empty.onStatusChanged();
+      } catch (err) {
+        btn.disabled = false;
+        alert(err.message || String(err));
+      }
+    });
     el.appendChild(card);
   }
 }
@@ -344,6 +481,8 @@ function taxonomyOptions(selected) {
 }
 
 async function openDetail(id) {
+  destroyReviewEditor();
+  closeMdPreviewFloat();
   const data = await api(`/api/works/${id}`);
   state.currentWork = data;
   show("detail");
@@ -372,19 +511,9 @@ async function openDetail(id) {
   const pdfReview = !!(w.needs_review && hasImportPdf);
   const reviewMdPane = `
         <div class="review-pane review-md"${mdSideReview ? ' aria-label="Transcript markdown"' : ""}>
-          <h3>Markdown</h3>
-          <div class="review-md-toolbar" role="toolbar" aria-label="Markdown formatting">
-            <button type="button" data-md-cmd="bold" title="Bold (Ctrl+B)"><strong>B</strong></button>
-            <button type="button" data-md-cmd="italic" title="Italic (Ctrl+I)"><em>I</em></button>
-            <button type="button" data-md-cmd="heading" title="Heading">H</button>
-            <button type="button" data-md-cmd="link" title="Link">Link</button>
-            <button type="button" data-md-cmd="quote" title="Quote">“</button>
-            <button type="button" data-md-cmd="ul" title="Bullet list">• List</button>
-            <button type="button" data-md-cmd="ol" title="Numbered list">1. List</button>
-            <button type="button" data-md-cmd="code" title="Inline code">Code</button>
-            <button type="button" data-md-cmd="fence" title="Code block">Block</button>
-            <span class="tb-sep" aria-hidden="true"></span>
-            <button type="button" data-md-cmd="find" title="Find / Replace">Find</button>
+          <div class="review-md-head">
+            <h3>Markdown</h3>
+            <p class="muted review-md-hint">Typora-style live editing · Ctrl+S save · toggle Source / Live / WYSIWYG in the toolbar</p>
           </div>
           <div id="review-find" class="review-find" hidden>
             <input type="text" id="review-find-q" placeholder="Find" />
@@ -394,11 +523,12 @@ async function openDetail(id) {
             <button type="button" id="review-find-all">Replace all</button>
             <button type="button" id="review-find-close">Close</button>
           </div>
-          <textarea id="review-md-editor" spellcheck="false" placeholder="Loading…"></textarea>
+          <div id="review-md-vditor" class="review-md-vditor" role="textbox" aria-label="Markdown editor"></div>
           <div class="review-actions">
             <button type="button" id="btn-save-md">Save markdown</button>
             <span id="review-dirty" class="review-dirty" hidden>Unsaved changes</span>
-            <button type="button" id="btn-preview-md">Preview</button>
+            <button type="button" id="btn-md-find" title="Find / Replace (Ctrl+F)">Find</button>
+            <button type="button" id="btn-preview-md" title="Open floating HTML preview">Preview</button>
             <a href="/api/works/${w.id}/download/markdown"><button type="button">Download MD</button></a>
             <button type="button" id="btn-confirm">Confirm → EPUB</button>
           </div>
@@ -483,6 +613,7 @@ async function openDetail(id) {
         ${hasEpub ? `<button type="button" id="btn-remarkable">Send to reMarkable</button>` : ""}
         <button type="button" id="btn-fetch-cover"${w.isbn ? "" : " disabled title=\"Add an ISBN first\""}>Fetch cover</button>
         <button type="button" id="btn-generate-cover" title="Generate via LocalAI (staged — approve before it replaces the cover)">Generate cover</button>
+        <button type="button" id="btn-placeholder-cover" title="Replace cover with SVG from current title &amp; authors">Reset to placeholder</button>
         <label class="btn-file">Upload cover <input type="file" id="cover-file" accept="image/*" hidden /></label>
         ${w.needs_cover ? `<button type="button" id="btn-clear-needs-cover">Dismiss needs cover</button>` : ""}
         ${w.sg_review_dirty ? `<button type="button" id="btn-clear-sg-review" title="Clear after you update StoryGraph">Clear SG review flag</button>` : ""}
@@ -734,6 +865,31 @@ async function openDetail(id) {
     }
   });
 
+  document.getElementById("btn-placeholder-cover")?.addEventListener("click", async () => {
+    const form = document.getElementById("detail-form");
+    const fd = form ? new FormData(form) : null;
+    const title = fd ? String(fd.get("title") || "").trim() : "";
+    const authors = fd ? String(fd.get("authors") || "").trim() : "";
+    msg("Resetting cover to placeholder…");
+    try {
+      const r = await api(`/api/works/${w.id}/cover/placeholder`, {
+        method: "POST",
+        json: {
+          title: title || undefined,
+          authors: authors || undefined,
+        },
+      });
+      if (!r?.ok) {
+        msg(r?.message || "Could not reset cover", true);
+        return;
+      }
+      msg("Cover reset to placeholder SVG");
+      await openDetail(w.id);
+    } catch (e) {
+      msg(e.message || String(e), true);
+    }
+  });
+
   document.getElementById("btn-approve-cover")?.addEventListener("click", async () => {
     msg("Approving candidate cover…");
     try {
@@ -832,19 +988,19 @@ async function openDetail(id) {
     });
   });
   document.getElementById("btn-confirm")?.addEventListener("click", async () => {
-    const editor = document.getElementById("review-md-editor");
-    if (editor) {
+    if (document.getElementById("review-md-vditor") || reviewVditor) {
+      const md = getReviewMarkdown();
       const res = await fetch(`/api/works/${w.id}/content/markdown`, {
         method: "PUT",
         credentials: "include",
         headers: { "Content-Type": "text/markdown; charset=utf-8" },
-        body: editor.value,
+        body: md,
       });
       if (!res.ok) {
         msg(await res.text() || "Could not save markdown before confirm", true);
         return;
       }
-      setReviewDirty(false, editor.value);
+      setReviewDirty(false, md);
     }
     const j = await api(`/api/works/${w.id}/confirm`, { method: "POST" });
     msg("Building EPUB…");
@@ -933,14 +1089,40 @@ async function openDetail(id) {
 }
 
 document.getElementById("back-library").addEventListener("click", () => {
+  destroyReviewEditor();
+  closeMdPreviewFloat();
   show("library");
   loadWorks();
 });
 
 
-/* —— Review markdown editor —— */
+/* —— Review markdown editor (Vditor IR ≈ Typora) —— */
 let reviewSavedText = "";
 let reviewPreviewWin = null;
+let reviewVditor = null;
+let reviewFindFrom = 0;
+const VDITOR_CDN = "https://cdn.jsdelivr.net/npm/vditor@3.10.9";
+
+function destroyReviewEditor() {
+  if (!reviewVditor) return;
+  try {
+    reviewVditor.destroy();
+  } catch (_) {
+    /* ignore */
+  }
+  reviewVditor = null;
+}
+
+function getReviewMarkdown() {
+  if (reviewVditor) {
+    try {
+      return reviewVditor.getValue();
+    } catch (_) {
+      /* fall through */
+    }
+  }
+  return "";
+}
 
 function setReviewDirty(dirty, savedText) {
   if (typeof savedText === "string") reviewSavedText = savedText;
@@ -974,7 +1156,7 @@ function fillMdPreviewBody(md) {
   if (body) body.innerHTML = markdownToSafeHtml(md);
 }
 
-function openMdPreviewFloat(editor) {
+function openMdPreviewFloat() {
   closeMdPreviewFloat();
   const float = document.createElement("div");
   float.id = "md-preview-float";
@@ -992,17 +1174,16 @@ function openMdPreviewFloat(editor) {
     </div>
     <div id="md-preview-body" class="md-preview-body"></div>`;
   document.body.appendChild(float);
-  fillMdPreviewBody(editor?.value || "");
+  fillMdPreviewBody(getReviewMarkdown());
 
   document.getElementById("md-preview-close")?.addEventListener("click", closeMdPreviewFloat);
   document.getElementById("md-preview-refresh")?.addEventListener("click", () => {
-    fillMdPreviewBody(document.getElementById("review-md-editor")?.value || "");
+    fillMdPreviewBody(getReviewMarkdown());
   });
   document.getElementById("md-preview-tab")?.addEventListener("click", () => {
-    openMdPreviewTab(document.getElementById("review-md-editor")?.value || "");
+    openMdPreviewTab(getReviewMarkdown());
   });
 
-  // Drag by header
   const head = document.getElementById("md-preview-drag");
   let dragging = false;
   let ox = 0;
@@ -1057,206 +1238,171 @@ function openMdPreviewTab(md) {
   reviewPreviewWin.document.close();
 }
 
-function mdWrapSelection(editor, before, after = before) {
-  const start = editor.selectionStart;
-  const end = editor.selectionEnd;
-  const val = editor.value;
-  const selected = val.slice(start, end) || "text";
-  const next = val.slice(0, start) + before + selected + after + val.slice(end);
-  editor.value = next;
-  editor.focus();
-  editor.setSelectionRange(start + before.length, start + before.length + selected.length);
-  editor.dispatchEvent(new Event("input"));
-}
-
-function mdPrefixLines(editor, prefixFn) {
-  const start = editor.selectionStart;
-  const end = editor.selectionEnd;
-  const val = editor.value;
-  const lineStart = val.lastIndexOf("\n", start - 1) + 1;
-  const lineEnd = (() => {
-    const i = val.indexOf("\n", end);
-    return i === -1 ? val.length : i;
-  })();
-  const block = val.slice(lineStart, lineEnd);
-  const lines = block.split("\n");
-  const replaced = lines.map((line, i) => prefixFn(line, i)).join("\n");
-  editor.value = val.slice(0, lineStart) + replaced + val.slice(lineEnd);
-  editor.focus();
-  editor.setSelectionRange(lineStart, lineStart + replaced.length);
-  editor.dispatchEvent(new Event("input"));
-}
-
-function runMdCommand(cmd, editor) {
-  if (!editor) return;
-  switch (cmd) {
-    case "bold":
-      mdWrapSelection(editor, "**");
-      break;
-    case "italic":
-      mdWrapSelection(editor, "*");
-      break;
-    case "heading":
-      mdPrefixLines(editor, (line) => {
-        if (/^#{1,6}\s/.test(line)) {
-          const m = line.match(/^(#{1,6})\s/);
-          const n = Math.min(6, (m[1].length % 6) + 1);
-          return "#".repeat(n) + " " + line.replace(/^#{1,6}\s*/, "");
-        }
-        return "## " + line;
-      });
-      break;
-    case "link": {
-      const start = editor.selectionStart;
-      const end = editor.selectionEnd;
-      const selected = editor.value.slice(start, end) || "label";
-      const insert = `[${selected}](https://)`;
-      editor.value = editor.value.slice(0, start) + insert + editor.value.slice(end);
-      const urlStart = start + selected.length + 3;
-      editor.focus();
-      editor.setSelectionRange(urlStart, urlStart + "https://".length);
-      editor.dispatchEvent(new Event("input"));
-      break;
-    }
-    case "quote":
-      mdPrefixLines(editor, (line) => (line.startsWith("> ") ? line : "> " + line));
-      break;
-    case "ul":
-      mdPrefixLines(editor, (line) => (line.startsWith("- ") ? line : "- " + line));
-      break;
-    case "ol":
-      mdPrefixLines(editor, (line, i) => (/^\d+\.\s/.test(line) ? line : `${i + 1}. ${line}`));
-      break;
-    case "code":
-      mdWrapSelection(editor, "`");
-      break;
-    case "fence": {
-      const start = editor.selectionStart;
-      const end = editor.selectionEnd;
-      const selected = editor.value.slice(start, end) || "code";
-      const insert = "```\n" + selected + "\n```";
-      editor.value = editor.value.slice(0, start) + insert + editor.value.slice(end);
-      editor.focus();
-      editor.setSelectionRange(start + 4, start + 4 + selected.length);
-      editor.dispatchEvent(new Event("input"));
-      break;
-    }
-    case "find": {
-      const box = document.getElementById("review-find");
-      if (box) {
-        box.hidden = !box.hidden;
-        if (!box.hidden) document.getElementById("review-find-q")?.focus();
-      }
-      break;
-    }
-    default:
-      break;
-  }
-}
-
-function findInEditor(editor, query, from) {
-  if (!query) return -1;
-  return editor.value.indexOf(query, from);
+function toggleReviewFind() {
+  const box = document.getElementById("review-find");
+  if (!box) return;
+  box.hidden = !box.hidden;
+  if (!box.hidden) document.getElementById("review-find-q")?.focus();
 }
 
 function wireReviewMarkdownEditor(workId, msg) {
-  const editor = document.getElementById("review-md-editor");
-  if (!editor) return;
+  const mount = document.getElementById("review-md-vditor");
+  if (!mount) return;
+  if (typeof Vditor === "undefined") {
+    msg("Markdown editor failed to load (Vditor CDN).", true);
+    return;
+  }
+
   const confirmBtn = document.getElementById("btn-confirm");
   if (confirmBtn) confirmBtn.disabled = false;
-
+  destroyReviewEditor();
   closeMdPreviewFloat();
+  reviewFindFrom = 0;
+  setReviewDirty(false, "");
 
-  fetch(`/api/works/${workId}/content/markdown`, { credentials: "include" })
+  let pendingMd = null;
+  let loadError = null;
+
+  const loadPromise = fetch(`/api/works/${workId}/content/markdown`, { credentials: "include" })
     .then(async (res) => {
-      editor.value = res.ok ? await res.text() : "";
-      if (!res.ok) msg(`Could not load markdown (${res.status})`, true);
-      setReviewDirty(false, editor.value);
+      pendingMd = res.ok ? await res.text() : "";
+      if (!res.ok) loadError = `Could not load markdown (${res.status})`;
     })
-    .catch((e) => msg(e.message || String(e), true));
+    .catch((e) => {
+      pendingMd = "";
+      loadError = e.message || String(e);
+    });
 
-  editor.addEventListener("input", () => {
-    setReviewDirty(editor.value !== reviewSavedText);
-  });
+  const editorHeight = Math.max(420, Math.round(window.innerHeight * 0.72));
 
-  document.querySelectorAll("[data-md-cmd]").forEach((btn) => {
-    btn.addEventListener("click", () => runMdCommand(btn.dataset.mdCmd, editor));
-  });
-
-  editor.addEventListener("keydown", (e) => {
-    const mod = e.ctrlKey || e.metaKey;
-    if (!mod) return;
-    if (e.key === "s") {
-      e.preventDefault();
-      document.getElementById("btn-save-md")?.click();
-    } else if (e.key === "b") {
-      e.preventDefault();
-      runMdCommand("bold", editor);
-    } else if (e.key === "i") {
-      e.preventDefault();
-      runMdCommand("italic", editor);
-    } else if (e.key === "f") {
-      e.preventDefault();
-      runMdCommand("find", editor);
-    }
+  reviewVditor = new Vditor("review-md-vditor", {
+    cdn: VDITOR_CDN,
+    height: editorHeight,
+    minHeight: 360,
+    mode: "ir",
+    theme: "dark",
+    icon: "ant",
+    typewriterMode: true,
+    placeholder: "Loading…",
+    cache: { enable: false },
+    toolbarConfig: { pin: true },
+    counter: { enable: true, type: "text" },
+    outline: { enable: true, position: "left" },
+    preview: {
+      theme: { current: "dark" },
+      hljs: { style: "native", lineNumber: true },
+      math: { engine: "KaTeX", inlineDigit: true },
+    },
+    toolbar: [
+      "headings",
+      "bold",
+      "italic",
+      "strike",
+      "link",
+      "|",
+      "list",
+      "ordered-list",
+      "check",
+      "outdent",
+      "indent",
+      "|",
+      "quote",
+      "line",
+      "code",
+      "inline-code",
+      "table",
+      "|",
+      "undo",
+      "redo",
+      "|",
+      "edit-mode",
+      "both",
+      "outline",
+      "preview",
+      "fullscreen",
+      "|",
+      "export",
+    ],
+    input: (value) => {
+      setReviewDirty(value !== reviewSavedText);
+    },
+    after: async () => {
+      await loadPromise;
+      if (loadError) msg(loadError, true);
+      const md = pendingMd ?? "";
+      reviewVditor?.setValue(md, true);
+      setReviewDirty(false, md);
+      reviewVditor?.focus();
+    },
   });
 
   document.getElementById("btn-save-md")?.addEventListener("click", async () => {
+    const md = getReviewMarkdown();
     msg("Saving markdown…");
     const res = await fetch(`/api/works/${workId}/content/markdown`, {
       method: "PUT",
       credentials: "include",
       headers: { "Content-Type": "text/markdown; charset=utf-8" },
-      body: editor.value,
+      body: md,
     });
     if (!res.ok) {
       msg((await res.text()) || `Save failed (${res.status})`, true);
       return;
     }
-    setReviewDirty(false, editor.value);
+    setReviewDirty(false, md);
     msg("Markdown saved (still needs confirm)");
   });
 
   document.getElementById("btn-preview-md")?.addEventListener("click", () => {
-    openMdPreviewFloat(editor);
+    openMdPreviewFloat();
   });
+
+  document.getElementById("btn-md-find")?.addEventListener("click", toggleReviewFind);
 
   const findNext = () => {
     const q = document.getElementById("review-find-q")?.value || "";
     if (!q) return;
-    let idx = findInEditor(editor, q, editor.selectionEnd);
-    if (idx < 0) idx = findInEditor(editor, q, 0);
+    const val = getReviewMarkdown();
+    let idx = val.indexOf(q, reviewFindFrom);
+    if (idx < 0) idx = val.indexOf(q, 0);
     if (idx < 0) {
       msg("No matches", true);
       return;
     }
-    editor.focus();
-    editor.setSelectionRange(idx, idx + q.length);
+    reviewFindFrom = idx + q.length;
+    const startLine = val.slice(0, idx).split("\n").length;
+    msg(`Match at line ${startLine} (use Replace / Replace all, or Source mode)`);
   };
   document.getElementById("review-find-next")?.addEventListener("click", findNext);
   document.getElementById("review-find-replace")?.addEventListener("click", () => {
     const q = document.getElementById("review-find-q")?.value || "";
     const r = document.getElementById("review-find-r")?.value ?? "";
-    if (!q) return;
-    const start = editor.selectionStart;
-    const end = editor.selectionEnd;
-    if (editor.value.slice(start, end) === q) {
-      editor.value = editor.value.slice(0, start) + r + editor.value.slice(end);
-      editor.setSelectionRange(start, start + r.length);
-      editor.dispatchEvent(new Event("input"));
+    if (!q || !reviewVditor) return;
+    const val = getReviewMarkdown();
+    let idx = val.indexOf(q, Math.max(0, reviewFindFrom - q.length));
+    if (idx < 0) idx = val.indexOf(q, 0);
+    if (idx < 0) {
+      msg("No matches", true);
+      return;
     }
+    const next = val.slice(0, idx) + r + val.slice(idx + q.length);
+    reviewVditor.setValue(next);
+    reviewFindFrom = idx + r.length;
+    setReviewDirty(next !== reviewSavedText);
     findNext();
   });
   document.getElementById("review-find-all")?.addEventListener("click", () => {
     const q = document.getElementById("review-find-q")?.value || "";
     const r = document.getElementById("review-find-r")?.value ?? "";
-    if (!q) return;
-    if (!editor.value.includes(q)) {
+    if (!q || !reviewVditor) return;
+    const val = getReviewMarkdown();
+    if (!val.includes(q)) {
       msg("No matches", true);
       return;
     }
-    editor.value = editor.value.split(q).join(r);
-    editor.dispatchEvent(new Event("input"));
+    const next = val.split(q).join(r);
+    reviewVditor.setValue(next);
+    setReviewDirty(next !== reviewSavedText);
     msg("Replaced all");
   });
   document.getElementById("review-find-close")?.addEventListener("click", () => {
@@ -1264,6 +1410,22 @@ function wireReviewMarkdownEditor(workId, msg) {
     if (box) box.hidden = true;
   });
 }
+
+document.addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey || e.metaKey) || !reviewVditor) return;
+  if (!document.getElementById("review-md-vditor")) return;
+  if (e.key === "s") {
+    e.preventDefault();
+    document.getElementById("btn-save-md")?.click();
+  } else if (e.key === "f") {
+    const t = e.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA") && t.id?.startsWith("review-find")) {
+      return;
+    }
+    e.preventDefault();
+    toggleReviewFind();
+  }
+});
 
 async function pollJob(id, done) {
   for (let i = 0; i < 120; i++) {
@@ -1287,76 +1449,190 @@ const TYPO_DEFAULTS = {
   lineHeight: "normal",
   measure: "medium",
   justify: false,
+  letterSpacing: "normal",
+  paragraphSpacing: "normal",
+  indent: false,
+  hyphenate: false,
 };
 
 const PALETTES = {
   dark: { ink: "#f3e6d4", pageBg: "#0c1210", link: "#e8b87a" },
   sepia: { ink: "#5b4636", pageBg: "#f4ecd8", link: "#8a5a2b" },
   light: { ink: "#1a1a1a", pageBg: "#fafafa", link: "#8a5a2b" },
+  paper: { ink: "#2a241c", pageBg: "#f7f1e5", link: "#7a4e28" },
+  night: { ink: "#d7e0f0", pageBg: "#0b1220", link: "#8fb4ff" },
+  contrast: { ink: "#ffffff", pageBg: "#000000", link: "#ffe566" },
 };
 
 const FONTS = {
   serif: '"Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif',
+  literata:
+    'Literata, "Source Serif 4", "Iowan Old Style", "Palatino Linotype", Georgia, serif',
   sans: '"Source Sans 3", "Segoe UI", system-ui, sans-serif',
+  dyslexia:
+    '"Atkinson Hyperlegible", "OpenDyslexic", "Comic Sans MS", Verdana, sans-serif',
   mono: 'ui-monospace, "Cascadia Code", "Source Code Pro", monospace',
 };
 
 const LINE_HEIGHTS = { tight: 1.35, normal: 1.7, loose: 2.0 };
+const LETTER_SPACING = { tight: "-0.01em", normal: "0", wide: "0.04em" };
+const PARA_SPACING = { compact: "0.35em", normal: "0.85em", roomy: "1.35em" };
 const MEASURES = {
   narrow: { maxCh: 52, padX: "max(2.5rem, calc(50vw - 14rem))", epubMargin: "12%" },
   medium: { maxCh: 68, padX: "max(1rem, calc(50vw - 18rem))", epubMargin: "6%" },
   wide: { maxCh: 88, padX: "1rem", epubMargin: "2%" },
 };
 
-function loadTypo() {
+let typoSaveTimer = null;
+
+function normalizeTypo(raw) {
+  const t = { ...TYPO_DEFAULTS, ...(raw || {}) };
+  // Accept snake_case from older server payloads if any.
+  if (raw?.line_height && !raw.lineHeight) t.lineHeight = raw.line_height;
+  if (raw?.letter_spacing && !raw.letterSpacing) t.letterSpacing = raw.letter_spacing;
+  if (raw?.paragraph_spacing && !raw.paragraphSpacing) {
+    t.paragraphSpacing = raw.paragraph_spacing;
+  }
+  t.size = Math.min(200, Math.max(80, Number(t.size) || 100));
+  t.size = Math.round(t.size / 5) * 5;
+  if (!PALETTES[t.palette]) t.palette = TYPO_DEFAULTS.palette;
+  if (!FONTS[t.font]) t.font = TYPO_DEFAULTS.font;
+  if (!LINE_HEIGHTS[t.lineHeight]) t.lineHeight = TYPO_DEFAULTS.lineHeight;
+  if (!MEASURES[t.measure]) t.measure = TYPO_DEFAULTS.measure;
+  if (!LETTER_SPACING[t.letterSpacing]) t.letterSpacing = TYPO_DEFAULTS.letterSpacing;
+  if (!PARA_SPACING[t.paragraphSpacing]) t.paragraphSpacing = TYPO_DEFAULTS.paragraphSpacing;
+  t.justify = !!t.justify;
+  t.indent = !!t.indent;
+  t.hyphenate = !!t.hyphenate;
+  return t;
+}
+
+function loadTypoLocal() {
   try {
     const raw = localStorage.getItem(TYPO_KEY);
     if (!raw) return { ...TYPO_DEFAULTS };
-    return { ...TYPO_DEFAULTS, ...JSON.parse(raw) };
+    return normalizeTypo(JSON.parse(raw));
   } catch {
     return { ...TYPO_DEFAULTS };
   }
 }
 
-function saveTypo(typo) {
+function saveTypoLocal(typo) {
   try {
     localStorage.setItem(TYPO_KEY, JSON.stringify(typo));
   } catch {}
 }
 
+function setTypoSaveStatus(text, isError) {
+  const el = document.getElementById("typo-save-status");
+  if (!el) return;
+  el.textContent = text || "";
+  el.classList.toggle("error", !!isError);
+}
+
+async function persistTypoServer(typo) {
+  const t = normalizeTypo(typo);
+  setTypoSaveStatus("Saving…");
+  try {
+    await api("/api/settings", {
+      method: "PUT",
+      json: { reader_typography: t },
+    });
+    if (state.settings) state.settings.reader_typography = t;
+    setTypoSaveStatus("Saved to account");
+  } catch (e) {
+    setTypoSaveStatus(e.message || "Save failed (kept locally)", true);
+  }
+}
+
+function scheduleTypoServerSave(typo) {
+  clearTimeout(typoSaveTimer);
+  typoSaveTimer = setTimeout(() => persistTypoServer(typo), 450);
+}
+
+function loadTypo() {
+  if (state.readerTypo) return normalizeTypo(state.readerTypo);
+  return loadTypoLocal();
+}
+
+function saveTypo(typo) {
+  const t = normalizeTypo(typo);
+  state.readerTypo = t;
+  saveTypoLocal(t);
+  scheduleTypoServerSave(t);
+}
+
+function hydrateTypoFromSettings(settings) {
+  const server = settings?.reader_typography;
+  const local = loadTypoLocal();
+  const serverEmpty =
+    !server ||
+    (typeof server === "object" &&
+      Object.keys(server).length === 0);
+  let t;
+  if (!serverEmpty) {
+    t = normalizeTypo(server);
+  } else if (local && JSON.stringify(local) !== JSON.stringify(TYPO_DEFAULTS)) {
+    // One-time migrate browser prefs → server.
+    t = local;
+    scheduleTypoServerSave(t);
+  } else {
+    t = { ...TYPO_DEFAULTS };
+  }
+  state.readerTypo = t;
+  saveTypoLocal(t);
+  fillTypoForm(t);
+  applyReaderTypography(t);
+}
+
 function fillTypoForm(typo) {
   const form = document.getElementById("reader-typo-form");
   if (!form) return;
-  form.palette.value = typo.palette;
-  form.font.value = typo.font;
-  form.size.value = typo.size;
-  form.lineHeight.value = typo.lineHeight;
-  form.measure.value = typo.measure;
-  form.justify.checked = !!typo.justify;
+  const t = normalizeTypo(typo);
+  const setRadio = (name, value) => {
+    const el = form.querySelector(`input[name="${name}"][value="${value}"]`);
+    if (el) el.checked = true;
+  };
+  setRadio("palette", t.palette);
+  setRadio("font", t.font);
+  form.size.value = t.size;
+  setRadio("lineHeight", t.lineHeight);
+  setRadio("measure", t.measure);
+  setRadio("letterSpacing", t.letterSpacing);
+  setRadio("paragraphSpacing", t.paragraphSpacing);
+  form.justify.checked = !!t.justify;
+  if (form.indent) form.indent.checked = !!t.indent;
+  if (form.hyphenate) form.hyphenate.checked = !!t.hyphenate;
   const sv = document.getElementById("typo-size-val");
-  if (sv) sv.textContent = `${typo.size}%`;
+  if (sv) sv.textContent = `${t.size}%`;
 }
 
 function readTypoForm() {
   const form = document.getElementById("reader-typo-form");
   if (!form) return loadTypo();
-  return {
-    palette: form.palette.value || "dark",
-    font: form.font.value || "serif",
-    size: Number(form.size.value) || 100,
-    lineHeight: form.lineHeight.value || "normal",
-    measure: form.measure.value || "medium",
-    justify: !!form.justify.checked,
-  };
+  return normalizeTypo({
+    palette: form.palette?.value || "dark",
+    font: form.font?.value || "serif",
+    size: Number(form.size?.value) || 100,
+    lineHeight: form.lineHeight?.value || "normal",
+    measure: form.measure?.value || "medium",
+    justify: !!form.justify?.checked,
+    letterSpacing: form.letterSpacing?.value || "normal",
+    paragraphSpacing: form.paragraphSpacing?.value || "normal",
+    indent: !!form.indent?.checked,
+    hyphenate: !!form.hyphenate?.checked,
+  });
 }
 
 function applyReaderTypography(typo) {
-  const t = typo || loadTypo();
+  const t = normalizeTypo(typo || loadTypo());
   state.readerTypo = t;
   const pal = PALETTES[t.palette] || PALETTES.dark;
   const ff = FONTS[t.font] || FONTS.serif;
   const lh = LINE_HEIGHTS[t.lineHeight] || LINE_HEIGHTS.normal;
   const measure = MEASURES[t.measure] || MEASURES.medium;
+  const tracking = LETTER_SPACING[t.letterSpacing] || LETTER_SPACING.normal;
+  const paraGap = PARA_SPACING[t.paragraphSpacing] || PARA_SPACING.normal;
   const fs = `${(1.1 * t.size) / 100}rem`;
   const stage = document.querySelector(".reader-stage");
   if (stage) {
@@ -1373,22 +1649,30 @@ function applyReaderTypography(typo) {
     md.style.setProperty("--reader-pad-y", "2rem");
     md.style.setProperty("--reader-max-w", `${measure.maxCh}ch`);
     md.style.setProperty("--reader-align", t.justify ? "justify" : "start");
+    md.style.setProperty("--reader-tracking", tracking);
+    md.style.setProperty("--reader-para-gap", paraGap);
+    md.style.setProperty("--reader-indent", t.indent ? "1.25em" : "0");
+    md.style.setProperty("--reader-hyphens", t.hyphenate ? "auto" : "manual");
     md.style.background = pal.pageBg;
     md.style.color = pal.ink;
   }
   if (state.rendition) {
-    applyEpubTypography(t, pal, ff, lh, measure);
+    applyEpubTypography(t, pal, ff, lh, measure, tracking, paraGap);
   }
 }
 
-function applyEpubTypography(t, pal, ff, lh, measure) {
+function applyEpubTypography(t, pal, ff, lh, measure, tracking, paraGap) {
   if (!state.rendition) return;
-  pal = pal || PALETTES[(t || state.readerTypo || {}).palette] || PALETTES.dark;
-  ff = ff || FONTS[(t || state.readerTypo || {}).font] || FONTS.serif;
-  lh = lh || LINE_HEIGHTS[(t || state.readerTypo || {}).lineHeight] || LINE_HEIGHTS.normal;
-  measure = measure || MEASURES[(t || state.readerTypo || {}).measure] || MEASURES.medium;
-  t = t || state.readerTypo || TYPO_DEFAULTS;
+  t = normalizeTypo(t || state.readerTypo || TYPO_DEFAULTS);
+  pal = pal || PALETTES[t.palette] || PALETTES.dark;
+  ff = ff || FONTS[t.font] || FONTS.serif;
+  lh = lh || LINE_HEIGHTS[t.lineHeight] || LINE_HEIGHTS.normal;
+  measure = measure || MEASURES[t.measure] || MEASURES.medium;
+  tracking = tracking || LETTER_SPACING[t.letterSpacing] || LETTER_SPACING.normal;
+  paraGap = paraGap || PARA_SPACING[t.paragraphSpacing] || PARA_SPACING.normal;
   const align = t.justify ? "justify" : "start";
+  const hyphens = t.hyphenate ? "auto" : "manual";
+  const indent = t.indent ? "1.25em" : "0";
   try {
     state.rendition.themes.fontSize(`${t.size}%`);
   } catch {}
@@ -1402,7 +1686,9 @@ function applyEpubTypography(t, pal, ff, lh, measure) {
     background: `${pal.pageBg} !important`,
     "font-family": `${ff} !important`,
     "line-height": `${lh} !important`,
+    "letter-spacing": `${tracking} !important`,
     "text-align": `${align} !important`,
+    hyphens: `${hyphens} !important`,
     "margin-left": `${measure.epubMargin} !important`,
     "margin-right": `${measure.epubMargin} !important`,
   };
@@ -1414,8 +1700,15 @@ function applyEpubTypography(t, pal, ff, lh, measure) {
         color: `${pal.ink} !important`,
         "font-family": `${ff} !important`,
         "line-height": `${lh} !important`,
+        "letter-spacing": `${tracking} !important`,
       },
-      p: { "text-align": `${align} !important` },
+      p: {
+        "text-align": `${align} !important`,
+        "margin-top": `${paraGap} !important`,
+        "margin-bottom": `${paraGap} !important`,
+        "text-indent": `${indent} !important`,
+        hyphens: `${hyphens} !important`,
+      },
       a: { color: `${pal.link} !important` },
     });
   } catch {}

@@ -11,6 +11,8 @@
   <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/vditor@3.10.9/dist/index.css" />
+  <script src="https://cdn.jsdelivr.net/npm/vditor@3.10.9/dist/index.min.js"></script>
 </head>
 <body>
   <div id="app">
@@ -245,15 +247,20 @@
                   <label><input type="radio" name="palette" value="dark" /> Dark</label>
                   <label><input type="radio" name="palette" value="sepia" /> Sepia</label>
                   <label><input type="radio" name="palette" value="light" /> Light</label>
+                  <label><input type="radio" name="palette" value="paper" /> Paper</label>
+                  <label><input type="radio" name="palette" value="night" /> Night</label>
+                  <label><input type="radio" name="palette" value="contrast" /> High contrast</label>
                 </fieldset>
                 <fieldset>
                   <legend>Font</legend>
                   <label><input type="radio" name="font" value="serif" /> Serif</label>
+                  <label><input type="radio" name="font" value="literata" /> Book</label>
                   <label><input type="radio" name="font" value="sans" /> Sans</label>
+                  <label><input type="radio" name="font" value="dyslexia" /> Dyslexia-friendly</label>
                   <label><input type="radio" name="font" value="mono" /> Mono</label>
                 </fieldset>
                 <label>Size
-                  <input type="range" name="size" min="80" max="160" step="5" />
+                  <input type="range" name="size" min="80" max="200" step="5" />
                   <span id="typo-size-val" class="typo-val"></span>
                 </label>
                 <fieldset>
@@ -268,7 +275,22 @@
                   <label><input type="radio" name="measure" value="medium" /> Medium</label>
                   <label><input type="radio" name="measure" value="wide" /> Wide</label>
                 </fieldset>
+                <fieldset>
+                  <legend>Letter spacing</legend>
+                  <label><input type="radio" name="letterSpacing" value="tight" /> Tight</label>
+                  <label><input type="radio" name="letterSpacing" value="normal" /> Normal</label>
+                  <label><input type="radio" name="letterSpacing" value="wide" /> Wide</label>
+                </fieldset>
+                <fieldset>
+                  <legend>Paragraph spacing</legend>
+                  <label><input type="radio" name="paragraphSpacing" value="compact" /> Compact</label>
+                  <label><input type="radio" name="paragraphSpacing" value="normal" /> Normal</label>
+                  <label><input type="radio" name="paragraphSpacing" value="roomy" /> Roomy</label>
+                </fieldset>
                 <label class="check"><input type="checkbox" name="justify" /> Justify</label>
+                <label class="check"><input type="checkbox" name="indent" /> First-line indent</label>
+                <label class="check"><input type="checkbox" name="hyphenate" /> Hyphenate</label>
+                <p id="typo-save-status" class="muted typo-save-status" aria-live="polite"></p>
               </form>
             </aside>
           </div>

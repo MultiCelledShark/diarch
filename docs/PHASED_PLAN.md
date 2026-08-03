@@ -127,19 +127,19 @@ LocalAI on the LAN (e.g. TrueNAS) drives covers and transcription. Phase 7 (Andr
 
 - **Transcribe** queues a `transcribe` job when `book.m4b` exists and LocalAI is configured.
 - Worker chunks audio (~10 min) via ffmpeg and calls LocalAI `/v1/audio/transcriptions` (`DIARCH_LOCALAI_TRANSCRIBE_MODEL`).
-- Result: `transcript.txt` (+ download link on work detail).
+- Result: `transcript.txt`; on success also writes `book.md` with `<!-- diarch:source=transcript -->` (won’t overwrite ebook-derived markdown) and sets `needs_review`.
 
 ### Other optionals skipped earlier
 
-| Origin | Item |
-|--------|------|
-| Phase 3 | Server-persisted reader typography (today: `localStorage` only) |
-| Phase 3 | Richer MD review editor (CodeMirror/Monaco) if toolbar+preview is not enough |
-| Phase 4 | Cover “reset to placeholder” / regenerate SVG from current title+authors |
-| Phase 4 | Attention one-click clear for soft flags without opening detail |
-| Phase 4 | **Fix metadata search / enrich** — new/indie ISBNs often missing from OL; Google needs `DIARCH_GOOGLE_BOOKS_KEY`; broaden providers / UX so Enrich is reliable beyond “not in catalog” |
-| Product | ebook2audiobook desktop watcher — [TODO-ebook2audiobook-watcher.md](TODO-ebook2audiobook-watcher.md) |
-| Phase 7 | Android thin client / KOReader sync — deferred |
+| Origin | Item | Status |
+|--------|------|--------|
+| Phase 3 | Server-persisted reader typography (`user_settings.reader_typography` + richer palette/font/spacing) | **Done** |
+| Phase 4 | Fix metadata search / enrich — fuzzy OL/Google/LoC queries, `{hits,notes}`, Google Books key docs, StoryGraph enrich + Integrations auth, subject→primary taxonomy on apply | **Done** |
+| Phase 3 | Richer MD review editor — Vditor IR (Typora-like live MD), Source/WYSIWYG toggle, outline, Ctrl+S / find-replace, dark theme | **Done** |
+| Phase 4 | Cover “reset to placeholder” / regenerate SVG from current title+authors (`POST …/cover/placeholder`) | **Done** |
+| Phase 4 | Attention one-click clear for soft flags without opening detail | **Done** |
+| Product | ebook2audiobook desktop watcher — [TODO-ebook2audiobook-watcher.md](TODO-ebook2audiobook-watcher.md) | Open |
+| Phase 7 | Android thin client / KOReader sync | Deferred |
 
 ---
 

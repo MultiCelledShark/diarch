@@ -45,6 +45,12 @@ impl Db {
     async fn migrate(&self) -> Result<()> {
         let sql = include_str!("migrations/001_init.sql");
         sqlx::raw_sql(sql).execute(&self.pool).await?;
+        // Additive columns for databases created before reader_typography existed.
+        let _ = sqlx::query(
+            "ALTER TABLE user_settings ADD COLUMN reader_typography TEXT NOT NULL DEFAULT '{}'",
+        )
+        .execute(&self.pool)
+        .await;
         Ok(())
     }
 
@@ -635,6 +641,30 @@ impl Db {
         )
         .bind(user_id.to_string())
         .bind(on as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Raw JSON object for reader typography preferences (may be `{}`).
+    pub async fn get_reader_typography_json(&self, user_id: Uuid) -> Result<String> {
+        let row = sqlx::query("SELECT reader_typography FROM user_settings WHERE user_id = ?")
+            .bind(user_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row
+            .map(|r| r.get::<String, _>("reader_typography"))
+            .unwrap_or_else(|| "{}".into()))
+    }
+
+    pub async fn set_reader_typography_json(&self, user_id: Uuid, json: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO user_settings (user_id, reader_infinite_scroll, reader_typography)
+             VALUES (?, 0, ?)
+             ON CONFLICT(user_id) DO UPDATE SET reader_typography = excluded.reader_typography",
+        )
+        .bind(user_id.to_string())
+        .bind(json)
         .execute(&self.pool)
         .await?;
         Ok(())
