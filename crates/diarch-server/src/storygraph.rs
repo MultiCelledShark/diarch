@@ -118,9 +118,13 @@ async fn fetch_list_html(state: &AppState, url: &str) -> Result<String> {
         .get(url)
         .header(
             "User-Agent",
-            "Diarch/0.1 (+personal library; StoryGraph pull)",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         )
-        .header("Accept", "text/html");
+        .header(
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
+        .header("Accept-Language", "en-US,en;q=0.9");
     if let Some(cookie) = &state.config.storygraph_cookie {
         let cookie_val = if cookie.contains('=') {
             cookie.clone()
@@ -133,7 +137,442 @@ async fn fetch_list_html(state: &AppState, url: &str) -> Result<String> {
     if !resp.status().is_success() {
         anyhow::bail!("HTTP {} for {url}", resp.status());
     }
-    Ok(resp.text().await?)
+    let text = resp.text().await?;
+    if looks_like_cloudflare_challenge(&text) {
+        anyhow::bail!(
+            "Cloudflare challenge from StoryGraph — set DIARCH_STORYGRAPH_COOKIE (remember_user_token)"
+        );
+    }
+    Ok(text)
+}
+
+fn looks_like_cloudflare_challenge(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    lower.contains("just a moment...")
+        || (lower.contains("cloudflare") && lower.contains("challenge"))
+        || lower.contains("cf-browser-verification")
+}
+
+/// Search StoryGraph browse for metadata enrich hits.
+/// Cookie strongly recommended (Cloudflare often blocks anonymous requests).
+pub async fn search_metadata(
+    state: &AppState,
+    title: &str,
+    author: Option<&str>,
+) -> Result<Vec<crate::metadata::MetaHit>> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Ok(vec![]);
+    }
+    if state.config.storygraph_cookie.is_none() {
+        anyhow::bail!("DIARCH_STORYGRAPH_COOKIE not set");
+    }
+
+    let mut term = title.to_string();
+    if let Some(a) = author.map(str::trim).filter(|s| !s.is_empty()) {
+        term.push(' ');
+        term.push_str(a);
+    }
+    let url = format!(
+        "https://app.thestorygraph.com/browse?search_term={}",
+        urlencoding_encode(&term)
+    );
+    let html = fetch_list_html(state, &url).await?;
+    let mut paired = parse_sg_browse_paired(&html);
+    paired.sort_by_key(|(_, h)| {
+        let exact = diarch_core::titles_match(&h.title, title);
+        (!exact, h.title.to_ascii_lowercase())
+    });
+    paired.truncate(8);
+
+    let enrich_n = paired.len().min(3);
+    for (id, hit) in paired.iter_mut().take(enrich_n) {
+        if let Ok(Some(detail)) = fetch_book_metadata(state, id).await {
+            if hit.description.is_none() {
+                hit.description = detail.description;
+            }
+            if hit.isbn.is_none() {
+                hit.isbn = detail.isbn;
+            }
+            if hit.cover_url.is_none() {
+                hit.cover_url = detail.cover_url;
+            }
+            if hit.subjects.is_empty() {
+                hit.subjects = detail.subjects;
+            }
+        }
+    }
+
+    let _ = state
+        .db
+        .set_integration_health("storygraph", "ok", None, true)
+        .await;
+    Ok(paired.into_iter().map(|(_, h)| h).collect())
+}
+
+/// Look up a StoryGraph book page by id (from `sg_book_id` or browse).
+pub async fn fetch_book_metadata(
+    state: &AppState,
+    book_id: &str,
+) -> Result<Option<crate::metadata::MetaHit>> {
+    let book_id = book_id.trim();
+    if book_id.is_empty() || book_id == "new" {
+        return Ok(None);
+    }
+    if state.config.storygraph_cookie.is_none() {
+        anyhow::bail!("DIARCH_STORYGRAPH_COOKIE not set");
+    }
+    let url = format!("https://app.thestorygraph.com/books/{book_id}");
+    let html = fetch_list_html(state, &url).await?;
+    Ok(parse_sg_book_page(&html, book_id))
+}
+
+/// ISBN search via StoryGraph browse.
+pub async fn lookup_isbn_metadata(
+    state: &AppState,
+    isbn: &str,
+) -> Result<Option<crate::metadata::MetaHit>> {
+    let isbn = isbn.replace('-', "");
+    if isbn.is_empty() {
+        return Ok(None);
+    }
+    if state.config.storygraph_cookie.is_none() {
+        anyhow::bail!("DIARCH_STORYGRAPH_COOKIE not set");
+    }
+    let url = format!(
+        "https://app.thestorygraph.com/browse?search_term={}",
+        urlencoding_encode(&isbn)
+    );
+    let html = fetch_list_html(state, &url).await?;
+    let paired = parse_sg_browse_paired(&html);
+    let want = isbn.to_ascii_lowercase();
+    if let Some((id, hit)) = paired.into_iter().find(|(_, h)| {
+        h.isbn
+            .as_deref()
+            .map(|i| i.replace('-', "").eq_ignore_ascii_case(&want))
+            .unwrap_or(false)
+    }) {
+        if let Ok(Some(detail)) = fetch_book_metadata(state, &id).await {
+            return Ok(Some(detail));
+        }
+        return Ok(Some(hit));
+    }
+    Ok(None)
+}
+
+fn urlencoding_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Parse browse / search result panes into metadata hits.
+pub fn parse_sg_browse_hits(html: &str) -> Vec<crate::metadata::MetaHit> {
+    parse_sg_browse_paired(html)
+        .into_iter()
+        .map(|(_, h)| h)
+        .collect()
+}
+
+fn parse_sg_browse_paired(html: &str) -> Vec<(String, crate::metadata::MetaHit)> {
+    let mut hits = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let starts = book_pane_starts(html);
+    for (i, &abs) in starts.iter().enumerate() {
+        let end = starts.get(i + 1).copied().unwrap_or(html.len());
+        let chunk = &html[abs..end.min(abs + 16_000)];
+        if let Some((id, hit)) = parse_browse_pane(chunk) {
+            let key = hit
+                .isbn
+                .clone()
+                .unwrap_or_else(|| normalize_key(&hit.title));
+            if seen.insert(key) {
+                hits.push((id, hit));
+            }
+        }
+    }
+    hits
+}
+
+/// Offsets of top-level `book-pane` cards (not `book-pane-*` subclasses).
+fn book_pane_starts(html: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    while let Some(rel) = html[start..].find("book-pane") {
+        let abs = start + rel;
+        let after_idx = abs + "book-pane".len();
+        let next = html.as_bytes().get(after_idx).copied();
+        if next != Some(b'-') {
+            out.push(abs);
+        }
+        start = after_idx;
+    }
+    out
+}
+
+fn parse_browse_pane(chunk: &str) -> Option<(String, crate::metadata::MetaHit)> {
+    let id = extract_attr_after(chunk, "data-book-id=\"")?;
+    if id.is_empty() || id == "new" {
+        return None;
+    }
+    let title = extract_book_title_for_id(chunk, &id)?;
+    if title.eq_ignore_ascii_case("unknown")
+        || title.eq_ignore_ascii_case("books")
+        || title.to_ascii_lowercase().starts_with("see all")
+    {
+        return None;
+    }
+    let authors = extract_author(chunk).unwrap_or_default();
+    let isbn = extract_isbn_uid(chunk);
+    let cover_url = extract_cover_url(chunk);
+    let mut subjects = extract_teal_tags(chunk);
+    let is_audiobook = chunk.to_ascii_lowercase().contains("audiobook")
+        || chunk.to_ascii_lowercase().contains("audio edition");
+    if is_audiobook && !subjects.iter().any(|s| s.eq_ignore_ascii_case("audiobook")) {
+        subjects.push("audiobook".into());
+    }
+    Some((
+        id,
+        crate::metadata::MetaHit {
+            title,
+            authors,
+            isbn,
+            description: None,
+            subjects,
+            source: "storygraph".into(),
+            cover_url,
+        },
+    ))
+}
+
+/// Parse a StoryGraph book detail page into a MetaHit.
+pub fn parse_sg_book_page(html: &str, book_id: &str) -> Option<crate::metadata::MetaHit> {
+    let title = extract_detail_title(html).or_else(|| {
+        extract_meta_content(html, "og:title").and_then(|t| {
+            t.rsplit_once(" by ")
+                .map(|(title, _)| title.trim().to_string())
+                .or(Some(t))
+        })
+    })?;
+    let authors = extract_author(html)
+        .or_else(|| {
+            extract_meta_content(html, "og:title").and_then(|t| {
+                t.rsplit_once(" by ")
+                    .map(|(_, a)| a.trim().to_string())
+                    .filter(|a| !a.is_empty())
+            })
+        })
+        .unwrap_or_default();
+    let isbn = extract_isbn_uid(html).filter(|s| {
+        let lower = s.to_ascii_lowercase();
+        lower != "none" && lower != "null" && !lower.is_empty()
+    });
+    let description =
+        extract_description(html).or_else(|| extract_meta_content(html, "og:description"));
+    let cover_url = extract_cover_url(html).or_else(|| extract_meta_content(html, "og:image"));
+    let subjects = extract_teal_tags(html);
+    let _ = book_id;
+    Some(crate::metadata::MetaHit {
+        title,
+        authors,
+        isbn,
+        description,
+        subjects,
+        source: "storygraph".into(),
+        cover_url,
+    })
+}
+
+fn extract_attr_after(hay: &str, marker: &str) -> Option<String> {
+    let rest = hay.split(marker).nth(1)?;
+    let val = rest.split('"').next()?.trim();
+    if val.is_empty() {
+        None
+    } else {
+        Some(val.to_string())
+    }
+}
+
+fn extract_book_title_for_id(chunk: &str, id: &str) -> Option<String> {
+    let marker = format!("href=\"/books/{id}\"");
+    for part in chunk.split(&marker).skip(1) {
+        let title = part
+            .split('>')
+            .nth(1)
+            .and_then(|s| s.split('<').next())
+            .map(|s| decode_basic_entities(s.trim()))
+            .filter(|s| !s.is_empty());
+        let Some(title) = title else {
+            continue;
+        };
+        if title.to_ascii_lowercase().contains("edition") {
+            continue;
+        }
+        return Some(title);
+    }
+    None
+}
+
+fn extract_detail_title(html: &str) -> Option<String> {
+    if let Some(rest) = html.split("book-title-author-and-series").nth(1) {
+        if let Some(h3) = rest.split("<h3").nth(1) {
+            let after = h3.split('>').nth(1)?;
+            let title = after
+                .split("</h3>")
+                .next()?
+                .split('<')
+                .next()
+                .map(|s| decode_basic_entities(s.trim()))
+                .filter(|s| !s.is_empty())?;
+            return Some(title);
+        }
+    }
+    None
+}
+
+fn extract_author(html: &str) -> Option<String> {
+    let part = html.split("href=\"/authors/").nth(1)?;
+    part.split('>')
+        .nth(1)
+        .and_then(|s| s.split('<').next())
+        .map(|s| decode_basic_entities(s.trim()))
+        .filter(|s| !s.is_empty())
+}
+
+fn extract_isbn_uid(html: &str) -> Option<String> {
+    let rest = html.split("ISBN/UID:").nth(1)?;
+    let after = rest.split("</span>").nth(1).unwrap_or(rest);
+    let raw = after
+        .split('<')
+        .next()?
+        .trim()
+        .trim_start_matches([':', ' '])
+        .trim();
+    let digits: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == 'X' || *c == 'x')
+        .collect();
+    if digits.len() == 10 || digits.len() == 13 {
+        Some(digits.to_ascii_uppercase())
+    } else if raw.eq_ignore_ascii_case("none") {
+        None
+    } else if !raw.is_empty() && raw.len() < 40 {
+        Some(raw.to_string())
+    } else {
+        None
+    }
+}
+
+fn extract_cover_url(html: &str) -> Option<String> {
+    if let Some(rest) = html.split("book-cover").nth(1) {
+        if let Some(src) = extract_img_src(rest) {
+            if src.contains("cdn.thestorygraph.com") || src.contains("covers") {
+                return Some(src);
+            }
+        }
+    }
+    for part in html.split("src=\"").skip(1) {
+        let src = part.split('"').next()?.to_string();
+        if src.contains("cdn.thestorygraph.com") {
+            return Some(src);
+        }
+    }
+    None
+}
+
+fn extract_img_src(html: &str) -> Option<String> {
+    let rest = html.split("src=\"").nth(1)?;
+    let src = rest.split('"').next()?.trim();
+    if src.is_empty() {
+        None
+    } else {
+        Some(src.to_string())
+    }
+}
+
+fn extract_description(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let idx = lower.find(">description</h4>")?;
+    let after = &html[idx..];
+    if let Some(rest) = after.split("trix-content").nth(1) {
+        let after_gt = rest.split('>').nth(1)?;
+        let text = after_gt.split("</p>").next()?;
+        let plain = decode_basic_entities(strip_tags(text).trim());
+        if plain.len() > 20 {
+            return Some(plain);
+        }
+    }
+    None
+}
+
+fn extract_teal_tags(html: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for part in html.split("text-teal-").skip(1) {
+        let Some(after) = part.split('>').nth(1) else {
+            continue;
+        };
+        let Some(tag) = after
+            .split('<')
+            .next()
+            .map(|s| decode_basic_entities(s.trim()))
+            .filter(|s| !s.is_empty() && s.len() < 48)
+        else {
+            continue;
+        };
+        if seen.insert(tag.to_ascii_lowercase()) {
+            tags.push(tag);
+        }
+        if tags.len() >= 8 {
+            break;
+        }
+    }
+    tags
+}
+
+fn extract_meta_content(html: &str, prop: &str) -> Option<String> {
+    let markers = [
+        format!("property=\"{prop}\""),
+        format!("name=\"{prop}\""),
+        format!("property='{prop}'"),
+    ];
+    for marker in markers {
+        if let Some(rest) = html.split(&marker).nth(1) {
+            if let Some(c) = extract_attr_after(rest, "content=\"").or_else(|| {
+                rest.split("content='")
+                    .nth(1)
+                    .and_then(|s| s.split('\'').next().map(|v| v.to_string()))
+            }) {
+                let c = decode_basic_entities(c.trim());
+                if !c.is_empty() {
+                    return Some(c);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn strip_tags(s: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Parse StoryGraph list/profile HTML into book rows.
@@ -400,5 +839,73 @@ mod tests {
         let books = parse_sg_html(html);
         assert_eq!(books.len(), 1);
         assert_eq!(books[0].title, "Real Title");
+    }
+
+    #[test]
+    fn parses_browse_pane_isbn_cover_and_tags() {
+        let html = r#"
+        <div class="book-pane break-words" data-book-id="ac3ea915-993d-4f30-8632-0f91e4ad0704">
+          <div class="book-cover">
+            <a href="/books/ac3ea915-993d-4f30-8632-0f91e4ad0704">
+              <img alt="Project Hail Mary by Andy Weir" src="https://cdn.thestorygraph.com/cover123">
+            </a>
+          </div>
+          <div class="book-title-author-and-series">
+            <h3><a href="/books/ac3ea915-993d-4f30-8632-0f91e4ad0704">Project Hail Mary</a>
+            <p><a href="/authors/f58b6fd4-b07b-478b-8416-8d72f26a82f1">Andy Weir</a></p>
+            </h3>
+          </div>
+          <div class="edition-info">
+            <p><span class="font-semibold">ISBN/UID:</span>  9780593135204</p>
+          </div>
+          <div class="book-pane-tag-section">
+            <span class="inline-block text-xs text-teal-700">fiction</span>
+            <span class="inline-block text-xs text-teal-700">science fiction</span>
+            <span class="inline-block text-xs text-pink-500">adventurous</span>
+          </div>
+        </div>"#;
+        let hits = parse_sg_browse_hits(html);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Project Hail Mary");
+        assert_eq!(hits[0].authors, "Andy Weir");
+        assert_eq!(hits[0].isbn.as_deref(), Some("9780593135204"));
+        assert_eq!(hits[0].source, "storygraph");
+        assert!(hits[0]
+            .cover_url
+            .as_deref()
+            .unwrap()
+            .contains("cdn.thestorygraph.com"));
+        assert!(hits[0].subjects.iter().any(|s| s == "fiction"));
+        assert!(hits[0].subjects.iter().any(|s| s == "science fiction"));
+        assert!(!hits[0].subjects.iter().any(|s| s == "adventurous"));
+    }
+
+    #[test]
+    fn parses_book_detail_description() {
+        let html = r#"
+        <meta property="og:title" content="Project Hail Mary by Andy Weir">
+        <meta property="og:description" content="Short blurb from og tags that is long enough.">
+        <meta property="og:image" content="https://cdn.thestorygraph.com/ogcover">
+        <div class="book-title-author-and-series">
+          <h3 class="font-semibold">
+            Project Hail Mary
+          </h3>
+          <p><a href="/authors/f58b6fd4">Andy Weir</a></p>
+        </div>
+        <p><span class="font-semibold">ISBN/UID:</span>  9780593135204</p>
+        <h4>Description</h4>
+        <p class="trix-content mt-3">Ryland Grace is the sole survivor on a desperate, last-chance mission—and if he fails, humanity and the earth itself will perish.</p>
+        <span class="text-teal-700">fiction</span>
+        "#;
+        let hit = parse_sg_book_page(html, "ac3ea915").expect("hit");
+        assert_eq!(hit.title, "Project Hail Mary");
+        assert_eq!(hit.authors, "Andy Weir");
+        assert_eq!(hit.isbn.as_deref(), Some("9780593135204"));
+        assert!(hit
+            .description
+            .as_deref()
+            .unwrap()
+            .contains("Ryland Grace"));
+        assert!(hit.subjects.iter().any(|s| s == "fiction"));
     }
 }

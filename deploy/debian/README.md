@@ -49,7 +49,7 @@ AAX convert needs free disk under `/var/lib/diarch` (temp `.m4b` beside the work
 | Feature | Config | Needs |
 |---------|--------|-------|
 | StoryGraph sync | `DIARCH_STORYGRAPH_USER`, `DIARCH_STORYGRAPH_COOKIE` (`remember_user_token`) | Outbound HTTPS to `app.thestorygraph.com` |
-| Google Books enrich | `DIARCH_GOOGLE_BOOKS_KEY` | Outbound HTTPS to `googleapis.com` (unauthenticated quota is easy to hit) |
+| Google Books enrich | `DIARCH_GOOGLE_BOOKS_KEY` | Outbound HTTPS to `googleapis.com` (unauthenticated quota is easy to hit; set a key for indie/recent titles OL/LoC lack) |
 | Open Library / LoC | none | Outbound HTTPS to `openlibrary.org`, Library of Congress |
 | LocalAI / Hermes covers + transcription | `DIARCH_LOCALAI_URL`, optional `DIARCH_LOCALAI_IMAGE_MODEL` / `DIARCH_LOCALAI_TRANSCRIBE_MODEL` / `DIARCH_HERMES_URL` | Reachable from Keystone (TrueNAS LocalAI or local) |
 

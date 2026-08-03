@@ -629,7 +629,7 @@ async function openDetail(id) {
     const isbn = String(fd.get("isbn") || "").trim();
     const title = String(fd.get("title") || "").trim();
     const authors = String(fd.get("authors") || "").trim();
-    msg(isbn ? `Looking up ISBN ${isbn}…` : "Searching Open Library / Google Books / LoC…");
+    msg(isbn ? `Looking up ISBN ${isbn}…` : "Searching Open Library / Google Books / LoC / StoryGraph…");
     showMetaHits([]);
     try {
       let providerNote = "";
@@ -664,22 +664,27 @@ async function openDetail(id) {
       }
       const q = new URLSearchParams({ title });
       if (authors) q.set("author", authors);
-      const hits = await api(`/api/metadata/search?${q}`);
-      if (!Array.isArray(hits) || !hits.length) {
+      const report = await api(`/api/metadata/search?${q}`);
+      const hits = Array.isArray(report) ? report : report?.hits || [];
+      const notes = Array.isArray(report?.notes) ? report.notes : [];
+      const noteText = notes.join("; ");
+      if (!hits.length) {
         const base = providerNote
           ? `${providerNote}; title search also empty`
           : "No metadata match found";
-        const hint = /rate limited|DIARCH_GOOGLE_BOOKS_KEY/i.test(providerNote)
-          ? " — set DIARCH_GOOGLE_BOOKS_KEY for Google Books quota"
-          : "";
-        msg(base + hint, true);
+        const extra = noteText ? ` — ${noteText}` : "";
+        const hint =
+          !noteText && /rate limited|DIARCH_GOOGLE_BOOKS_KEY/i.test(providerNote)
+            ? " — set DIARCH_GOOGLE_BOOKS_KEY for Google Books quota"
+            : "";
+        msg(base + extra + hint, true);
         return;
       }
-      if (hits.length === 1) {
-        await applyMetaHit(hits[0]);
-        return;
-      }
-      msg(`Found ${hits.length} matches — pick one`);
+      msg(
+        hits.length === 1
+          ? `Found 1 match${noteText ? ` (${noteText})` : ""} — confirm below`
+          : `Found ${hits.length} matches${noteText ? ` (${noteText})` : ""} — pick one`
+      );
       showMetaHits(hits);
     } catch (e) {
       msg(e.message || String(e), true);

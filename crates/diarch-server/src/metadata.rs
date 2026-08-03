@@ -33,6 +33,14 @@ pub struct LookupReport {
     pub providers: Vec<ProviderStatus>,
 }
 
+/// Title/author search result with optional provider diagnostics.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct SearchReport {
+    pub hits: Vec<MetaHit>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+}
+
 /// Combined local (EPUB) + Open Library subjects mapped onto Diarch codes.
 #[derive(Debug, Clone, Default)]
 pub struct TaxonomyHint {
@@ -165,6 +173,39 @@ pub async fn lookup_isbn_report(state: &AppState, isbn: &str) -> Result<LookupRe
                 .await;
             providers.push(ProviderStatus {
                 name: "googlebooks".into(),
+                status: "error".into(),
+                detail: Some(detail),
+            });
+        }
+    }
+
+    match crate::storygraph::lookup_isbn_metadata(state, &isbn).await {
+        Ok(Some(hit)) => {
+            providers.push(ProviderStatus {
+                name: "storygraph".into(),
+                status: "hit".into(),
+                detail: None,
+            });
+            return Ok(LookupReport {
+                hit: Some(hit),
+                providers,
+            });
+        }
+        Ok(None) => {
+            providers.push(ProviderStatus {
+                name: "storygraph".into(),
+                status: "miss".into(),
+                detail: if state.config.storygraph_cookie.is_none() {
+                    Some("DIARCH_STORYGRAPH_COOKIE not set".into())
+                } else {
+                    None
+                },
+            });
+        }
+        Err(e) => {
+            let detail = e.to_string();
+            providers.push(ProviderStatus {
+                name: "storygraph".into(),
                 status: "error".into(),
                 detail: Some(detail),
             });
@@ -547,48 +588,242 @@ fn meta_hits_from_google_volumes(v: &Value, limit: usize) -> Vec<MetaHit> {
         .collect()
 }
 
+/// Strip subtitle after `:`, em-dash, or ` - ` for softer catalog queries.
+pub fn core_title(title: &str) -> String {
+    let t = title.trim();
+    let cut = t
+        .find(':')
+        .into_iter()
+        .chain(t.find('—'))
+        .chain(t.find(" - ").map(|i| i))
+        .min()
+        .unwrap_or(t.len());
+    let core = t[..cut].trim();
+    if core.is_empty() {
+        t.to_string()
+    } else {
+        core.to_string()
+    }
+}
+
+fn hit_dup(a: &MetaHit, b: &MetaHit) -> bool {
+    if let (Some(ia), Some(ib)) = (a.isbn.as_deref(), b.isbn.as_deref()) {
+        let ia = ia.replace('-', "");
+        let ib = ib.replace('-', "");
+        if !ia.is_empty() && ia == ib {
+            return true;
+        }
+    }
+    a.title.eq_ignore_ascii_case(&b.title) && a.authors.eq_ignore_ascii_case(&b.authors)
+}
+
+fn merge_hits(dest: &mut Vec<MetaHit>, incoming: Vec<MetaHit>, cap: usize) {
+    for hit in incoming {
+        if dest.len() >= cap {
+            break;
+        }
+        if dest.iter().any(|h| hit_dup(h, &hit)) {
+            continue;
+        }
+        dest.push(hit);
+    }
+}
+
+fn push_note(notes: &mut Vec<String>, note: String) {
+    if !notes.iter().any(|n| n == &note) {
+        notes.push(note);
+    }
+}
+
+/// Multi-strategy title search across Open Library, Google Books, and LoC.
 pub async fn search_title(
     state: &AppState,
     title: &str,
     author: Option<&str>,
-) -> Result<Vec<MetaHit>> {
-    let mut hits = Vec::new();
-    if let Ok(ol) = open_library_search(state, title, author).await {
-        hits.extend(ol);
+) -> Result<SearchReport> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Ok(SearchReport::default());
     }
-    if hits.len() < 8 {
-        if let Ok(gb) = google_books_search(state, title, author).await {
-            for hit in gb {
-                if hits.len() >= 8 {
-                    break;
-                }
-                let dup = hits.iter().any(|h| {
-                    h.title.eq_ignore_ascii_case(&hit.title)
-                        && h.authors.eq_ignore_ascii_case(&hit.authors)
-                });
-                if !dup {
-                    hits.push(hit);
+    let author = author.map(str::trim).filter(|s| !s.is_empty());
+    let core = core_title(title);
+    let core_differs = !core.eq_ignore_ascii_case(title);
+
+    let mut hits = Vec::new();
+    let mut notes = Vec::new();
+    const CAP: usize = 12;
+
+    // Open Library: exact-ish title= then general q=
+    let ol_queries: Vec<(Option<&str>, OlMode)> = {
+        let mut v = vec![
+            (author, OlMode::Title),
+            (None, OlMode::Title),
+            (author, OlMode::General),
+            (None, OlMode::General),
+        ];
+        if core_differs {
+            v.push((author, OlMode::TitleCore));
+            v.push((None, OlMode::TitleCore));
+            v.push((author, OlMode::GeneralCore));
+            v.push((None, OlMode::GeneralCore));
+        }
+        v
+    };
+    for (auth, mode) in ol_queries {
+        if hits.len() >= CAP {
+            break;
+        }
+        let qtitle = match mode {
+            OlMode::Title | OlMode::General => title,
+            OlMode::TitleCore | OlMode::GeneralCore => core.as_str(),
+        };
+        let general = matches!(mode, OlMode::General | OlMode::GeneralCore);
+        match open_library_search(state, qtitle, auth, general).await {
+            Ok(batch) => merge_hits(&mut hits, batch, CAP),
+            Err(e) => push_note(&mut notes, format!("openlibrary: {e}")),
+        }
+    }
+
+    // Google Books: soft q= and intitle variants
+    let gb_specs: Vec<(String, Option<&str>)> = {
+        let mut v = Vec::new();
+        // Soft general queries first (better for indie / odd titles)
+        v.push((title.to_string(), author));
+        v.push((title.to_string(), None));
+        if core_differs {
+            v.push((core.clone(), author));
+            v.push((core.clone(), None));
+        }
+        v
+    };
+    let mut gb_saw_ok = false;
+    let mut gb_error_note: Option<String> = None;
+    for (t, auth) in &gb_specs {
+        if hits.len() >= CAP {
+            break;
+        }
+        // Soft q=
+        match google_books_search(state, t, *auth, false).await {
+            Ok(GoogleSearchOutcome::Hits(batch)) => {
+                gb_saw_ok = true;
+                merge_hits(&mut hits, batch, CAP);
+            }
+            Ok(GoogleSearchOutcome::Error(msg)) => {
+                gb_error_note = Some(format!("googlebooks: {msg}"));
+            }
+            Ok(GoogleSearchOutcome::Empty) => {}
+            Err(e) => gb_error_note = Some(format!("googlebooks: {e}")),
+        }
+        if hits.len() >= CAP {
+            break;
+        }
+        // Stricter intitle:
+        match google_books_search(state, t, *auth, true).await {
+            Ok(GoogleSearchOutcome::Hits(batch)) => {
+                gb_saw_ok = true;
+                merge_hits(&mut hits, batch, CAP);
+            }
+            Ok(GoogleSearchOutcome::Error(msg)) => {
+                gb_error_note = Some(format!("googlebooks: {msg}"));
+            }
+            Ok(GoogleSearchOutcome::Empty) => {}
+            Err(e) => gb_error_note = Some(format!("googlebooks: {e}")),
+        }
+    }
+    if !gb_saw_ok {
+        if let Some(n) = gb_error_note {
+            push_note(&mut notes, n);
+        } else if state.config.google_books_key.is_none() {
+            push_note(
+                &mut notes,
+                "googlebooks: no hits (set DIARCH_GOOGLE_BOOKS_KEY for reliable indie/recent coverage)"
+                    .into(),
+            );
+        }
+    }
+
+    // LoC when still sparse
+    if hits.len() < 3 {
+        for (t, auth) in [
+            (title, author),
+            (title, None),
+            (core.as_str(), author),
+            (core.as_str(), None),
+        ] {
+            if hits.len() >= CAP {
+                break;
+            }
+            if let Ok(batch) = loc_search(state, t, auth).await {
+                merge_hits(&mut hits, batch, CAP);
+            }
+        }
+    }
+
+    // StoryGraph browse (cookie); useful when OL/GB miss indie titles the user tracks on SG.
+    if hits.len() < CAP {
+        match crate::storygraph::search_metadata(state, title, author).await {
+            Ok(batch) => merge_hits(&mut hits, batch, CAP),
+            Err(e) => {
+                let msg = e.to_string();
+                // Missing cookie is expected for many installs — only note when we still lack hits
+                // or when the failure is more than "not configured".
+                if hits.is_empty()
+                    || !msg.contains("DIARCH_STORYGRAPH_COOKIE not set")
+                {
+                    push_note(&mut notes, format!("storygraph: {msg}"));
                 }
             }
         }
     }
-    if hits.is_empty() {
-        if let Ok(loc) = loc_search(state, title, author).await {
-            hits.extend(loc);
-        }
+
+    if hits.is_empty() && notes.is_empty() {
+        push_note(
+            &mut notes,
+            "no catalog hits — indie/recent titles may need an ISBN, DIARCH_GOOGLE_BOOKS_KEY, or StoryGraph cookie"
+                .into(),
+        );
     }
-    Ok(hits)
+
+    Ok(SearchReport { hits, notes })
+}
+
+#[derive(Clone, Copy)]
+enum OlMode {
+    Title,
+    TitleCore,
+    General,
+    GeneralCore,
+}
+
+enum GoogleSearchOutcome {
+    Hits(Vec<MetaHit>),
+    Empty,
+    Error(String),
 }
 
 async fn google_books_search(
     state: &AppState,
     title: &str,
     author: Option<&str>,
-) -> Result<Vec<MetaHit>> {
-    let mut q = format!("intitle:{}", title.trim());
+    intitle: bool,
+) -> Result<GoogleSearchOutcome> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Ok(GoogleSearchOutcome::Empty);
+    }
+    let mut q = if intitle {
+        format!("intitle:{}", title)
+    } else {
+        title.to_string()
+    };
     if let Some(a) = author.map(str::trim).filter(|s| !s.is_empty()) {
-        q.push_str(" inauthor:");
-        q.push_str(a);
+        if intitle {
+            q.push_str(" inauthor:");
+            q.push_str(a);
+        } else {
+            q.push(' ');
+            q.push_str(a);
+        }
     }
     let url = google_books_volumes_url(state, &q);
     let resp = match state.http.get(&url).send().await {
@@ -598,40 +833,59 @@ async fn google_books_search(
                 .db
                 .set_integration_health("googlebooks", "broken", Some(&e.to_string()), false)
                 .await;
-            return Ok(vec![]);
+            return Ok(GoogleSearchOutcome::Error(e.to_string()));
         }
     };
     let code = resp.status().as_u16();
     let (kind, detail) = classify_google_http(code);
     if kind == "error" {
-        let msg = detail.unwrap_or("HTTP error from Google Books");
+        let msg = detail.unwrap_or("HTTP error from Google Books").to_string();
         let health = if code == 429 { "degraded" } else { "broken" };
         let _ = state
             .db
-            .set_integration_health("googlebooks", health, Some(msg), false)
+            .set_integration_health("googlebooks", health, Some(&msg), false)
             .await;
-        return Ok(vec![]);
+        return Ok(GoogleSearchOutcome::Error(msg));
     }
     let v: Value = resp.json().await?;
     let _ = state
         .db
         .set_integration_health("googlebooks", "ok", None, true)
         .await;
-    Ok(meta_hits_from_google_volumes(&v, 5))
+    let batch = meta_hits_from_google_volumes(&v, 5);
+    if batch.is_empty() {
+        Ok(GoogleSearchOutcome::Empty)
+    } else {
+        Ok(GoogleSearchOutcome::Hits(batch))
+    }
 }
 
 async fn open_library_search(
     state: &AppState,
     title: &str,
     author: Option<&str>,
+    general_q: bool,
 ) -> Result<Vec<MetaHit>> {
-    let mut url = format!(
-        "https://openlibrary.org/search.json?title={}",
-        urlencoding_encode(title)
-    );
-    if let Some(a) = author {
-        url.push_str(&format!("&author={}", urlencoding_encode(a)));
-    }
+    let mut url = if general_q {
+        let mut q = title.trim().to_string();
+        if let Some(a) = author.map(str::trim).filter(|s| !s.is_empty()) {
+            q.push(' ');
+            q.push_str(a);
+        }
+        format!(
+            "https://openlibrary.org/search.json?q={}",
+            urlencoding_encode(&q)
+        )
+    } else {
+        let mut url = format!(
+            "https://openlibrary.org/search.json?title={}",
+            urlencoding_encode(title)
+        );
+        if let Some(a) = author.map(str::trim).filter(|s| !s.is_empty()) {
+            url.push_str(&format!("&author={}", urlencoding_encode(a)));
+        }
+        url
+    };
     url.push_str("&limit=5");
     let resp = state.http.get(&url).send().await?;
     if !resp.status().is_success() {
@@ -880,5 +1134,71 @@ mod tests {
         assert_eq!(hit.isbn.as_deref(), Some("9780140328721"));
         assert_eq!(hit.source, "googlebooks");
         assert!(hit.cover_url.unwrap().starts_with("https://"));
+    }
+
+    #[test]
+    fn core_title_strips_subtitle() {
+        assert_eq!(
+            core_title("Lolcows: The Internet's Never-Ending Tragedy"),
+            "Lolcows"
+        );
+        assert_eq!(core_title("Foo — Bar"), "Foo");
+        assert_eq!(core_title("Foo - Bar"), "Foo");
+        assert_eq!(core_title("Plain Title"), "Plain Title");
+        assert_eq!(core_title("  "), "");
+    }
+
+    #[test]
+    fn merge_hits_dedupes_by_isbn_and_title_author() {
+        let mut dest = Vec::new();
+        merge_hits(
+            &mut dest,
+            vec![MetaHit {
+                title: "Lolcows".into(),
+                authors: "Luther Morgan".into(),
+                isbn: Some("979-8993801612".into()),
+                description: None,
+                subjects: vec![],
+                source: "openlibrary".into(),
+                cover_url: None,
+            }],
+            12,
+        );
+        merge_hits(
+            &mut dest,
+            vec![
+                MetaHit {
+                    title: "Lolcows".into(),
+                    authors: "Luther Morgan".into(),
+                    isbn: Some("9798993801612".into()),
+                    description: Some("dup isbn".into()),
+                    subjects: vec![],
+                    source: "googlebooks".into(),
+                    cover_url: None,
+                },
+                MetaHit {
+                    title: "Lolcows".into(),
+                    authors: "Luther Morgan".into(),
+                    isbn: None,
+                    description: Some("dup title".into()),
+                    subjects: vec![],
+                    source: "loc".into(),
+                    cover_url: None,
+                },
+                MetaHit {
+                    title: "Other".into(),
+                    authors: "Someone".into(),
+                    isbn: None,
+                    description: None,
+                    subjects: vec![],
+                    source: "googlebooks".into(),
+                    cover_url: None,
+                },
+            ],
+            12,
+        );
+        assert_eq!(dest.len(), 2);
+        assert_eq!(dest[0].source, "openlibrary");
+        assert_eq!(dest[1].title, "Other");
     }
 }

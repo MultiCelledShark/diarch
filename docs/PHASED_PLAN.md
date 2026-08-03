@@ -104,8 +104,8 @@ diarch-server (Axum) ── SQLite ── /var/lib/diarch/library
 | `DIARCH_LOCALAI_IMAGE_MODEL` | Image model (default `flux.2-klein-4b` when URL set) |
 | `DIARCH_LOCALAI_TRANSCRIBE_MODEL` | ASR model (default `nemo-parakeet-tdt-0.6b` when URL set) |
 | `DIARCH_AUDIBLE_KEY` | Audible activation bytes for AAX → M4B (never commit) |
-| `DIARCH_GOOGLE_BOOKS_KEY` | Google Books API key (optional; avoids unauthenticated 429) |
-| `DIARCH_STORYGRAPH_USER` / `DIARCH_STORYGRAPH_COOKIE` | SG pull |
+| `DIARCH_GOOGLE_BOOKS_KEY` | Google Books API key (optional; avoids unauthenticated 429; needed for many indie/recent titles) |
+| `DIARCH_STORYGRAPH_USER` / `DIARCH_STORYGRAPH_COOKIE` | SG pull + enrich (cookie required past Cloudflare) |
 | `DIARCH_REMARKABLE_TOKEN` | Unused for upload; **`rmapi` required** on laptop and Keystone |
 | `DIARCH_SHOW_AUDIO_GAPS` | Soft audio-gap badges |
 

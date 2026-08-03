@@ -1225,11 +1225,12 @@ async fn delete_work_removes_row_and_files() {
 async fn metadata_isbn_report_has_providers() {
     let (_dir, app, _) = test_app().await;
     let token = login(&app, "admin", "adminpass").await;
-    // Nonsense ISBN: Open Library miss; Google may be miss or error (429).
+    // Nonsense ISBN that OL does not map (0000000000000 wrongly hits a real work).
+    // Open Library miss; Google may be miss or error (429).
     let (status, body, _) = json_req(
         &app,
         "GET",
-        "/api/metadata/isbn/0000000000000",
+        "/api/metadata/isbn/1111111111111",
         Some(&token),
         None,
     )
@@ -1244,6 +1245,7 @@ async fn metadata_isbn_report_has_providers() {
         .collect();
     assert!(names.contains(&"openlibrary"), "{names:?}");
     assert!(names.contains(&"googlebooks"), "{names:?}");
+    assert!(names.contains(&"storygraph"), "{names:?}");
     for p in providers {
         let st = p["status"].as_str().unwrap_or("");
         assert!(
@@ -1256,6 +1258,15 @@ async fn metadata_isbn_report_has_providers() {
                 detail.contains("rate limited")
                     || detail.contains("DIARCH_GOOGLE_BOOKS_KEY")
                     || detail.contains("forbidden")
+                    || detail.contains("HTTP"),
+                "{detail}"
+            );
+        }
+        if st == "error" && p["name"] == "storygraph" {
+            let detail = p["detail"].as_str().unwrap_or("");
+            assert!(
+                detail.contains("DIARCH_STORYGRAPH_COOKIE")
+                    || detail.contains("Cloudflare")
                     || detail.contains("HTTP"),
                 "{detail}"
             );

@@ -1805,7 +1805,32 @@ async fn refresh_metadata(
         }
     }
 
-    // Title+author search (Open Library → LoC) when ISBN path left gaps.
+    // Prefer StoryGraph book page when already matched.
+    if let Some(sg_id) = work.sg_book_id.clone() {
+        if work.description.is_none()
+            || work.isbn.is_none()
+            || work.authors.is_empty()
+            || work.title.is_empty()
+            || work.title == "Untitled"
+        {
+            if let Ok(Some(hit)) = crate::storygraph::fetch_book_metadata(&state, &sg_id).await {
+                if work.isbn.is_none() {
+                    work.isbn = hit.isbn;
+                }
+                if work.authors.is_empty() && !hit.authors.is_empty() {
+                    work.authors = hit.authors;
+                }
+                if work.description.is_none() {
+                    work.description = hit.description;
+                }
+                if (work.title.is_empty() || work.title == "Untitled") && !hit.title.is_empty() {
+                    work.title = hit.title;
+                }
+            }
+        }
+    }
+
+    // Title+author search (Open Library → Google → LoC → StoryGraph) when ISBN path left gaps.
     let need_search = work.isbn.is_none()
         || work.authors.is_empty()
         || work.description.is_none()
@@ -1817,8 +1842,8 @@ async fn refresh_metadata(
         } else {
             Some(work.authors.as_str())
         };
-        if let Ok(hits) = metadata::search_title(&state, &work.title, author_ref).await {
-            if let Some(hit) = hits.into_iter().next() {
+        if let Ok(report) = metadata::search_title(&state, &work.title, author_ref).await {
+            if let Some(hit) = report.hits.into_iter().next() {
                 if work.isbn.is_none() {
                     work.isbn = hit.isbn;
                 }
@@ -1948,8 +1973,8 @@ async fn wishlist_add(
         } else {
             Some(authors.as_str())
         };
-        if let Ok(hits) = metadata::search_title(&state, &title, author_ref).await {
-            if let Some(hit) = hits.into_iter().next() {
+        if let Ok(report) = metadata::search_title(&state, &title, author_ref).await {
+            if let Some(hit) = report.hits.into_iter().next() {
                 if authors.is_empty() {
                     authors = hit.authors;
                 }
@@ -2014,7 +2039,7 @@ async fn meta_search(
     AuthUser(_): AuthUser,
     State(state): State<Arc<AppState>>,
     Query(q): Query<SearchQ>,
-) -> Result<Json<Vec<metadata::MetaHit>>, StatusCode> {
+) -> Result<Json<metadata::SearchReport>, StatusCode> {
     metadata::search_title(&state, &q.title, q.author.as_deref())
         .await
         .map(Json)
