@@ -1012,6 +1012,11 @@ async fn m4b_upload_attaches_and_streams_with_range() {
         tr["message"].as_str().unwrap().contains("DIARCH_LOCALAI_URL"),
         "{tr}"
     );
+
+    let (status, detail, _) =
+        json_req(&app, "GET", &format!("/api/works/{id}"), Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert!(detail.get("transcription_job").is_some());
 }
 
 #[tokio::test]

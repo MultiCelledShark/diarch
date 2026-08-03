@@ -320,6 +320,14 @@ async function openDetail(id) {
     null;
   const hasAudio = !!audio;
   const codes = data.codes || [];
+  const trJob = data.transcription_job || null;
+  const trStatus = trJob?.status || null;
+  const trBusy = trStatus === "pending" || trStatus === "running";
+  const trFailed = trStatus === "failed";
+  let transcriptBadge = "";
+  if (data.has_transcript) transcriptBadge = " · Transcript ready";
+  else if (trBusy || w.needs_transcription) transcriptBadge = " · Transcribing…";
+  else if (trFailed) transcriptBadge = " · Transcription failed";
 
   document.getElementById("detail").innerHTML = `
     <div class="detail-covers">
@@ -370,7 +378,8 @@ async function openDetail(id) {
         </div>
         <div id="meta-hits" class="meta-hits" hidden></div>
       </form>
-      <p class="muted">${hasEpub ? "EPUB ready" : "No EPUB yet"} · ${hasMd ? "Markdown ready" : "No Markdown"} · ${hasAudio ? "M4B ready" : (w.needs_audio ? "Needs audio" : "No audio")} · Direction: ${escapeHtml(w.reading_direction)}${w.needs_review ? " · Needs review" : ""}${w.needs_cover ? " · Needs cover" : ""}${data.has_transcript ? " · Transcript ready" : (w.needs_transcription ? " · Transcribing…" : "")}${w.sg_matched ? " · On StoryGraph" : ""}${w.sg_review_dirty ? " · Update SG review" : ""}${w.sg_needs_add ? " · Add to StoryGraph" : ""}${w.sg_audio_only_remote ? " · SG audio, missing local" : ""}</p>
+      <p class="muted">${hasEpub ? "EPUB ready" : "No EPUB yet"} · ${hasMd ? "Markdown ready" : "No Markdown"} · ${hasAudio ? "M4B ready" : (w.needs_audio ? "Needs audio" : "No audio")} · Direction: ${escapeHtml(w.reading_direction)}${w.needs_review ? " · Needs review" : ""}${w.needs_cover ? " · Needs cover" : ""}${transcriptBadge}${w.sg_matched ? " · On StoryGraph" : ""}${w.sg_review_dirty ? " · Update SG review" : ""}${w.sg_needs_add ? " · Add to StoryGraph" : ""}${w.sg_audio_only_remote ? " · SG audio, missing local" : ""}</p>
+      ${trFailed && trJob?.detail ? `<p class="error">${escapeHtml(String(trJob.detail).slice(0, 280))}</p>` : ""}
       <p id="cover-prompt" class="muted cover-prompt" hidden></p>
       ${hasAudio ? `
         <div class="detail-audio">
@@ -398,7 +407,7 @@ async function openDetail(id) {
         ${w.sg_needs_add ? `<button type="button" id="btn-clear-sg-add" title="Clear after you add this book on StoryGraph">Clear add-to-SG flag</button>` : ""}
         ${w.sg_audio_only_remote ? `<button type="button" id="btn-clear-sg-audio">Dismiss SG audio gap</button>` : ""}
         <label class="btn-file">Upload audiobook (.m4b / .aax) <input type="file" id="audio-file" accept=".m4b,.aax,audio/mp4" hidden /></label>
-        <button type="button" id="btn-transcribe"${hasAudio ? "" : " disabled title=\"Upload an audiobook first\""}>Transcribe</button>
+        <button type="button" id="btn-transcribe"${hasAudio && !trBusy ? "" : ` disabled title="${!hasAudio ? "Upload an audiobook first" : "Transcription already in progress"}"`}>${trFailed ? "Retry transcription" : "Transcribe"}</button>
         ${data.has_transcript ? `<a href="/api/works/${w.id}/transcript"><button type="button">Download transcript</button></a>` : ""}
         ${state.user.is_admin ? `
           <label>Grant access
@@ -464,6 +473,20 @@ async function openDetail(id) {
     el.textContent = t || "";
     el.classList.toggle("error", !!isError);
   };
+
+  if (trBusy) {
+    if (state._transcribePoll) clearTimeout(state._transcribePoll);
+    state._transcribePoll = setTimeout(() => {
+      if (state.currentWork?.work?.id === w.id) openDetail(w.id);
+    }, 4000);
+  } else if (state._transcribePoll) {
+    clearTimeout(state._transcribePoll);
+    state._transcribePoll = null;
+  }
+
+  if (trFailed && trJob?.detail) {
+    msg(String(trJob.detail).slice(0, 400), true);
+  }
 
   document.getElementById("detail-form").addEventListener("submit", async (e) => {
     e.preventDefault();

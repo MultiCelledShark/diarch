@@ -26,10 +26,28 @@ pub async fn process_one(state: &Arc<AppState>) -> Result<()> {
             state
                 .db
                 .update_job(job.id, "failed", Some(&e.to_string()))
-                .await?
+                .await?;
+            // Don't leave the work stuck in "Transcribing…" after a failed job.
+            if job.kind == "transcribe" {
+                if let Some(work_id) = job.work_id {
+                    clear_transcription_in_progress(state, work_id).await;
+                }
+            }
         }
     }
     Ok(())
+}
+
+async fn clear_transcription_in_progress(state: &Arc<AppState>, work_id: Uuid) {
+    if let Ok(Some(mut work)) = state.db.get_work(work_id).await {
+        if work.needs_transcription {
+            work.needs_transcription = false;
+            work.updated_at = Utc::now();
+            let _ = state.db.update_work(&work).await;
+        }
+    }
+    let tmp = state.config.work_dir(work_id).join(".transcribe_tmp");
+    let _ = tokio::fs::remove_dir_all(&tmp).await;
 }
 
 async fn run_import(state: &Arc<AppState>, job: &diarch_core::Job) -> Result<Option<String>> {

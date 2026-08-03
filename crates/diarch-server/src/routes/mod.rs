@@ -334,6 +334,12 @@ async fn get_work(
         .join(diarch_core::Config::cover_candidate_name())
         .exists();
     let has_transcript = state.config.work_dir(id).join("transcript.txt").exists();
+    let transcription_job = state
+        .db
+        .latest_job_for_work(id, "transcribe")
+        .await
+        .ok()
+        .flatten();
     Ok(Json(serde_json::json!({
         "work": work,
         "codes": codes,
@@ -341,6 +347,7 @@ async fn get_work(
         "has_import_pdf": has_import_pdf,
         "has_cover_candidate": has_cover_candidate,
         "has_transcript": has_transcript,
+        "transcription_job": transcription_job,
     })))
 }
 

@@ -547,6 +547,18 @@ impl Db {
         Ok(row.map(|r| row_job(&r)).transpose()?)
     }
 
+    /// Most recent job of `kind` for a work (any status).
+    pub async fn latest_job_for_work(&self, work_id: Uuid, kind: &str) -> Result<Option<Job>> {
+        let row = sqlx::query(
+            "SELECT * FROM jobs WHERE work_id = ? AND kind = ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(work_id.to_string())
+        .bind(kind)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| row_job(&r)).transpose()?)
+    }
+
     pub async fn next_pending_job(&self) -> Result<Option<Job>> {
         let row = sqlx::query(
             "SELECT * FROM jobs WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1",
