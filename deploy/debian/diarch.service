@@ -14,11 +14,20 @@ Environment=DIARCH_LISTEN=0.0.0.0:8083
 Environment=DIARCH_DATA_DIR=/var/lib/diarch
 Environment=DIARCH_ADMIN_USER=admin
 Environment=DIARCH_ADMIN_PASS=change-me
-# Optional secrets (prefer EnvironmentFile=/etc/diarch.env chmod 600):
+# Prefer secrets here (chmod 600) instead of Environment= lines below:
+# EnvironmentFile=/etc/diarch.env
+#
+# Optional secrets / integrations (see deploy/debian/README.md):
 # Environment=DIARCH_AUDIBLE_KEY=
 # Environment=DIARCH_GOOGLE_BOOKS_KEY=
 # Environment=DIARCH_STORYGRAPH_USER=
 # Environment=DIARCH_STORYGRAPH_COOKIE=
+# Environment=DIARCH_LOCALAI_URL=
+# Environment=DIARCH_LOCALAI_IMAGE_MODEL=
+# Environment=DIARCH_LOCALAI_IMAGE_SIZE=
+# Environment=DIARCH_LOCALAI_TRANSCRIBE_MODEL=
+# Environment=DIARCH_HERMES_URL=
+# Environment=DIARCH_SHOW_AUDIO_GAPS=true
 ExecStart=/usr/local/bin/diarch
 Restart=on-failure
 RestartSec=3
@@ -27,6 +36,7 @@ Nice=5
 CPUQuota=50%
 
 # Create user once: sudo useradd --system --home /var/lib/diarch --shell /usr/sbin/nologin diarch
+# sudo mkdir -p /var/lib/diarch/{library,imports,queue/needs_tts,queue/incoming_audio}
 # sudo chown -R diarch:diarch /var/lib/diarch
 # Apt + rmapi + auth: see deploy/debian/README.md dependency checklist
 

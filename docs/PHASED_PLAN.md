@@ -71,7 +71,7 @@ Restart `cargo run -p diarch-server` after pulling UI changes (assets are embedd
 
 1. **Deploy / exercise Phase 8 on Keystone** — Generate cover + Approve against TrueNAS LocalAI; long-audiobook transcription timing.
 2. **ebook2audiobook watcher** — desktop TTS → `queue/incoming_audio` as `.m4b`.
-3. **Deploy** — musl/Debian 13 → Keystone systemd (deps: pandoc, ocrmypdf, tesseract, poppler-utils, ffmpeg, rmapi — see `deploy/debian/README.md`).
+3. **Deploy** — musl/Debian 13 → Keystone systemd (deps: pandoc, ocrmypdf, tesseract, poppler-utils, ffmpeg/ffprobe, rmapi — see [`deploy/debian/README.md`](../deploy/debian/README.md)).
 4. **Android / KOReader** — deferred (Phase 7).
 
 ---

@@ -63,17 +63,17 @@ Develop on Arch; **do not** copy a glibc-linked Arch binary blindly.
 # musl static (recommended)
 rustup target add x86_64-unknown-linux-musl
 cargo build -p diarch-server --release --target x86_64-unknown-linux-musl
-scp target/x86_64-unknown-linux-musl/release/diarch key@keystone:/tmp/
+scp target/x86_64-unknown-linux-musl/release/diarch key@keystone:/tmp/diarch
 # on Keystone — full dependency checklist in deploy/debian/README.md
 sudo install -m 755 /tmp/diarch /usr/local/bin/diarch
-sudo apt install pandoc ocrmypdf tesseract-ocr tesseract-ocr-eng poppler-utils ffmpeg
-# also: rmapi binary + auth as diarch user; optional DIARCH_* keys in the unit
-sudo mkdir -p /var/lib/diarch
+sudo apt-get install -y pandoc ocrmypdf tesseract-ocr tesseract-ocr-eng poppler-utils ffmpeg
+# also: rmapi binary + auth as diarch user; optional DIARCH_* keys / EnvironmentFile
+sudo mkdir -p /var/lib/diarch/{library,imports,queue/needs_tts,queue/incoming_audio}
 sudo cp deploy/debian/diarch.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now diarch
 ```
 
-See **[deploy/debian/README.md](deploy/debian/README.md)** for the Keystone dependency checklist (`pandoc` / OCR / poppler / `ffmpeg`+`ffprobe` / `rmapi`, env vars, outbound HTTPS).
+See **[deploy/debian/README.md](deploy/debian/README.md)** for the Keystone dependency checklist (`pandoc` / OCR / poppler `pdftohtml`+`pdftotext` / `ffmpeg`+`ffprobe` / `rmapi`, data layout, env vars, outbound HTTPS).
 
 ## Layout
 
