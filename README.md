@@ -51,7 +51,7 @@ Optional local file: copy [`.env.example`](.env.example) → `.env` (gitignored)
 | `DIARCH_HERMES_URL` | — | Optional Hermes agent for covers |
 | `DIARCH_AUDIBLE_KEY` | — | Audible activation bytes for AAX → M4B |
 | `DIARCH_GOOGLE_BOOKS_KEY` | — | Google Books API key (avoids unauthenticated 429; needed for many indie/recent titles OL/LoC lack) |
-| `DIARCH_STORYGRAPH_USER` / `DIARCH_STORYGRAPH_COOKIE` | — | StoryGraph pull + enrich (`remember_user_token` cookie; required for enrich past Cloudflare) |
+| `DIARCH_STORYGRAPH_USER` / `DIARCH_STORYGRAPH_COOKIE` | — | StoryGraph bootstrap (optional; Integrations UI writes `data/storygraph.conf`) |
 | `DIARCH_REMARKABLE_TOKEN` | — | Unused for upload; **`rmapi` on PATH is required** for Send to reMarkable |
 | `DIARCH_SHOW_AUDIO_GAPS` | `true` | Soft audio-gap badges |
 

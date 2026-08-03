@@ -41,6 +41,7 @@ pub fn router() -> Router<Arc<AppState>> {
             get(get_work).put(update_work).delete(delete_work),
         )
         .route("/api/works/{id}/codes", put(set_codes))
+        .route("/api/works/{id}/apply-meta", post(apply_meta_hit))
         .route("/api/works/{id}/grants", get(list_grants).post(add_grant))
         .route("/api/works/{id}/grants/{user_id}", delete(revoke_grant))
         .route("/api/works/{id}/import", post(import_file))
@@ -81,6 +82,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/remarkable/status", get(remarkable_status))
         .route("/api/remarkable/auth", post(remarkable_auth))
         .route("/api/storygraph/sync", post(sg_sync))
+        .route("/api/storygraph/status", get(sg_status))
+        .route("/api/storygraph/auth", post(sg_auth))
         .route("/api/queue/needs_tts/export", post(export_tts_queue))
         .route("/", get(index))
         .route("/assets/{*path}", get(static_asset))
@@ -562,6 +565,73 @@ async fn set_codes(
         let _ = state.db.update_work(&work).await;
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Apply a catalog MetaHit onto a work (fields + subject→taxonomy mapping).
+async fn apply_meta_hit(
+    AuthUser(user): AuthUser,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(mut hit): Json<metadata::MetaHit>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let mut work = state
+        .db
+        .get_work(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    metadata::attach_taxonomy(&mut hit);
+
+    if !hit.title.is_empty() {
+        work.title = hit.title.clone();
+    }
+    if !hit.authors.is_empty() {
+        work.authors = hit.authors.clone();
+    }
+    if let Some(isbn) = hit.isbn.clone().filter(|s| !s.is_empty()) {
+        work.isbn = Some(isbn);
+    }
+    if let Some(desc) = hit.description.clone().filter(|s| !s.is_empty()) {
+        work.description = Some(desc);
+    }
+
+    let mut codes = state.db.work_codes(id).await.unwrap_or_default();
+    for c in &hit.codes {
+        if !codes.contains(c) {
+            codes.push(*c);
+        }
+    }
+    if !codes.is_empty() {
+        state
+            .db
+            .set_work_codes(id, &codes)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    work.primary_code =
+        diarch_core::taxonomy::prefer_primary(work.primary_code, hit.primary_code);
+    work.is_manga = infer_manga(work.primary_code, &codes, work.is_manga);
+    if work.is_manga {
+        work.reading_direction = "rtl".into();
+    }
+    work.updated_at = Utc::now();
+    state
+        .db
+        .update_work(&work)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({
+        "work": work,
+        "codes": codes,
+        "applied_primary": hit.primary_code,
+        "applied_subjects": hit.subjects,
+        "source": hit.source,
+    })))
 }
 
 async fn list_grants(
@@ -2172,6 +2242,31 @@ async fn remarkable_auth(
         .await
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+}
+
+async fn sg_status(
+    AuthUser(_): AuthUser,
+    State(state): State<Arc<AppState>>,
+) -> Json<crate::storygraph::StoryGraphStatus> {
+    Json(crate::storygraph::status(&state))
+}
+
+#[derive(Deserialize)]
+struct SgAuthReq {
+    username: String,
+    cookie: String,
+}
+
+async fn sg_auth(
+    AuthUser(_): AuthUser,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SgAuthReq>,
+) -> Result<Json<crate::storygraph::StoryGraphStatus>, (StatusCode, String)> {
+    let _ = crate::storygraph::save_credentials(&state, &body.username, &body.cookie)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    // Best-effort probe so health row updates immediately.
+    let _ = crate::storygraph::pull_lists(&state).await;
+    Ok(Json(crate::storygraph::status(&state)))
 }
 
 async fn sg_sync(

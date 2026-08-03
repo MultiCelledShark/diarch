@@ -122,13 +122,14 @@ async fn probe_google_books(state: &AppState) {
 }
 
 async fn probe_storygraph(state: &AppState) {
-    if state.config.storygraph_username.is_none() {
+    let st = crate::storygraph::status(state);
+    if !st.username_set {
         let _ = state
             .db
             .set_integration_health(
                 "storygraph",
                 "degraded",
-                Some("DIARCH_STORYGRAPH_USER not set"),
+                Some("StoryGraph username not set (Integrations or DIARCH_STORYGRAPH_USER)"),
                 false,
             )
             .await;

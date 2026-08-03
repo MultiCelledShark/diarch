@@ -1265,7 +1265,8 @@ async fn metadata_isbn_report_has_providers() {
         if st == "error" && p["name"] == "storygraph" {
             let detail = p["detail"].as_str().unwrap_or("");
             assert!(
-                detail.contains("DIARCH_STORYGRAPH_COOKIE")
+                detail.contains("cookie not set")
+                    || detail.contains("DIARCH_STORYGRAPH_COOKIE")
                     || detail.contains("Cloudflare")
                     || detail.contains("HTTP"),
                 "{detail}"
@@ -1413,13 +1414,91 @@ async fn clear_storygraph_flags_via_flags_endpoint() {
 }
 
 #[tokio::test]
+async fn apply_meta_hit_sets_primary_from_subjects() {
+    let (_dir, app, _) = test_app().await;
+    let token = login(&app, "admin", "adminpass").await;
+    let (status, work, _) = json_req(
+        &app,
+        "POST",
+        "/api/works",
+        Some(&token),
+        Some(json!({"title":"Untitled","authors":""})),
+    )
+    .await;
+    assert_eq!(status, 201, "{work}");
+    let id = work["id"].as_str().unwrap();
+
+    let (status, body, _) = json_req(
+        &app,
+        "POST",
+        &format!("/api/works/{id}/apply-meta"),
+        Some(&token),
+        Some(json!({
+            "title": "Dune",
+            "authors": "Frank Herbert",
+            "isbn": "9780441172719",
+            "description": "Sandworms.",
+            "subjects": ["Fiction", "Science Fiction"],
+            "source": "googlebooks"
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["work"]["title"], "Dune");
+    assert_eq!(body["work"]["authors"], "Frank Herbert");
+    assert_eq!(body["work"]["isbn"], "9780441172719");
+    assert_eq!(body["work"]["primary_code"], 8400);
+    let codes = body["codes"].as_array().unwrap();
+    assert!(codes.iter().any(|c| c == 8400));
+    assert!(codes.iter().any(|c| c == 8000));
+}
+
+#[tokio::test]
 async fn storygraph_sync_without_credentials_is_empty_ok() {
     let (_dir, app, _) = test_app().await;
     let token = login(&app, "admin", "adminpass").await;
     let (status, body, _) =
         json_req(&app, "POST", "/api/storygraph/sync", Some(&token), None).await;
-    // No DIARCH_STORYGRAPH_USER → empty pull, still a report.
+    // No username → empty pull, still a report.
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["sg_count"], 0);
     assert!(body["books"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn storygraph_status_and_auth_save_credentials() {
+    let (_dir, app, state) = test_app().await;
+    let token = login(&app, "admin", "adminpass").await;
+    let (status, st, _) =
+        json_req(&app, "GET", "/api/storygraph/status", Some(&token), None).await;
+    assert_eq!(status, 200, "{st}");
+    assert_eq!(st["username_set"], false);
+    assert_eq!(st["cookie_set"], false);
+
+    let (status, st, _) = json_req(
+        &app,
+        "POST",
+        "/api/storygraph/auth",
+        Some(&token),
+        Some(json!({
+            "username": "demo_user",
+            "cookie": "tokensecret99"
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{st}");
+    assert_eq!(st["username_set"], true);
+    assert_eq!(st["cookie_set"], true);
+    assert_eq!(st["username"], "demo_user");
+    let hint = st["cookie_hint"].as_str().unwrap_or("");
+    assert!(hint.ends_with("et99"), "{hint}");
+    // Never echo the full cookie in the JSON body.
+    let body = st.to_string();
+    assert!(!body.contains("tokensecret99"), "{body}");
+
+    let path = state.config.data_dir.join("storygraph.conf");
+    assert!(path.exists(), "expected credentials file at {}", path.display());
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("demo_user"));
+    assert!(text.contains("tokensecret99"));
 }

@@ -1,6 +1,7 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use crate::state::AppState;
 
@@ -17,29 +18,169 @@ pub struct SgBook {
     pub list: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StoryGraphStatus {
+    pub username_set: bool,
+    pub cookie_set: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Masked cookie hint (never the full secret).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cookie_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Absolute path of the on-disk credentials file (for ops).
+    pub config_path: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SgCreds {
+    username: Option<String>,
+    cookie: Option<String>,
+}
+
+fn creds_path(state: &AppState) -> PathBuf {
+    state.config.data_dir.join("storygraph.conf")
+}
+
+fn load_creds_file(path: &Path) -> Option<SgCreds> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut username = None;
+    let mut cookie = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("username:") {
+            let v = rest.trim().trim_matches('"').to_string();
+            if !v.is_empty() {
+                username = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("cookie:") {
+            let v = rest.trim().trim_matches('"').to_string();
+            if !v.is_empty() {
+                cookie = Some(v);
+            }
+        }
+    }
+    if username.is_none() && cookie.is_none() {
+        None
+    } else {
+        Some(SgCreds { username, cookie })
+    }
+}
+
+/// File credentials override env; used for UI-configured StoryGraph auth.
+fn resolved_creds(state: &AppState) -> SgCreds {
+    if let Some(file) = load_creds_file(&creds_path(state)) {
+        return SgCreds {
+            username: file
+                .username
+                .or_else(|| state.config.storygraph_username.clone()),
+            cookie: file
+                .cookie
+                .or_else(|| state.config.storygraph_cookie.clone()),
+        };
+    }
+    SgCreds {
+        username: state.config.storygraph_username.clone(),
+        cookie: state.config.storygraph_cookie.clone(),
+    }
+}
+
+fn mask_cookie(cookie: &str) -> String {
+    let raw = cookie
+        .strip_prefix("remember_user_token=")
+        .unwrap_or(cookie)
+        .trim();
+    if raw.len() <= 4 {
+        "set".into()
+    } else {
+        format!("…{}", &raw[raw.len() - 4..])
+    }
+}
+
+pub fn status(state: &AppState) -> StoryGraphStatus {
+    let path = creds_path(state);
+    let creds = resolved_creds(state);
+    let username_set = creds.username.as_ref().is_some_and(|s| !s.is_empty());
+    let cookie_set = creds.cookie.as_ref().is_some_and(|s| !s.is_empty());
+    let detail = match (username_set, cookie_set) {
+        (false, false) => Some("username and cookie not set".into()),
+        (false, true) => Some("username not set".into()),
+        (true, false) => Some("cookie not set (Cloudflare / enrich will fail)".into()),
+        (true, true) => {
+            if path.exists() {
+                Some("configured via Integrations".into())
+            } else {
+                Some("configured via environment".into())
+            }
+        }
+    };
+    StoryGraphStatus {
+        username_set,
+        cookie_set,
+        username: creds.username.clone(),
+        cookie_hint: creds.cookie.as_deref().map(mask_cookie),
+        detail,
+        config_path: path.display().to_string(),
+    }
+}
+
+/// Save username + cookie to `data_dir/storygraph.conf` (like rmapi.conf for reMarkable).
+pub fn save_credentials(state: &AppState, username: &str, cookie: &str) -> Result<StoryGraphStatus> {
+    let username = username.trim();
+    let cookie = cookie.trim();
+    if username.is_empty() {
+        bail!("username required");
+    }
+    if cookie.is_empty() {
+        bail!("cookie required (remember_user_token from StoryGraph)");
+    }
+    let cookie_val = if cookie.contains('=') {
+        cookie.to_string()
+    } else {
+        format!("remember_user_token={cookie}")
+    };
+    let path = creds_path(state);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let body = format!("username: {username}\ncookie: {cookie_val}\n");
+    std::fs::write(&path, body)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(status(state))
+}
+
 /// Pull StoryGraph lists via unofficial HTML scrape.
-/// Requires `DIARCH_STORYGRAPH_USER`; cookie recommended for private profiles.
+/// Requires username; cookie required for Cloudflare / private lists / enrich.
 pub async fn pull_lists(state: &AppState) -> Result<Vec<SgBook>> {
-    let Some(user) = state.config.storygraph_username.as_ref() else {
+    let creds = resolved_creds(state);
+    let Some(user) = creds.username.as_ref().filter(|s| !s.is_empty()) else {
         let _ = state
             .db
             .set_integration_health(
                 "storygraph",
                 "degraded",
-                Some("DIARCH_STORYGRAPH_USER not set"),
+                Some("StoryGraph username not set (Integrations or DIARCH_STORYGRAPH_USER)"),
                 false,
             )
             .await;
         return Ok(vec![]);
     };
 
-    if state.config.storygraph_cookie.is_none() {
+    if creds.cookie.as_ref().is_none_or(|s| s.is_empty()) {
         let _ = state
             .db
             .set_integration_health(
                 "storygraph",
                 "degraded",
-                Some("DIARCH_STORYGRAPH_COOKIE not set (public lists only)"),
+                Some("StoryGraph cookie not set (Integrations or DIARCH_STORYGRAPH_COOKIE)"),
                 false,
             )
             .await;
@@ -100,7 +241,7 @@ pub async fn pull_lists(state: &AppState) -> Result<Vec<SgBook>> {
         return Err(anyhow::anyhow!(msg));
     }
 
-    if state.config.storygraph_cookie.is_some() {
+    if creds.cookie.as_ref().is_some_and(|s| !s.is_empty()) {
         let _ = state
             .db
             .set_integration_health("storygraph", "ok", None, true)
@@ -125,9 +266,9 @@ async fn fetch_list_html(state: &AppState, url: &str) -> Result<String> {
             "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         )
         .header("Accept-Language", "en-US,en;q=0.9");
-    if let Some(cookie) = &state.config.storygraph_cookie {
+    if let Some(cookie) = resolved_creds(state).cookie.filter(|s| !s.is_empty()) {
         let cookie_val = if cookie.contains('=') {
-            cookie.clone()
+            cookie
         } else {
             format!("remember_user_token={cookie}")
         };
@@ -140,7 +281,7 @@ async fn fetch_list_html(state: &AppState, url: &str) -> Result<String> {
     let text = resp.text().await?;
     if looks_like_cloudflare_challenge(&text) {
         anyhow::bail!(
-            "Cloudflare challenge from StoryGraph — set DIARCH_STORYGRAPH_COOKIE (remember_user_token)"
+            "Cloudflare challenge from StoryGraph — save cookie in Integrations (remember_user_token)"
         );
     }
     Ok(text)
@@ -164,8 +305,8 @@ pub async fn search_metadata(
     if title.is_empty() {
         return Ok(vec![]);
     }
-    if state.config.storygraph_cookie.is_none() {
-        anyhow::bail!("DIARCH_STORYGRAPH_COOKIE not set");
+    if resolved_creds(state).cookie.as_ref().is_none_or(|s| s.is_empty()) {
+        anyhow::bail!("StoryGraph cookie not set (Integrations or DIARCH_STORYGRAPH_COOKIE)");
     }
 
     let mut term = title.to_string();
@@ -219,8 +360,8 @@ pub async fn fetch_book_metadata(
     if book_id.is_empty() || book_id == "new" {
         return Ok(None);
     }
-    if state.config.storygraph_cookie.is_none() {
-        anyhow::bail!("DIARCH_STORYGRAPH_COOKIE not set");
+    if resolved_creds(state).cookie.as_ref().is_none_or(|s| s.is_empty()) {
+        anyhow::bail!("StoryGraph cookie not set (Integrations or DIARCH_STORYGRAPH_COOKIE)");
     }
     let url = format!("https://app.thestorygraph.com/books/{book_id}");
     let html = fetch_list_html(state, &url).await?;
@@ -236,8 +377,8 @@ pub async fn lookup_isbn_metadata(
     if isbn.is_empty() {
         return Ok(None);
     }
-    if state.config.storygraph_cookie.is_none() {
-        anyhow::bail!("DIARCH_STORYGRAPH_COOKIE not set");
+    if resolved_creds(state).cookie.as_ref().is_none_or(|s| s.is_empty()) {
+        anyhow::bail!("StoryGraph cookie not set (Integrations or DIARCH_STORYGRAPH_COOKIE)");
     }
     let url = format!(
         "https://app.thestorygraph.com/browse?search_term={}",
@@ -349,6 +490,7 @@ fn parse_browse_pane(chunk: &str) -> Option<(String, crate::metadata::MetaHit)> 
             subjects,
             source: "storygraph".into(),
             cover_url,
+            ..Default::default()
         },
     ))
 }
@@ -388,6 +530,7 @@ pub fn parse_sg_book_page(html: &str, book_id: &str) -> Option<crate::metadata::
         subjects,
         source: "storygraph".into(),
         cover_url,
+        ..Default::default()
     })
 }
 
@@ -839,6 +982,29 @@ mod tests {
         let books = parse_sg_html(html);
         assert_eq!(books.len(), 1);
         assert_eq!(books[0].title, "Real Title");
+    }
+
+    #[test]
+    fn mask_cookie_shows_tail() {
+        assert_eq!(mask_cookie("abcdefghij"), "…ghij");
+        assert_eq!(mask_cookie("remember_user_token=abcdefghij"), "…ghij");
+    }
+
+    #[test]
+    fn load_creds_file_parses_yamlish() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("storygraph.conf");
+        std::fs::write(
+            &path,
+            "username: igrot\ncookie: remember_user_token=secretvalue\n",
+        )
+        .unwrap();
+        let c = load_creds_file(&path).unwrap();
+        assert_eq!(c.username.as_deref(), Some("igrot"));
+        assert_eq!(
+            c.cookie.as_deref(),
+            Some("remember_user_token=secretvalue")
+        );
     }
 
     #[test]

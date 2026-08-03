@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::state::AppState;
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct MetaHit {
     pub title: String,
     pub authors: String,
@@ -16,6 +16,19 @@ pub struct MetaHit {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_url: Option<String>,
+    /// Suggested Diarch primary from `subjects` (catalog genre tags — not encoded in the ISBN itself).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_code: Option<i32>,
+    /// Suggested Diarch codes from `subjects`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub codes: Vec<i32>,
+}
+
+/// Map provider subject/category strings onto Diarch taxonomy fields on the hit.
+pub fn attach_taxonomy(hit: &mut MetaHit) {
+    let (primary, codes) = map_subjects_to_codes(&hit.subjects);
+    hit.primary_code = primary;
+    hit.codes = codes;
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -103,7 +116,8 @@ pub async fn lookup_isbn_report(state: &AppState, isbn: &str) -> Result<LookupRe
     }
 
     match open_library_isbn_outcome(state, &isbn).await {
-        ProviderOutcome::Hit(hit) => {
+        ProviderOutcome::Hit(mut hit) => {
+            attach_taxonomy(&mut hit);
             let _ = state
                 .db
                 .set_integration_health("openlibrary", "ok", None, true)
@@ -139,7 +153,8 @@ pub async fn lookup_isbn_report(state: &AppState, isbn: &str) -> Result<LookupRe
     }
 
     match google_books_isbn_outcome(state, &isbn).await {
-        ProviderOutcome::Hit(hit) => {
+        ProviderOutcome::Hit(mut hit) => {
+            attach_taxonomy(&mut hit);
             let _ = state
                 .db
                 .set_integration_health("googlebooks", "ok", None, true)
@@ -180,7 +195,8 @@ pub async fn lookup_isbn_report(state: &AppState, isbn: &str) -> Result<LookupRe
     }
 
     match crate::storygraph::lookup_isbn_metadata(state, &isbn).await {
-        Ok(Some(hit)) => {
+        Ok(Some(mut hit)) => {
+            attach_taxonomy(&mut hit);
             providers.push(ProviderStatus {
                 name: "storygraph".into(),
                 status: "hit".into(),
@@ -195,10 +211,10 @@ pub async fn lookup_isbn_report(state: &AppState, isbn: &str) -> Result<LookupRe
             providers.push(ProviderStatus {
                 name: "storygraph".into(),
                 status: "miss".into(),
-                detail: if state.config.storygraph_cookie.is_none() {
-                    Some("DIARCH_STORYGRAPH_COOKIE not set".into())
-                } else {
+                detail: if crate::storygraph::status(state).cookie_set {
                     None
+                } else {
+                    Some("StoryGraph cookie not set".into())
                 },
             });
         }
@@ -429,6 +445,7 @@ async fn open_library_books_api(state: &AppState, isbn: &str) -> Result<Option<M
         subjects,
         source: "openlibrary".into(),
         cover_url,
+        ..Default::default()
     }))
 }
 
@@ -486,6 +503,7 @@ async fn open_library(state: &AppState, isbn: &str) -> Result<Option<MetaHit>> {
         subjects,
         source: "openlibrary".into(),
         cover_url: Some(format!("https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg")),
+        ..Default::default()
     }))
 }
 
@@ -571,6 +589,7 @@ fn meta_hit_from_google_volume(v: &Value, isbn_hint: Option<&str>) -> Option<Met
         subjects,
         source: "googlebooks".into(),
         cover_url,
+        ..Default::default()
     })
 }
 
@@ -768,7 +787,7 @@ pub async fn search_title(
                 // Missing cookie is expected for many installs — only note when we still lack hits
                 // or when the failure is more than "not configured".
                 if hits.is_empty()
-                    || !msg.contains("DIARCH_STORYGRAPH_COOKIE not set")
+                    || !(msg.contains("cookie not set") || msg.contains("DIARCH_STORYGRAPH_COOKIE"))
                 {
                     push_note(&mut notes, format!("storygraph: {msg}"));
                 }
@@ -782,6 +801,10 @@ pub async fn search_title(
             "no catalog hits — indie/recent titles may need an ISBN, DIARCH_GOOGLE_BOOKS_KEY, or StoryGraph cookie"
                 .into(),
         );
+    }
+
+    for hit in &mut hits {
+        attach_taxonomy(hit);
     }
 
     Ok(SearchReport { hits, notes })
@@ -931,6 +954,7 @@ async fn open_library_search(
                 subjects: vec![],
                 source: "openlibrary".into(),
                 cover_url,
+                ..Default::default()
             }
         })
         .collect())
@@ -984,6 +1008,7 @@ async fn loc_search(
             subjects: vec![],
             source: "loc".into(),
             cover_url: None,
+            ..Default::default()
         });
     }
     Ok(hits)
@@ -1137,6 +1162,21 @@ mod tests {
     }
 
     #[test]
+    fn attach_taxonomy_maps_google_style_subjects() {
+        let mut hit = MetaHit {
+            title: "Dune".into(),
+            authors: "Frank Herbert".into(),
+            subjects: vec!["Fiction".into(), "Science Fiction".into()],
+            source: "googlebooks".into(),
+            ..Default::default()
+        };
+        attach_taxonomy(&mut hit);
+        assert_eq!(hit.primary_code, Some(8400));
+        assert!(hit.codes.contains(&8400));
+        assert!(hit.codes.contains(&8000));
+    }
+
+    #[test]
     fn core_title_strips_subtitle() {
         assert_eq!(
             core_title("Lolcows: The Internet's Never-Ending Tragedy"),
@@ -1161,6 +1201,7 @@ mod tests {
                 subjects: vec![],
                 source: "openlibrary".into(),
                 cover_url: None,
+                ..Default::default()
             }],
             12,
         );
@@ -1175,6 +1216,7 @@ mod tests {
                     subjects: vec![],
                     source: "googlebooks".into(),
                     cover_url: None,
+                    ..Default::default()
                 },
                 MetaHit {
                     title: "Lolcows".into(),
@@ -1184,6 +1226,7 @@ mod tests {
                     subjects: vec![],
                     source: "loc".into(),
                     cover_url: None,
+                    ..Default::default()
                 },
                 MetaHit {
                     title: "Other".into(),
@@ -1193,6 +1236,7 @@ mod tests {
                     subjects: vec![],
                     source: "googlebooks".into(),
                     cover_url: None,
+                    ..Default::default()
                 },
             ],
             12,

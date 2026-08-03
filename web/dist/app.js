@@ -584,23 +584,24 @@ async function openDetail(id) {
     }
   });
   async function applyMetaHit(hit) {
-    const form = document.getElementById("detail-form");
-    if (!form || !hit) return;
-    form.title.value = hit.title || form.title.value;
-    if (hit.authors) form.authors.value = hit.authors;
-    if (hit.isbn) form.isbn.value = hit.isbn;
-    if (hit.description && form.description) form.description.value = hit.description;
-    await api(`/api/works/${w.id}`, {
-      method: "PUT",
-      json: {
-        title: form.title.value,
-        authors: form.authors.value,
-        isbn: form.isbn.value || null,
-        description: form.description?.value || hit.description || null,
-      },
-    });
-    msg(`Applied metadata from ${hit.source || "lookup"}`);
-    await openDetail(w.id);
+    if (!hit) return;
+    try {
+      const r = await api(`/api/works/${w.id}/apply-meta`, {
+        method: "POST",
+        json: hit,
+      });
+      const primary = r?.work?.primary_code ?? r?.applied_primary;
+      const tax =
+        primary != null
+          ? ` · primary ${taxonomyLabel(primary)}`
+          : Array.isArray(hit.subjects) && hit.subjects.length
+            ? " · no taxonomy match for provider subjects"
+            : "";
+      msg(`Applied metadata from ${hit.source || "lookup"}${tax}`);
+      await openDetail(w.id);
+    } catch (e) {
+      msg(e.message || String(e), true);
+    }
   }
 
   function showMetaHits(hits) {
@@ -612,12 +613,19 @@ async function openDetail(id) {
       return;
     }
     box.hidden = false;
-    box.innerHTML = `<p class="muted">Pick a match:</p>` + hits.map((h, i) => `
+    box.innerHTML = `<p class="muted">Pick a match:</p>` + hits.map((h, i) => {
+      const tax = h.primary_code != null
+        ? ` · ${taxonomyLabel(h.primary_code)}`
+        : (Array.isArray(h.subjects) && h.subjects.length
+            ? ` · ${escapeHtml(h.subjects.slice(0, 2).join(", "))}`
+            : "");
+      return `
       <button type="button" class="meta-hit" data-hit="${i}">
         <strong>${escapeHtml(h.title || "Untitled")}</strong>
         <span>${escapeHtml(h.authors || "Unknown author")}</span>
-        <span class="muted">${escapeHtml(h.source || "")}${h.isbn ? " · " + escapeHtml(h.isbn) : ""}</span>
-      </button>`).join("");
+        <span class="muted">${escapeHtml(h.source || "")}${h.isbn ? " · " + escapeHtml(h.isbn) : ""}${tax}</span>
+      </button>`;
+    }).join("");
     box.querySelectorAll(".meta-hit").forEach((btn) => {
       btn.addEventListener("click", () => applyMetaHit(hits[Number(btn.dataset.hit)]));
     });
@@ -1977,8 +1985,44 @@ async function loadRemarkableStatus() {
   }
 }
 
+function renderStoryGraphStatus(st) {
+  const el = document.getElementById("sg-status");
+  const userInput = document.getElementById("sg-username");
+  if (!el) return;
+  if (!st) {
+    el.textContent = "Could not load StoryGraph status";
+    el.classList.add("error");
+    return;
+  }
+  el.classList.remove("error");
+  const parts = [];
+  parts.push(st.username_set ? `user ${st.username || "set"}` : "username missing");
+  parts.push(st.cookie_set ? `cookie ${st.cookie_hint || "set"}` : "cookie missing");
+  if (st.detail) parts.push(st.detail);
+  el.textContent = parts.join(" · ");
+  if (!st.username_set || !st.cookie_set) el.classList.add("error");
+  if (userInput && st.username && !userInput.value) userInput.value = st.username;
+}
+
+async function loadStoryGraphStatus() {
+  try {
+    const st = await api("/api/storygraph/status");
+    renderStoryGraphStatus(st);
+    return st;
+  } catch (e) {
+    renderStoryGraphStatus(null);
+    const msg = document.getElementById("sg-auth-msg");
+    if (msg) {
+      msg.textContent = e.message || String(e);
+      msg.classList.add("error");
+    }
+    return null;
+  }
+}
+
 async function loadIntegrations() {
   await loadRemarkableStatus();
+  await loadStoryGraphStatus();
   try {
     const health = await api("/api/integrations");
     renderIntegrations(health);
@@ -2043,6 +2087,33 @@ document.getElementById("rm-auth-form").addEventListener("submit", async (e) => 
 });
 
 document.getElementById("btn-rm-refresh").addEventListener("click", () => loadRemarkableStatus());
+
+document.getElementById("sg-auth-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById("sg-auth-msg");
+  const username = String(document.getElementById("sg-username").value || "").trim();
+  const cookie = String(document.getElementById("sg-cookie").value || "").trim();
+  msg.classList.remove("error");
+  msg.textContent = "Saving…";
+  try {
+    const st = await api("/api/storygraph/auth", {
+      method: "POST",
+      json: { username, cookie },
+    });
+    document.getElementById("sg-cookie").value = "";
+    renderStoryGraphStatus(st);
+    msg.textContent =
+      st.username_set && st.cookie_set
+        ? "Saved. Use Sync StoryGraph or Enrich on a work."
+        : "Saved, but still incomplete.";
+    await loadIntegrations();
+  } catch (err) {
+    msg.textContent = err.message || String(err);
+    msg.classList.add("error");
+  }
+});
+
+document.getElementById("btn-sg-refresh")?.addEventListener("click", () => loadStoryGraphStatus());
 
 document.getElementById("btn-sg-sync").addEventListener("click", async () => {
   const report = document.getElementById("sg-sync-report");
