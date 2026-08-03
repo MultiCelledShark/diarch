@@ -222,10 +222,7 @@ pub async fn transcribe_audiobook(state: &AppState, work_dir: &Path) -> Result<S
     }
     let duration = audio_duration_secs(&m4b).await?;
     let http = client()?;
-    let url = format!(
-        "{}/v1/audio/transcriptions",
-        base.trim_end_matches('/')
-    );
+    let base = base.trim_end_matches('/');
 
     let tmp = work_dir.join(".transcribe_tmp");
     let _ = tokio::fs::remove_dir_all(&tmp).await;
@@ -237,7 +234,7 @@ pub async fn transcribe_audiobook(state: &AppState, work_dir: &Path) -> Result<S
     while start < duration {
         let chunk = tmp.join(format!("chunk_{idx:04}.mp3"));
         extract_chunk(&m4b, start, TRANSCRIPT_CHUNK_SECS, &chunk).await?;
-        let text = transcribe_file(&http, &url, model, &chunk).await?;
+        let text = transcribe_file(&http, base, model, &chunk).await?;
         if !text.trim().is_empty() {
             parts.push(text.trim().to_string());
         }
@@ -316,7 +313,7 @@ async fn extract_chunk(src: &Path, start: f64, len: f64, dest: &Path) -> Result<
 
 async fn transcribe_file(
     http: &reqwest::Client,
-    url: &str,
+    base: &str,
     model: &str,
     path: &Path,
 ) -> Result<String> {
@@ -333,8 +330,12 @@ async fn transcribe_file(
     let form = reqwest::multipart::Form::new()
         .text("model", model.to_string())
         .part("file", part);
+    let url = format!(
+        "{}/v1/audio/transcriptions",
+        base.trim_end_matches('/')
+    );
     let resp = http
-        .post(url)
+        .post(&url)
         .multipart(form)
         .send()
         .await
@@ -342,7 +343,12 @@ async fn transcribe_file(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        bail!("transcription HTTP {status}: {}", truncate(&text, 400));
+        let hint = asr_backend_hint(http, base, model).await;
+        bail!(
+            "transcription HTTP {status}: {}{}",
+            truncate(&text, 280),
+            hint
+        );
     }
     let v: Value = resp.json().await.context("parse transcription JSON")?;
     if let Some(t) = v.get("text").and_then(|x| x.as_str()) {
@@ -353,6 +359,39 @@ async fn transcribe_file(
         return Ok(t.to_string());
     }
     Ok(String::new())
+}
+
+/// Pull ASR backend logs and return an actionable hint when the loader is broken.
+async fn asr_backend_hint(http: &reqwest::Client, base: &str, model: &str) -> String {
+    let url = format!(
+        "{}/api/backend-logs/{}",
+        base.trim_end_matches('/'),
+        model
+    );
+    let Ok(resp) = http.get(&url).send().await else {
+        return String::new();
+    };
+    if !resp.status().is_success() {
+        return String::new();
+    }
+    let Ok(v) = resp.json::<Value>().await else {
+        return String::new();
+    };
+    let blob = v.to_string();
+    let lower = blob.to_lowercase();
+    if lower.contains("getpwuid") || lower.contains("uid not found") {
+        return " — LocalAI NeMo/PyTorch can’t resolve container UID (TrueNAS often runs as uid 568). In the LocalAI app env set USER=localai and HOME=/tmp (and ideally TORCHINDUCTOR_CACHE_DIR=/tmp/torch), then restart. Or install whisper-base and set DIARCH_LOCALAI_TRANSCRIBE_MODEL=whisper-base".into();
+    }
+    if lower.contains("cannot open shared object") || lower.contains("no such file or directory") {
+        return " — LocalAI ASR backend binary/library missing; install a whisper-* model from the gallery and point DIARCH_LOCALAI_TRANSCRIBE_MODEL at it".into();
+    }
+    if lower.contains("out of memory") || lower.contains("cudamalloc failed") {
+        return " — LocalAI GPU out of VRAM; unload other models before transcribing".into();
+    }
+    if lower.contains("grpc service not ready") || lower.contains("not ready") {
+        return " — LocalAI ASR backend failed to start; check backend logs for that model in the LocalAI UI".into();
+    }
+    String::new()
 }
 
 fn truncate(s: &str, max: usize) -> String {
