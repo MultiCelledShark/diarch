@@ -2391,18 +2391,77 @@ async fn sg_status(
 struct SgAuthReq {
     username: String,
     cookie: String,
+    /// Optional; must match the browser that minted `cf_clearance`.
+    user_agent: Option<String>,
 }
 
 async fn sg_auth(
     AuthUser(_): AuthUser,
     State(state): State<Arc<AppState>>,
     Json(body): Json<SgAuthReq>,
-) -> Result<Json<crate::storygraph::StoryGraphStatus>, (StatusCode, String)> {
-    let _ = crate::storygraph::save_credentials(&state, &body.username, &body.cookie)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    // Best-effort probe so health row updates immediately.
-    let _ = crate::storygraph::pull_lists(&state).await;
-    Ok(Json(crate::storygraph::status(&state)))
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mut st = crate::storygraph::save_credentials(
+        &state,
+        &body.username,
+        &body.cookie,
+        body.user_agent.as_deref(),
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let skip_live = std::env::var("DIARCH_STORYGRAPH_SKIP_LIVE_CHECK")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+
+    let verify = if skip_live {
+        Ok(())
+    } else {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            crate::storygraph::verify_access(&state),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => Err(
+                "StoryGraph live check timed out — Cloudflare may be blocking this host".into(),
+            ),
+        }
+    };
+
+    match &verify {
+        Ok(()) => {
+            let _ = state
+                .db
+                .set_integration_health("storygraph", "ok", None, true)
+                .await;
+            st.detail = Some(if skip_live {
+                "configured (live check skipped)".into()
+            } else {
+                "configured · live check ok".into()
+            });
+        }
+        Err(e) => {
+            let short: String = e.chars().take(200).collect();
+            let _ = state
+                .db
+                .set_integration_health("storygraph", "broken", Some(&short), false)
+                .await;
+            st.detail = Some(format!("configured · live check failed: {e}"));
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "username_set": st.username_set,
+        "cookie_set": st.cookie_set,
+        "remember_token": st.remember_token,
+        "cf_clearance": st.cf_clearance,
+        "username": st.username,
+        "cookie_hint": st.cookie_hint,
+        "detail": st.detail,
+        "config_path": st.config_path,
+        "verified": verify.is_ok(),
+        "verify_error": verify.err(),
+    })))
 }
 
 async fn sg_sync(

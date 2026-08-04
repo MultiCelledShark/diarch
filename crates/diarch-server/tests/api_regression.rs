@@ -8,6 +8,8 @@ use tempfile::tempdir;
 use tower::ServiceExt;
 
 async fn test_app() -> (tempfile::TempDir, axum::Router, Arc<diarch_server::state::AppState>) {
+    // Avoid hanging auth tests on outbound StoryGraph / Cloudflare.
+    std::env::set_var("DIARCH_STORYGRAPH_SKIP_LIVE_CHECK", "1");
     let dir = tempdir().unwrap();
     let config = Config {
         listen: "127.0.0.1:0".into(),
@@ -1549,23 +1551,30 @@ async fn storygraph_status_and_auth_save_credentials() {
         Some(&token),
         Some(json!({
             "username": "demo_user",
-            "cookie": "tokensecret99"
+            "cookie": "remember_user_token=tokensecret99; cf_clearance=clearme1234",
+            "user_agent": "Mozilla/5.0 TestAgent"
         })),
     )
     .await;
     assert_eq!(status, 200, "{st}");
     assert_eq!(st["username_set"], true);
     assert_eq!(st["cookie_set"], true);
+    assert_eq!(st["remember_token"], true);
+    assert_eq!(st["cf_clearance"], true);
+    assert_eq!(st["verified"], true);
     assert_eq!(st["username"], "demo_user");
     let hint = st["cookie_hint"].as_str().unwrap_or("");
     assert!(hint.ends_with("et99"), "{hint}");
     // Never echo the full cookie in the JSON body.
     let body = st.to_string();
     assert!(!body.contains("tokensecret99"), "{body}");
+    assert!(!body.contains("clearme1234"), "{body}");
 
     let path = state.config.data_dir.join("storygraph.conf");
     assert!(path.exists(), "expected credentials file at {}", path.display());
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("demo_user"));
     assert!(text.contains("tokensecret99"));
+    assert!(text.contains("cf_clearance=clearme1234"));
+    assert!(text.contains("user_agent: Mozilla/5.0 TestAgent"));
 }

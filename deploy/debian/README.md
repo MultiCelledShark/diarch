@@ -68,7 +68,7 @@ Without `DIARCH_AUDIBLE_KEY`, AAX upload is rejected; plain `.m4b` attach still 
 
 | Feature | Config | Needs |
 |---------|--------|-------|
-| StoryGraph sync + enrich | Integrations UI → `storygraph.conf`, or `DIARCH_STORYGRAPH_USER` + `DIARCH_STORYGRAPH_COOKIE` (`remember_user_token`) | Outbound HTTPS to `app.thestorygraph.com` |
+| StoryGraph sync + enrich | Integrations UI → paste full Cookie header (`remember_user_token` + usually `cf_clearance`) + optional matching User-Agent into `storygraph.conf`; or `DIARCH_STORYGRAPH_USER` / `DIARCH_STORYGRAPH_COOKIE` | Outbound HTTPS to `app.thestorygraph.com`. Cloudflare clearance is IP/UA-bound and expires ~30–60m — re-paste when Sync fails. |
 | Google Books enrich | `DIARCH_GOOGLE_BOOKS_KEY` | Outbound HTTPS to `googleapis.com` (unauthenticated quota is easy to hit; set a key for indie/recent titles OL/LoC lack) |
 | Open Library / LoC | none | Outbound HTTPS to `openlibrary.org`, Library of Congress |
 | LocalAI covers + transcription | `DIARCH_LOCALAI_URL`, optional `DIARCH_LOCALAI_IMAGE_MODEL` / `DIARCH_LOCALAI_IMAGE_SIZE` / `DIARCH_LOCALAI_TRANSCRIBE_MODEL` / `DIARCH_HERMES_URL` | Reachable from Keystone (e.g. TrueNAS LocalAI); still needs local `ffmpeg`/`ffprobe` for ASR chunking |

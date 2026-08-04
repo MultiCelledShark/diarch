@@ -22,6 +22,8 @@ pub struct SgBook {
 pub struct StoryGraphStatus {
     pub username_set: bool,
     pub cookie_set: bool,
+    pub remember_token: bool,
+    pub cf_clearance: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
     /// Masked cookie hint (never the full secret).
@@ -37,6 +39,7 @@ pub struct StoryGraphStatus {
 struct SgCreds {
     username: Option<String>,
     cookie: Option<String>,
+    user_agent: Option<String>,
 }
 
 fn creds_path(state: &AppState) -> PathBuf {
@@ -47,6 +50,7 @@ fn load_creds_file(path: &Path) -> Option<SgCreds> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut username = None;
     let mut cookie = None;
+    let mut user_agent = None;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -62,12 +66,21 @@ fn load_creds_file(path: &Path) -> Option<SgCreds> {
             if !v.is_empty() {
                 cookie = Some(v);
             }
+        } else if let Some(rest) = line.strip_prefix("user_agent:") {
+            let v = rest.trim().trim_matches('"').to_string();
+            if !v.is_empty() {
+                user_agent = Some(v);
+            }
         }
     }
-    if username.is_none() && cookie.is_none() {
+    if username.is_none() && cookie.is_none() && user_agent.is_none() {
         None
     } else {
-        Some(SgCreds { username, cookie })
+        Some(SgCreds {
+            username,
+            cookie,
+            user_agent,
+        })
     }
 }
 
@@ -81,35 +94,124 @@ fn resolved_creds(state: &AppState) -> SgCreds {
             cookie: file
                 .cookie
                 .or_else(|| state.config.storygraph_cookie.clone()),
+            user_agent: file.user_agent,
         };
     }
     SgCreds {
         username: state.config.storygraph_username.clone(),
         cookie: state.config.storygraph_cookie.clone(),
+        user_agent: None,
     }
 }
 
 fn mask_cookie(cookie: &str) -> String {
-    let raw = cookie
-        .strip_prefix("remember_user_token=")
-        .unwrap_or(cookie)
-        .trim();
+    let raw = cookie_pair_value(cookie, "remember_user_token")
+        .or_else(|| cookie_pair_value(cookie, "cf_clearance"))
+        .unwrap_or_else(|| {
+            cookie
+                .strip_prefix("remember_user_token=")
+                .unwrap_or(cookie)
+                .trim()
+                .to_string()
+        });
     if raw.len() <= 4 {
         "set".into()
     } else {
-        format!("…{}", &raw[raw.len() - 4..])
+        format!("…{}", &raw[raw.len().saturating_sub(4)..])
     }
 }
+
+fn cookie_pair_value(cookie_header: &str, name: &str) -> Option<String> {
+    let name_l = name.to_ascii_lowercase();
+    for part in cookie_header.split(';') {
+        let part = part.trim();
+        if let Some((k, v)) = part.split_once('=') {
+            if k.trim().eq_ignore_ascii_case(&name_l) {
+                let v = v.trim();
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn cookie_has(cookie_header: &str, name: &str) -> bool {
+    cookie_pair_value(cookie_header, name).is_some()
+}
+
+/// Accept bare `remember_user_token` value, `name=value`, or a full Cookie header
+/// (`remember_user_token=…; cf_clearance=…; …`). Cloudflare often requires
+/// `cf_clearance` in addition to the StoryGraph session cookie.
+pub fn normalize_cookie_header(raw: &str) -> Result<String> {
+    let raw = raw.trim().trim_matches('"');
+    if raw.is_empty() {
+        bail!("cookie required (paste remember_user_token and preferably cf_clearance)");
+    }
+    if !raw.contains('=') {
+        return Ok(format!("remember_user_token={raw}"));
+    }
+
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for part in raw.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let Some((k, v)) = part.split_once('=') else {
+            continue;
+        };
+        let k = k.trim();
+        let v = v.trim();
+        if k.is_empty() || v.is_empty() {
+            continue;
+        }
+        if let Some(existing) = pairs.iter_mut().find(|(name, _)| name.eq_ignore_ascii_case(k)) {
+            existing.1 = v.to_string();
+        } else {
+            pairs.push((k.to_string(), v.to_string()));
+        }
+    }
+    if pairs.is_empty() {
+        bail!("could not parse cookie string");
+    }
+    Ok(pairs
+        .into_iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("; "))
+}
+
+const DEFAULT_SG_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 pub fn status(state: &AppState) -> StoryGraphStatus {
     let path = creds_path(state);
     let creds = resolved_creds(state);
     let username_set = creds.username.as_ref().is_some_and(|s| !s.is_empty());
     let cookie_set = creds.cookie.as_ref().is_some_and(|s| !s.is_empty());
+    let cf_clearance = creds
+        .cookie
+        .as_deref()
+        .map(|c| cookie_has(c, "cf_clearance"))
+        .unwrap_or(false);
+    let remember_token = creds
+        .cookie
+        .as_deref()
+        .map(|c| cookie_has(c, "remember_user_token"))
+        .unwrap_or(false);
     let detail = match (username_set, cookie_set) {
         (false, false) => Some("username and cookie not set".into()),
         (false, true) => Some("username not set".into()),
         (true, false) => Some("cookie not set (Cloudflare / enrich will fail)".into()),
+        (true, true) if !remember_token => Some(
+            "cookie saved but missing remember_user_token — paste that SG cookie (and cf_clearance if challenged)"
+                .into(),
+        ),
+        (true, true) if !cf_clearance => Some(
+            "configured · no cf_clearance — if Sync hits Cloudflare, paste full Cookie header after solving the browser challenge"
+                .into(),
+        ),
         (true, true) => {
             if path.exists() {
                 Some("configured via Integrations".into())
@@ -123,31 +225,39 @@ pub fn status(state: &AppState) -> StoryGraphStatus {
         cookie_set,
         username: creds.username.clone(),
         cookie_hint: creds.cookie.as_deref().map(mask_cookie),
+        cf_clearance,
+        remember_token,
         detail,
         config_path: path.display().to_string(),
     }
 }
 
-/// Save username + cookie to `data_dir/storygraph.conf` (like rmapi.conf for reMarkable).
-pub fn save_credentials(state: &AppState, username: &str, cookie: &str) -> Result<StoryGraphStatus> {
+/// Save username + cookie (+ optional User-Agent) to `data_dir/storygraph.conf`.
+pub fn save_credentials(
+    state: &AppState,
+    username: &str,
+    cookie: &str,
+    user_agent: Option<&str>,
+) -> Result<StoryGraphStatus> {
     let username = username.trim();
-    let cookie = cookie.trim();
     if username.is_empty() {
         bail!("username required");
     }
-    if cookie.is_empty() {
-        bail!("cookie required (remember_user_token from StoryGraph)");
-    }
-    let cookie_val = if cookie.contains('=') {
-        cookie.to_string()
-    } else {
-        format!("remember_user_token={cookie}")
-    };
+    let cookie_val = normalize_cookie_header(cookie)?;
+    let ua = user_agent
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
     let path = creds_path(state);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let body = format!("username: {username}\ncookie: {cookie_val}\n");
+    let mut body = format!("username: {username}\ncookie: {cookie_val}\n");
+    if let Some(ref ua) = ua {
+        body.push_str("user_agent: ");
+        body.push_str(ua);
+        body.push('\n');
+    }
     std::fs::write(&path, body)?;
     #[cfg(unix)]
     {
@@ -254,44 +364,95 @@ pub async fn pull_lists(state: &AppState) -> Result<Vec<SgBook>> {
 }
 
 async fn fetch_list_html(state: &AppState, url: &str) -> Result<String> {
+    let creds = resolved_creds(state);
+    let ua = creds
+        .user_agent
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_SG_UA);
     let mut req = state
         .http
         .get(url)
-        .header(
-            "User-Agent",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        )
+        .header("User-Agent", ua)
         .header(
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         )
-        .header("Accept-Language", "en-US,en;q=0.9");
-    if let Some(cookie) = resolved_creds(state).cookie.filter(|s| !s.is_empty()) {
-        let cookie_val = if cookie.contains('=') {
-            cookie
-        } else {
-            format!("remember_user_token={cookie}")
-        };
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .header("Cache-Control", "no-cache")
+        .header("Pragma", "no-cache")
+        .header("Upgrade-Insecure-Requests", "1")
+        .header("Sec-Fetch-Dest", "document")
+        .header("Sec-Fetch-Mode", "navigate")
+        .header("Sec-Fetch-Site", "none")
+        .header("Sec-Fetch-User", "?1")
+        .header("Referer", "https://app.thestorygraph.com/");
+    if let Some(cookie) = creds.cookie.filter(|s| !s.is_empty()) {
+        let cookie_val = normalize_cookie_header(&cookie).unwrap_or(cookie);
         req = req.header("Cookie", cookie_val);
     }
     let resp = req.send().await?;
-    if !resp.status().is_success() {
-        anyhow::bail!("HTTP {} for {url}", resp.status());
+    let status = resp.status();
+    let cf_mitigated = resp.headers().get("cf-mitigated").is_some();
+    let cf_ray = resp
+        .headers()
+        .get("cf-ray")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    if !status.is_success() {
+        if status.as_u16() == 403 || status.as_u16() == 503 || cf_mitigated {
+            anyhow::bail!("{}", cloudflare_help_message(cf_ray.as_deref()));
+        }
+        anyhow::bail!("HTTP {status} for {url}");
     }
     let text = resp.text().await?;
-    if looks_like_cloudflare_challenge(&text) {
-        anyhow::bail!(
-            "Cloudflare challenge from StoryGraph — save cookie in Integrations (remember_user_token)"
-        );
+    if looks_like_cloudflare_challenge(&text) || cf_mitigated {
+        anyhow::bail!("{}", cloudflare_help_message(cf_ray.as_deref()));
     }
     Ok(text)
 }
 
+fn cloudflare_help_message(cf_ray: Option<&str>) -> String {
+    let ray = cf_ray
+        .map(|r| format!(" (cf-ray {r})"))
+        .unwrap_or_default();
+    format!(
+        "Cloudflare challenge from StoryGraph{ray}. In the browser that can open \
+         app.thestorygraph.com: solve any challenge, then DevTools → Network → any \
+         document request → copy the full Cookie header (needs remember_user_token \
+         and usually cf_clearance). Paste that into Integrations. Prefer the same \
+         public IP as this Diarch host; cf_clearance is IP/UA-bound and expires in \
+         ~30–60 minutes — also paste that browser’s User-Agent if you set one."
+    )
+}
+
 fn looks_like_cloudflare_challenge(html: &str) -> bool {
     let lower = html.to_ascii_lowercase();
-    lower.contains("just a moment...")
-        || (lower.contains("cloudflare") && lower.contains("challenge"))
+    lower.contains("just a moment")
         || lower.contains("cf-browser-verification")
+        || lower.contains("cdn-cgi/challenge")
+        || lower.contains("_cf_chl_")
+        || lower.contains("cf-challenge")
+        || (lower.contains("attention required") && lower.contains("cloudflare"))
+        || (lower.contains("cloudflare") && lower.contains("challenge-platform"))
+        || (lower.contains("turnstile") && lower.contains("cloudflare"))
+        || (lower.contains("<title>") && lower.contains("just a moment"))
+}
+
+/// Live check that StoryGraph HTML is reachable with current credentials.
+pub async fn verify_access(state: &AppState) -> Result<(), String> {
+    let creds = resolved_creds(state);
+    let Some(user) = creds.username.as_ref().filter(|s| !s.is_empty()) else {
+        return Err("StoryGraph username not set".into());
+    };
+    if creds.cookie.as_ref().is_none_or(|s| s.is_empty()) {
+        return Err("StoryGraph cookie not set".into());
+    }
+    let url = format!("https://app.thestorygraph.com/currently-reading/{user}");
+    match fetch_list_html(state, &url).await {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Search StoryGraph browse for metadata enrich hits.
@@ -988,6 +1149,27 @@ mod tests {
     fn mask_cookie_shows_tail() {
         assert_eq!(mask_cookie("abcdefghij"), "…ghij");
         assert_eq!(mask_cookie("remember_user_token=abcdefghij"), "…ghij");
+        assert_eq!(
+            mask_cookie("remember_user_token=abcdefghij; cf_clearance=zzzz9999"),
+            "…ghij"
+        );
+    }
+
+    #[test]
+    fn normalize_cookie_accepts_bare_token_and_full_header() {
+        assert_eq!(
+            normalize_cookie_header("secrettoken").unwrap(),
+            "remember_user_token=secrettoken"
+        );
+        let full = normalize_cookie_header(
+            "remember_user_token=abc; cf_clearance=def; __cf_bm=ghi",
+        )
+        .unwrap();
+        assert!(full.contains("remember_user_token=abc"));
+        assert!(full.contains("cf_clearance=def"));
+        assert!(full.contains("__cf_bm=ghi"));
+        assert!(cookie_has(&full, "cf_clearance"));
+        assert!(cookie_has(&full, "remember_user_token"));
     }
 
     #[test]
@@ -996,15 +1178,23 @@ mod tests {
         let path = dir.path().join("storygraph.conf");
         std::fs::write(
             &path,
-            "username: igrot\ncookie: remember_user_token=secretvalue\n",
+            "username: igrot\ncookie: remember_user_token=secretvalue; cf_clearance=clear\nuser_agent: Mozilla/5.0 Test\n",
         )
         .unwrap();
         let c = load_creds_file(&path).unwrap();
         assert_eq!(c.username.as_deref(), Some("igrot"));
-        assert_eq!(
-            c.cookie.as_deref(),
-            Some("remember_user_token=secretvalue")
-        );
+        assert!(c.cookie.as_deref().unwrap().contains("cf_clearance=clear"));
+        assert_eq!(c.user_agent.as_deref(), Some("Mozilla/5.0 Test"));
+    }
+
+    #[test]
+    fn cloudflare_html_detected() {
+        assert!(looks_like_cloudflare_challenge(
+            "<html><title>Just a moment...</title><div id=\"cf-challenge\"></div></html>"
+        ));
+        assert!(!looks_like_cloudflare_challenge(
+            "<html><body>Currently Reading</body></html>"
+        ));
     }
 
     #[test]

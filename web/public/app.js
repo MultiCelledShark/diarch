@@ -2465,9 +2465,13 @@ function renderStoryGraphStatus(st) {
   const parts = [];
   parts.push(st.username_set ? `user ${st.username || "set"}` : "username missing");
   parts.push(st.cookie_set ? `cookie ${st.cookie_hint || "set"}` : "cookie missing");
+  if (st.cookie_set) {
+    parts.push(st.remember_token ? "remember_user_token" : "no remember_user_token");
+    parts.push(st.cf_clearance ? "cf_clearance" : "no cf_clearance");
+  }
   if (st.detail) parts.push(st.detail);
   el.textContent = parts.join(" · ");
-  if (!st.username_set || !st.cookie_set) el.classList.add("error");
+  if (!st.username_set || !st.cookie_set || st.verified === false) el.classList.add("error");
   if (userInput && st.username && !userInput.value) userInput.value = st.username;
 }
 
@@ -2560,19 +2564,28 @@ document.getElementById("sg-auth-form")?.addEventListener("submit", async (e) =>
   const msg = document.getElementById("sg-auth-msg");
   const username = String(document.getElementById("sg-username").value || "").trim();
   const cookie = String(document.getElementById("sg-cookie").value || "").trim();
+  const userAgent = String(document.getElementById("sg-user-agent")?.value || "").trim();
   msg.classList.remove("error");
-  msg.textContent = "Saving…";
+  msg.textContent = "Saving & verifying against StoryGraph…";
   try {
     const st = await api("/api/storygraph/auth", {
       method: "POST",
-      json: { username, cookie },
+      json: {
+        username,
+        cookie,
+        user_agent: userAgent || undefined,
+      },
     });
     document.getElementById("sg-cookie").value = "";
     renderStoryGraphStatus(st);
-    msg.textContent =
-      st.username_set && st.cookie_set
-        ? "Saved. Use Sync StoryGraph or Enrich on a work."
-        : "Saved, but still incomplete.";
+    if (st.verified) {
+      msg.textContent = st.cf_clearance
+        ? "Verified. Sync or Enrich should work until cf_clearance expires."
+        : "Verified without cf_clearance — ok for now; if Cloudflare returns, re-paste a full Cookie header.";
+    } else {
+      msg.textContent = st.verify_error || st.detail || "Saved but live check failed.";
+      msg.classList.add("error");
+    }
     await loadIntegrations();
   } catch (err) {
     msg.textContent = err.message || String(err);

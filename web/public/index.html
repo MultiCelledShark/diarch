@@ -140,17 +140,20 @@
           </div>
           <div class="panel">
             <h2>StoryGraph</h2>
-            <p class="muted">Pull shelves for flags and use StoryGraph as a metadata enrich fallback. Cookie is the <code>remember_user_token</code> value from DevTools → Application → Cookies on <a href="https://app.thestorygraph.com" target="_blank" rel="noopener noreferrer">app.thestorygraph.com</a>.</p>
+            <p class="muted">Pull shelves for flags and enrich fallback. Cloudflare often blocks bare tokens — after you can load <a href="https://app.thestorygraph.com" target="_blank" rel="noopener noreferrer">app.thestorygraph.com</a> in a browser, open DevTools → Network → click a document request → copy the full <strong>Cookie</strong> request header (needs <code>remember_user_token</code>, usually also <code>cf_clearance</code>). Paste that below. Clearance is IP/UA-bound and expires (~30–60m); refresh when Sync fails.</p>
             <p id="sg-status" class="muted">Checking…</p>
             <form id="sg-auth-form" class="form-grid">
               <label>Username
                 <input name="username" id="sg-username" autocomplete="username" spellcheck="false" placeholder="your_sg_username" required />
               </label>
-              <label>Cookie (<code>remember_user_token</code>)
-                <input name="cookie" id="sg-cookie" type="password" autocomplete="off" spellcheck="false" placeholder="paste token value" required />
+              <label>Cookie header
+                <textarea name="cookie" id="sg-cookie" rows="3" autocomplete="off" spellcheck="false" placeholder="remember_user_token=…; cf_clearance=…; …" required></textarea>
+              </label>
+              <label>User-Agent (optional, match the browser that got cf_clearance)
+                <input name="user_agent" id="sg-user-agent" autocomplete="off" spellcheck="false" placeholder="Mozilla/5.0 …" />
               </label>
               <div class="row">
-                <button type="submit" id="btn-sg-auth">Save credentials</button>
+                <button type="submit" id="btn-sg-auth">Save &amp; verify</button>
                 <button type="button" id="btn-sg-refresh">Refresh status</button>
                 <button type="button" id="btn-sg-sync">Sync StoryGraph</button>
               </div>
