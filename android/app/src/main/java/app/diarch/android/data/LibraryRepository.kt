@@ -97,8 +97,17 @@ class LibraryRepository(
 
     suspend fun getProgress(id: String, mode: String): ReadingProgress? {
         val remote = runCatching { apiClient.api().getProgress(id, mode) }.getOrNull()
-        if (remote != null) return remote
-        return offlineStore.readLocalProgress(id, mode)
+        val local = offlineStore.readLocalProgress(id, mode)
+        if (remote == null) return local
+        if (local == null) return remote
+        val remoteMs = parseUpdatedAtMillis(remote.updatedAt)
+        val localMs = parseUpdatedAtMillis(local.updatedAt)
+        return if (localMs != null && (remoteMs == null || localMs > remoteMs)) local else remote
+    }
+
+    private fun parseUpdatedAtMillis(value: String?): Long? {
+        if (value.isNullOrBlank()) return null
+        return runCatching { java.time.Instant.parse(value).toEpochMilli() }.getOrNull()
     }
 
     fun coverUrl(workId: String, updatedAt: String? = null): String =

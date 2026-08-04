@@ -2,6 +2,7 @@ pub mod audio;
 pub mod auth;
 pub mod fixer;
 pub mod localai;
+pub mod login_limit;
 pub mod metadata;
 pub mod remarkable;
 pub mod routes;
@@ -14,7 +15,6 @@ use diarch_core::Config;
 use diarch_db::Db;
 use state::AppState;
 use std::sync::Arc;
-use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 /// Build application state (DB, taxonomy seed, admin bootstrap).
@@ -23,8 +23,20 @@ pub async fn build_state(config: Config) -> Result<Arc<AppState>> {
     let db = Db::connect(&config.db_path()).await?;
     let seed = include_str!("../../../taxonomy/seed.json");
     db.seed_taxonomy(seed).await?;
-    db.ensure_admin(&config.admin_username, &config.admin_password)
-        .await?;
+    let force = std::env::var("DIARCH_ADMIN_PASS_FORCE")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let force_password = if force {
+        Some(config.admin_password.as_str())
+    } else {
+        None
+    };
+    db.ensure_admin(
+        &config.admin_username,
+        &config.admin_password,
+        force_password,
+    )
+    .await?;
     for name in [
         "pandoc",
         "ocrmypdf",
@@ -46,15 +58,26 @@ pub async fn build_state(config: Config) -> Result<Arc<AppState>> {
         .timeout(std::time::Duration::from_secs(60))
         .connect_timeout(std::time::Duration::from_secs(15))
         .build()?;
-    Ok(Arc::new(AppState { db, config, http }))
+    let http_no_redirect = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    Ok(Arc::new(AppState {
+        db,
+        config,
+        http,
+        http_no_redirect,
+        login_limiter: login_limit::LoginLimiter::new(),
+    }))
 }
 
 /// HTTP router used by the binary and integration tests.
 pub fn app(state: Arc<AppState>) -> Router {
+    // No permissive CORS: web UI is same-origin; Android uses OkHttp (not browser CORS).
     Router::new()
         .merge(routes::router())
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 

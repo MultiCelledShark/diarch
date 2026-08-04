@@ -31,9 +31,9 @@
     mode: "epub",
     workId: null,
     baseUrl: null,
-    token: null,
     rtl: false,
     mdScrollTimer: null,
+    epubRelocateTimer: null,
     epubLocationsReady: false,
     tocItems: [],
     offline: false,
@@ -107,18 +107,16 @@
     }
   }
 
+  // Auth for these content requests is attached natively by the WebView's
+  // shouldInterceptRequest (see ReaderScreen.kt), so no token is needed here.
   async function fetchBinary(path) {
-    const res = await fetch(state.baseUrl + path, {
-      headers: state.token ? { Authorization: "Bearer " + state.token } : {},
-    });
+    const res = await fetch(state.baseUrl + path);
     if (!res.ok) throw new Error("HTTP " + res.status);
     return res.arrayBuffer();
   }
 
   async function fetchText(path) {
-    const res = await fetch(state.baseUrl + path, {
-      headers: state.token ? { Authorization: "Bearer " + state.token } : {},
-    });
+    const res = await fetch(state.baseUrl + path);
     if (!res.ok) throw new Error("HTTP " + res.status);
     return res.text();
   }
@@ -134,13 +132,13 @@
     if (area) area.innerHTML = "";
   }
 
-  async function loadEpub(progress, localBase64) {
+  async function loadEpub(progress, localEpubUrl) {
     destroyEpub();
     const epubArea = document.getElementById("epub-area");
     const mdArea = document.getElementById("md-area");
     epubArea.hidden = false;
     mdArea.hidden = true;
-    setStatus(localBase64 ? "Opening offline EPUB…" : "Loading EPUB…");
+    setStatus(localEpubUrl ? "Opening offline EPUB…" : "Loading EPUB…");
     state.mode = "epub";
 
     if (typeof ePub === "undefined") {
@@ -149,16 +147,15 @@
       return;
     }
 
-    let buf;
-    if (localBase64) {
-      const binary = atob(localBase64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      buf = bytes.buffer;
+    // Offline books are opened directly by URL — the WebView's
+    // shouldInterceptRequest serves the local file, so the whole EPUB never
+    // has to be base64-encoded and shuttled through the JS bridge.
+    if (localEpubUrl) {
+      state.book = ePub(localEpubUrl);
     } else {
-      buf = await fetchBinary("/api/works/" + state.workId + "/content/epub");
+      const buf = await fetchBinary("/api/works/" + state.workId + "/content/epub");
+      state.book = ePub(buf);
     }
-    state.book = ePub(buf);
     const width = Math.max(epubArea.clientWidth || 0, window.innerWidth || 320);
     const height = Math.max(epubArea.clientHeight || 0, window.innerHeight || 480);
     state.rendition = state.book.renderTo(epubArea, {
@@ -200,15 +197,19 @@
           pct = Math.min(1, Math.max(0, loc.start.percentage)) * 100;
         }
       } catch (e) {}
-      post("progress", {
-        mode: "epub",
-        position: loc.start.cfi || "",
-        percent: pct,
-      });
+      const cfi = loc.start.cfi || "";
+      clearTimeout(state.epubRelocateTimer);
+      state.epubRelocateTimer = setTimeout(function () {
+        post("progress", {
+          mode: "epub",
+          position: cfi,
+          percent: pct,
+        });
+      }, 300);
     });
 
     setStatus("");
-    post("ready", { mode: "epub", offline: !!localBase64 });
+    post("ready", { mode: "epub", offline: !!localEpubUrl });
   }
 
   function mdPercent(area) {
@@ -284,7 +285,6 @@
     init: function (cfg) {
       state.workId = cfg.workId;
       state.baseUrl = (cfg.baseUrl || "").replace(/\/$/, "");
-      state.token = cfg.token || "";
       state.rtl = !!cfg.rtl;
       state.typo = cfg.typography || {};
       applyTypography(state.typo);
@@ -301,7 +301,7 @@
             opts.localMarkdown != null ? opts.localMarkdown : null,
           );
         } else {
-          await loadEpub(progress, opts.localEpubBase64 || null);
+          await loadEpub(progress, opts.localEpubUrl || null);
         }
       } catch (e) {
         setStatus(e.message || String(e));

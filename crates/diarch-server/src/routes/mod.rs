@@ -21,12 +21,26 @@ use crate::auth::{AdminUser, AuthUser};
 use crate::metadata;
 use crate::state::AppState;
 
+/// Default cap for most JSON/form requests. Routes that legitimately accept
+/// large uploads (library import, per-work import, audio upload) opt into a
+/// higher limit via their own sub-router below.
+const DEFAULT_BODY_LIMIT: usize = 32 * 1024 * 1024;
+const LARGE_UPLOAD_BODY_LIMIT: usize = 512 * 1024 * 1024;
+
 #[derive(Embed)]
 #[folder = "../../web/dist/"]
 #[prefix = ""]
 struct Assets;
 
 pub fn router() -> Router<Arc<AppState>> {
+    // Large uploads get their own sub-router + body limit; every other route
+    // stays capped at DEFAULT_BODY_LIMIT (see build note on the layer below).
+    let large_uploads = Router::new()
+        .route("/api/library/import", post(library_import))
+        .route("/api/works/{id}/import", post(import_file))
+        .route("/api/works/{id}/audio", post(upload_audio))
+        .layer(DefaultBodyLimit::max(LARGE_UPLOAD_BODY_LIMIT));
+
     Router::new()
         .route("/api/health", get(health))
         .route("/api/auth/login", post(login))
@@ -35,7 +49,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/users", get(list_users).post(create_user))
         .route("/api/taxonomy", get(list_taxonomy))
         .route("/api/works", get(list_works).post(create_work))
-        .route("/api/library/import", post(library_import))
+        .merge(large_uploads)
         .route(
             "/api/works/{id}",
             get(get_work).put(update_work).delete(delete_work),
@@ -44,7 +58,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/works/{id}/apply-meta", post(apply_meta_hit))
         .route("/api/works/{id}/grants", get(list_grants).post(add_grant))
         .route("/api/works/{id}/grants/{user_id}", delete(revoke_grant))
-        .route("/api/works/{id}/import", post(import_file))
         .route("/api/works/{id}/confirm", post(confirm_review))
         .route("/api/works/{id}/download/epub", get(download_epub))
         .route("/api/works/{id}/download/markdown", get(download_md))
@@ -56,7 +69,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/works/{id}/cover/candidate", get(get_cover_candidate))
         .route("/api/works/{id}/cover/approve", post(approve_cover_candidate))
         .route("/api/works/{id}/cover/discard", post(discard_cover_candidate))
-        .route("/api/works/{id}/audio", post(upload_audio))
         .route("/api/works/{id}/audio/chapters", get(audio_chapters))
         .route("/api/works/{id}/transcribe", post(request_transcribe))
         .route("/api/works/{id}/transcript", get(get_transcript))
@@ -88,14 +100,13 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/queue/needs_tts/export", post(export_tts_queue))
         .route("/", get(index))
         .route("/assets/{*path}", get(static_asset))
-        .layer(DefaultBodyLimit::max(512 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT))
 }
 
-async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+async fn health(State(_state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "ok": true,
         "service": "diarch",
-        "data_dir": state.config.data_dir,
     }))
 }
 
@@ -105,50 +116,114 @@ struct LoginReq {
     password: String,
 }
 
+/// `DIARCH_COOKIE_SECURE=1` marks the session cookie `Secure` (only sent over
+/// HTTPS). Off by default since Diarch is often reached over plain HTTP on a
+/// LAN/VPN; turn it on once you're fronting it with TLS.
+fn cookie_secure() -> bool {
+    std::env::var("DIARCH_COOKIE_SECURE")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+/// A fixed-cost Argon2 hash we verify against when the username doesn't
+/// exist, so failed logins take roughly the same time whether or not the
+/// account is real (mitigates username enumeration via timing).
+fn dummy_password_hash() -> &'static str {
+    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HASH.get_or_init(|| {
+        diarch_db::Db::hash_password("diarch-timing-safe-dummy-password-fixed").unwrap_or_else(
+            |_| {
+                "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHRzb21lc2FsdA\
+                 $ZGVhZGJlZWZkZWFkYmVlZmRlYWRiZWVmZGVhZGJlZWY"
+                    .to_string()
+            },
+        )
+    })
+}
+
 async fn login(
     State(state): State<Arc<AppState>>,
+    crate::login_limit::MaybeConnectInfo(connect_info): crate::login_limit::MaybeConnectInfo,
+    headers: HeaderMap,
     jar: CookieJar,
     Json(body): Json<LoginReq>,
 ) -> Result<(CookieJar, Json<serde_json::Value>), StatusCode> {
+    let username = body.username.trim();
+    let ip = crate::login_limit::client_ip(&headers, connect_info.map(|c| c.ip()));
+
+    if state.login_limiter.check(username, &ip).is_some() {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+
     let hash = state
         .db
-        .get_password_hash(&body.username)
+        .get_password_hash(username)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    if !diarch_db::Db::verify_password(&body.password, &hash).unwrap_or(false) {
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let verified = match hash.as_deref() {
+        Some(h) => diarch_db::Db::verify_password(&body.password, h).unwrap_or(false),
+        None => {
+            // Do the same Argon2 work even when the user is unknown.
+            let _ = diarch_db::Db::verify_password(&body.password, dummy_password_hash());
+            false
+        }
+    };
+    if !verified {
+        state.login_limiter.record_failure(username, &ip);
         return Err(StatusCode::UNAUTHORIZED);
     }
+
     let user = state
         .db
-        .get_user_by_username(&body.username)
+        .get_user_by_username(username)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
+    state.login_limiter.record_success(username, &ip);
+
     let token = state
         .db
         .create_session(user.id, 30)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let cookie = Cookie::build(("diarch_session", token.clone()))
+    let mut builder = Cookie::build(("diarch_session", token.clone()))
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
-        .build();
+        .max_age(cookie::time::Duration::days(30));
+    if cookie_secure() {
+        builder = builder.secure(true);
+    }
     Ok((
-        jar.add(cookie),
+        jar.add(builder.build()),
         Json(serde_json::json!({ "token": token, "user": user })),
     ))
 }
 
 async fn logout(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<(CookieJar, StatusCode), StatusCode> {
     if let Some(c) = jar.get("diarch_session") {
         let _ = state.db.delete_session(c.value()).await;
     }
-    Ok((jar.remove(Cookie::from("diarch_session")), StatusCode::NO_CONTENT))
+    // Bearer-authenticated clients (e.g. Android) don't hold the cookie —
+    // delete their session explicitly when the header is present.
+    if let Some(bearer) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        let _ = state.db.delete_session(bearer).await;
+    }
+    // Removal cookie must share Path (and Secure, for browsers that key on
+    // it) with the one we set at login, or the browser won't clear it.
+    let mut removal = Cookie::build(("diarch_session", "")).path("/");
+    if cookie_secure() {
+        removal = removal.secure(true);
+    }
+    Ok((jar.remove(removal.build()), StatusCode::NO_CONTENT))
 }
 
 async fn me(AuthUser(user): AuthUser) -> Json<User> {
@@ -176,6 +251,10 @@ async fn create_user(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateUserReq>,
 ) -> Result<(StatusCode, Json<User>), StatusCode> {
+    if body.username.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    diarch_db::Db::validate_password_strength(&body.password).map_err(|_| StatusCode::BAD_REQUEST)?;
     let u = state
         .db
         .create_user(&body.username, &body.password, body.is_admin.unwrap_or(false))
@@ -344,20 +423,7 @@ async fn get_work(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    if !state
-        .db
-        .user_can_access(&user, id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let work = state
-        .db
-        .get_work(id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let work = require_accessible_work(&state, &user, id).await?;
     let codes = state.db.work_codes(id).await.unwrap_or_default();
     let assets = state.db.list_assets(id).await.unwrap_or_default();
     let has_import_pdf = state.config.work_dir(id).join("import.pdf").exists();
@@ -608,15 +674,7 @@ async fn apply_meta_hit(
     Path(id): Path<Uuid>,
     Json(mut hit): Json<metadata::MetaHit>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let mut work = state
-        .db
-        .get_work(id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let mut work = require_accessible_work(&state, &user, id).await?;
 
     metadata::attach_taxonomy(&mut hit);
 
@@ -745,15 +803,24 @@ async fn import_file(
     if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
         return Err(StatusCode::FORBIDDEN);
     }
+    let imports = state.config.data_dir.join("imports");
+    tokio::fs::create_dir_all(&imports)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut saved: Option<(String, std::path::PathBuf)> = None;
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?
     {
-        let name = field.file_name().unwrap_or("upload.bin").to_string();
+        let raw = field.file_name().unwrap_or("upload.bin").to_string();
+        let name = diarch_core::sanitize_upload_filename(&raw).map_err(|_| StatusCode::BAD_REQUEST)?;
         let data = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
-        let tmp = state.config.data_dir.join("imports").join(format!("{id}-{name}"));
+        let tmp = imports.join(format!("{id}-{name}"));
+        // Ensure resolved path stays under imports/
+        if !tmp.starts_with(&imports) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
         tokio::fs::write(&tmp, &data)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -765,11 +832,16 @@ async fn import_file(
         .create_job("import", Some(id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    // stash path in job detail
+    let rel = format!("imports/{id}-{name}");
     let _ = state
         .db
-        .update_job(job.id, "pending", Some(&format!("{name}|{}", path.display())))
+        .update_job(
+            job.id,
+            "pending",
+            Some(&serde_json::json!({ "name": name, "rel_path": rel }).to_string()),
+        )
         .await;
+    let _ = path;
     Ok(Json(serde_json::json!({ "job_id": job.id })))
 }
 
@@ -792,7 +864,10 @@ async fn library_import(
     {
         let field_name = field.name().unwrap_or("").to_string();
         if field_name == "file" || field.file_name().is_some() {
-            let name = field.file_name().unwrap_or("book.epub").to_string();
+            let raw = field.file_name().unwrap_or("book.epub").to_string();
+            let name = diarch_core::sanitize_upload_filename(&raw).map_err(|_| {
+                (StatusCode::BAD_REQUEST, "invalid filename".into())
+            })?;
             let data = field
                 .bytes()
                 .await
@@ -842,13 +917,11 @@ async fn library_import(
         .replace('_', " ")
         .replace('-', " ");
 
-    // Peek EPUB metadata before creating the work when possible
-    let tmp_peek = state
-        .config
-        .data_dir
-        .join("imports")
-        .join(format!("peek-{}", Uuid::new_v4()));
-    tokio::fs::create_dir_all(state.config.data_dir.join("imports"))
+    // Generate the work id up front so we can write the upload straight to
+    // its final `imports/{id}-{name}` destination — no separate peek copy.
+    let work_id = Uuid::new_v4();
+    let imports_dir = state.config.data_dir.join("imports");
+    tokio::fs::create_dir_all(&imports_dir)
         .await
         .map_err(|_| {
             (
@@ -856,11 +929,17 @@ async fn library_import(
                 "imports dir failed".into(),
             )
         })?;
-    tokio::fs::write(&tmp_peek, &data)
+    let dest = imports_dir.join(format!("{work_id}-{name}"));
+    if !dest.starts_with(&imports_dir) {
+        return Err((StatusCode::BAD_REQUEST, "invalid import path".into()));
+    }
+    tokio::fs::write(&dest, &data)
         .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "peek write failed".into()))?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "store import failed".into()))?;
     let meta = if lower.ends_with(".epub") {
-        diarch_import::read_epub_metadata(&tmp_peek).unwrap_or_default()
+        diarch_import::read_epub_metadata_async(&dest)
+            .await
+            .unwrap_or_default()
     } else {
         diarch_import::EpubMeta::default()
     };
@@ -884,7 +963,7 @@ async fn library_import(
         .or_else(|| diarch_core::taxonomy::suggest_primary(&codes));
     let is_manga = diarch_core::infer_manga(primary, &codes, false);
     let work = Work {
-        id: Uuid::new_v4(),
+        id: work_id,
         title: title_override
             .or(meta.title)
             .or(hint.title)
@@ -936,27 +1015,24 @@ async fn library_import(
     let svg = crate::metadata::placeholder_cover_svg(&work.title, &work.authors);
     let _ = tokio::fs::write(state.config.work_dir(work.id).join("cover.svg"), svg).await;
 
-    let dest = state
-        .config
-        .data_dir
-        .join("imports")
-        .join(format!("{}-{}", work.id, name));
-    tokio::fs::write(&dest, &data)
-        .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "store import failed".into()))?;
-    let _ = tokio::fs::remove_file(&tmp_peek).await;
-
     let job = state
         .db
         .create_job("import", Some(work.id))
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "job create failed".into()))?;
+    let rel = format!("imports/{}-{}", work.id, name);
     let _ = state
         .db
         .update_job(
             job.id,
             "pending",
-            Some(&format!("{name}|{}", dest.display())),
+            Some(
+                &serde_json::json!({
+                    "name": name,
+                    "rel_path": rel,
+                })
+                .to_string(),
+            ),
         )
         .await;
 
@@ -1122,6 +1198,129 @@ async fn confirm_review(
     Ok(Json(serde_json::json!({ "job_id": job.id })))
 }
 
+enum RangeResult {
+    Full,
+    Partial(u64, u64),
+    NotSatisfiable,
+}
+
+/// Parse a single `Range: bytes=...` header (start-end, start-, or -suffix).
+/// Multi-range requests and anything unparseable fall back to a full response
+/// rather than erroring, matching common server behavior.
+fn parse_range(range: Option<&str>, len: u64) -> RangeResult {
+    let Some(range) = range else {
+        return RangeResult::Full;
+    };
+    let Some(r) = range.strip_prefix("bytes=") else {
+        return RangeResult::Full;
+    };
+    if r.contains(',') {
+        return RangeResult::Full;
+    }
+    let mut parts = r.split('-');
+    let start_s = parts.next().unwrap_or("");
+    let end_s = parts.next().unwrap_or("");
+    if start_s.is_empty() {
+        let Ok(suffix) = end_s.parse::<u64>() else {
+            return RangeResult::Full;
+        };
+        if suffix == 0 || len == 0 {
+            return RangeResult::NotSatisfiable;
+        }
+        return RangeResult::Partial(len.saturating_sub(suffix), len.saturating_sub(1));
+    }
+    let Ok(start) = start_s.parse::<u64>() else {
+        return RangeResult::Full;
+    };
+    let end = if end_s.is_empty() {
+        len.saturating_sub(1)
+    } else {
+        match end_s.parse::<u64>() {
+            Ok(e) => e.min(len.saturating_sub(1)),
+            Err(_) => return RangeResult::Full,
+        }
+    };
+    if len == 0 || start > end || start >= len {
+        return RangeResult::NotSatisfiable;
+    }
+    RangeResult::Partial(start, end)
+}
+
+/// Serve a file with HTTP Range support, streaming from disk rather than
+/// buffering the whole file in memory (important for multi-GB audiobooks).
+async fn serve_file_ranged(
+    path: &std::path::Path,
+    content_type: &str,
+    disposition: Option<String>,
+    range: Option<&str>,
+) -> Result<Response, StatusCode> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let len = file
+        .metadata()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .len();
+
+    match parse_range(range, len) {
+        RangeResult::NotSatisfiable => Err(StatusCode::RANGE_NOT_SATISFIABLE),
+        RangeResult::Partial(start, end) => {
+            file.seek(std::io::SeekFrom::Start(start))
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let take_len = end - start + 1;
+            let stream = tokio_util::io::ReaderStream::new(file.take(take_len));
+            let mut builder = Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}"))
+                .header(header::ACCEPT_RANGES, "bytes")
+                .header(header::CONTENT_LENGTH, take_len.to_string());
+            if let Some(d) = disposition {
+                builder = builder.header(header::CONTENT_DISPOSITION, d);
+            }
+            builder
+                .body(axum::body::Body::from_stream(stream))
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        }
+        RangeResult::Full => {
+            let stream = tokio_util::io::ReaderStream::new(file);
+            let mut builder = Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::ACCEPT_RANGES, "bytes")
+                .header(header::CONTENT_LENGTH, len.to_string());
+            if let Some(d) = disposition {
+                builder = builder.header(header::CONTENT_DISPOSITION, d);
+            }
+            builder
+                .body(axum::body::Body::from_stream(stream))
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// Access-check + fetch a work in one call — the common prelude shared by
+/// most work-scoped handlers.
+async fn require_accessible_work(
+    state: &AppState,
+    user: &User,
+    id: Uuid,
+) -> Result<Work, StatusCode> {
+    if !state.db.user_can_access(user, id).await.unwrap_or(false) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    state
+        .db
+        .get_work(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
 async fn work_title(state: &AppState, id: Uuid) -> String {
     state
         .db
@@ -1138,46 +1337,40 @@ async fn download_epub(
     AuthUser(user): AuthUser,
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
         return Err(StatusCode::FORBIDDEN);
     }
     let path = state.config.work_dir(id).join("book.epub");
-    let data = tokio::fs::read(&path)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
     let title = work_title(&state, id).await;
     let disp = diarch_core::content_disposition_attachment(&title, "epub");
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/epub+zip")
-        .header(header::CONTENT_DISPOSITION, disp)
-        .body(axum::body::Body::from(data))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    serve_file_ranged(&path, "application/epub+zip", Some(disp), range).await
 }
 
 async fn download_md(
     AuthUser(user): AuthUser,
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
         return Err(StatusCode::FORBIDDEN);
     }
     let out = state.config.data_dir.join("imports").join(format!("{id}-md.zip"));
-    diarch_import::zip_markdown_bundle(&state.config.library_dir(), id, &out)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let data = tokio::fs::read(&out)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let library_dir = state.config.library_dir();
+    tokio::task::spawn_blocking({
+        let out = out.clone();
+        move || diarch_import::zip_markdown_bundle(&library_dir, id, &out)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let title = work_title(&state, id).await;
     let disp = diarch_core::content_disposition_attachment(&title, "md.zip");
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/zip")
-        .header(header::CONTENT_DISPOSITION, disp)
-        .body(axum::body::Body::from(data))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    serve_file_ranged(&out, "application/zip", Some(disp), range).await
 }
 
 async fn get_cover(
@@ -1240,12 +1433,16 @@ async fn upload_cover(
         let data = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
         apply_cover_bytes(&state, id, &data)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Write cover bytes to `cover.jpg` after sniffing the magic bytes — only
+/// JPEG/PNG/WebP are accepted regardless of the claimed content type.
 async fn apply_cover_bytes(state: &AppState, id: Uuid, data: &[u8]) -> anyhow::Result<()> {
+    let mime = diarch_core::sniff_image_mime(data)
+        .ok_or_else(|| anyhow::anyhow!("unsupported image format (expected JPEG, PNG, or WebP)"))?;
     let dest = state.config.work_dir(id).join("cover.jpg");
     tokio::fs::write(&dest, data).await?;
     if let Some(mut w) = state.db.get_work(id).await.ok().flatten() {
@@ -1258,7 +1455,7 @@ async fn apply_cover_bytes(state: &AppState, id: Uuid, data: &[u8]) -> anyhow::R
         work_id: id,
         kind: AssetKind::Cover,
         relative_path: "cover.jpg".into(),
-        mime: Some("image/jpeg".into()),
+        mime: Some(mime.into()),
         bytes: Some(data.len() as i64),
         created_at: Utc::now(),
     };
@@ -1271,15 +1468,7 @@ async fn fetch_cover(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let work = state
-        .db
-        .get_work(id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let work = require_accessible_work(&state, &user, id).await?;
     let Some(isbn) = work.isbn.as_deref().filter(|s| !s.is_empty()) else {
         return Ok(Json(serde_json::json!({
             "ok": false,
@@ -1311,15 +1500,7 @@ async fn reset_cover_placeholder(
     Path(id): Path<Uuid>,
     Json(req): Json<PlaceholderCoverReq>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let mut work = state
-        .db
-        .get_work(id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let mut work = require_accessible_work(&state, &user, id).await?;
     let title = req
         .title
         .as_deref()
@@ -1381,15 +1562,7 @@ async fn generate_cover(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let work = state
-        .db
-        .get_work(id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let work = require_accessible_work(&state, &user, id).await?;
     let genre = work
         .primary_code
         .map(|c| c.to_string())
@@ -1437,15 +1610,7 @@ async fn cover_prompt(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let work = state
-        .db
-        .get_work(id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let work = require_accessible_work(&state, &user, id).await?;
     let genre = work
         .primary_code
         .map(|c| c.to_string())
@@ -1696,22 +1861,16 @@ async fn get_transcript(
     AuthUser(user): AuthUser,
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
         return Err(StatusCode::FORBIDDEN);
     }
     let path = state.config.work_dir(id).join("transcript.txt");
-    let data = tokio::fs::read(&path)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
     let title = work_title(&state, id).await;
     let disp = diarch_core::content_disposition_attachment(&title, "transcript.txt");
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .header(header::CONTENT_DISPOSITION, disp)
-        .body(axum::body::Body::from(data))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    serve_file_ranged(&path, "text/plain; charset=utf-8", Some(disp), range).await
 }
 
 async fn stream_audio(
@@ -1723,52 +1882,11 @@ async fn stream_audio(
     if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
         return Err(StatusCode::FORBIDDEN);
     }
-    // Path traversal guard
-    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    // Path traversal guard — same rules as upload filenames
+    let filename = diarch_core::sanitize_upload_filename(&filename).map_err(|_| StatusCode::BAD_REQUEST)?;
     let path = state.config.work_dir(id).join("audio").join(&filename);
-    let data = tokio::fs::read(&path)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-    let len = data.len() as u64;
-    if let Some(range) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
-        if let Some(r) = range.strip_prefix("bytes=") {
-            let mut parts = r.split('-');
-            let start: u64 = parts.next().unwrap_or("0").parse().unwrap_or(0);
-            let end: u64 = parts
-                .next()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(len.saturating_sub(1))
-                .min(len.saturating_sub(1));
-            if start > end || len == 0 {
-                return Err(StatusCode::RANGE_NOT_SATISFIABLE);
-            }
-            let slice = data[start as usize..=end as usize].to_vec();
-            return Ok((
-                StatusCode::PARTIAL_CONTENT,
-                [
-                    (header::CONTENT_TYPE, "audio/mp4".into()),
-                    (
-                        header::CONTENT_RANGE,
-                        format!("bytes {start}-{end}/{len}"),
-                    ),
-                    (header::ACCEPT_RANGES, "bytes".into()),
-                    (header::CONTENT_LENGTH, slice.len().to_string()),
-                ],
-                slice,
-            )
-                .into_response());
-        }
-    }
-    Ok((
-        [
-            (header::CONTENT_TYPE, "audio/mp4"),
-            (header::ACCEPT_RANGES, "bytes"),
-        ],
-        data,
-    )
-        .into_response())
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    serve_file_ranged(&path, "audio/mp4", None, range).await
 }
 
 #[derive(Deserialize)]
@@ -1830,15 +1948,14 @@ async fn get_markdown(
     AuthUser(user): AuthUser,
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
         return Err(StatusCode::FORBIDDEN);
     }
     let path = state.config.work_dir(id).join("book.md");
-    let data = tokio::fs::read(&path)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-    Ok(([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], data).into_response())
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    serve_file_ranged(&path, "text/markdown; charset=utf-8", None, range).await
 }
 
 async fn put_markdown(
@@ -1887,50 +2004,40 @@ async fn get_pdf_file(
     AuthUser(user): AuthUser,
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
         return Err(StatusCode::FORBIDDEN);
     }
     let path = state.config.work_dir(id).join("import.pdf");
-    let data = tokio::fs::read(&path)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, "application/pdf"),
-            (
-                header::CONTENT_DISPOSITION,
-                "inline; filename=\"import.pdf\"",
-            ),
-        ],
-        data,
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    serve_file_ranged(
+        &path,
+        "application/pdf",
+        Some("inline; filename=\"import.pdf\"".to_string()),
+        range,
     )
-        .into_response())
+    .await
 }
 
 async fn get_epub_file(
     AuthUser(user): AuthUser,
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
         return Err(StatusCode::FORBIDDEN);
     }
     let path = state.config.work_dir(id).join("book.epub");
-    let data = tokio::fs::read(&path)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, "application/epub+zip"),
-            (
-                header::CONTENT_DISPOSITION,
-                "inline; filename=\"book.epub\"",
-            ),
-        ],
-        data,
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    serve_file_ranged(
+        &path,
+        "application/epub+zip",
+        Some("inline; filename=\"book.epub\"".to_string()),
+        range,
     )
-        .into_response())
+    .await
 }
 
 async fn send_remarkable(
@@ -1952,19 +2059,13 @@ async fn refresh_metadata(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Work>, StatusCode> {
-    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let mut work = state
-        .db
-        .get_work(id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let mut work = require_accessible_work(&state, &user, id).await?;
 
     let epub = state.config.work_dir(id).join("book.epub");
     let meta = if epub.exists() {
-        diarch_import::read_epub_metadata(&epub).unwrap_or_default()
+        diarch_import::read_epub_metadata_async(&epub)
+            .await
+            .unwrap_or_default()
     } else {
         diarch_import::EpubMeta::default()
     };
@@ -1972,24 +2073,13 @@ async fn refresh_metadata(
     let isbn = work.isbn.clone().or(meta.isbn.clone());
     let hint = metadata::taxonomy_from_metadata(&state, isbn.as_deref(), &meta.subjects).await;
 
-    if work.isbn.is_none() {
-        work.isbn = meta.isbn.or(hint.isbn.clone());
-    }
-    if work.description.is_none() {
-        work.description = meta.description.or(hint.description.clone());
-    }
-    if work.authors.is_empty() {
-        if let Some(a) = meta.authors.or(hint.authors.clone()) {
-            work.authors = a;
-        }
-    }
-    if (work.title.is_empty() || work.title == "Untitled") && meta.title.is_some() {
-        work.title = meta.title.unwrap();
-    } else if let Some(t) = hint.title {
-        if work.title.is_empty() || work.title == "Untitled" {
-            work.title = t;
-        }
-    }
+    metadata::fill_empty_work_fields(
+        &mut work,
+        meta.title.as_deref().or(hint.title.as_deref()),
+        meta.authors.as_deref().or(hint.authors.as_deref()),
+        meta.isbn.as_deref().or(hint.isbn.as_deref()),
+        meta.description.as_deref().or(hint.description.as_deref()),
+    );
 
     // Prefer StoryGraph book page when already matched.
     if let Some(sg_id) = work.sg_book_id.clone() {
@@ -2000,18 +2090,7 @@ async fn refresh_metadata(
             || work.title == "Untitled"
         {
             if let Ok(Some(hit)) = crate::storygraph::fetch_book_metadata(&state, &sg_id).await {
-                if work.isbn.is_none() {
-                    work.isbn = hit.isbn;
-                }
-                if work.authors.is_empty() && !hit.authors.is_empty() {
-                    work.authors = hit.authors;
-                }
-                if work.description.is_none() {
-                    work.description = hit.description;
-                }
-                if (work.title.is_empty() || work.title == "Untitled") && !hit.title.is_empty() {
-                    work.title = hit.title;
-                }
+                metadata::fill_work_from_meta_hit(&mut work, &hit);
             }
         }
     }
@@ -2030,18 +2109,7 @@ async fn refresh_metadata(
         };
         if let Ok(report) = metadata::search_title(&state, &work.title, author_ref).await {
             if let Some(hit) = report.hits.into_iter().next() {
-                if work.isbn.is_none() {
-                    work.isbn = hit.isbn;
-                }
-                if work.authors.is_empty() && !hit.authors.is_empty() {
-                    work.authors = hit.authors;
-                }
-                if work.description.is_none() {
-                    work.description = hit.description;
-                }
-                if (work.title.is_empty() || work.title == "Untitled") && !hit.title.is_empty() {
-                    work.title = hit.title;
-                }
+                metadata::fill_work_from_meta_hit(&mut work, &hit);
             }
         }
     }
@@ -2098,15 +2166,7 @@ async fn clear_flags(
     Path(id): Path<Uuid>,
     Json(body): Json<ClearFlags>,
 ) -> Result<StatusCode, StatusCode> {
-    if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let mut work = state
-        .db
-        .get_work(id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let mut work = require_accessible_work(&state, &user, id).await?;
     for f in body.flags {
         match f.as_str() {
             "sg_review_dirty" => work.sg_review_dirty = false,
@@ -2309,21 +2369,46 @@ async fn list_jobs(
 }
 
 async fn get_job(
-    AuthUser(_): AuthUser,
+    AuthUser(user): AuthUser,
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
-) -> Result<Json<diarch_core::Job>, StatusCode> {
-    state
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let job = state
         .db
         .get_job(id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if !user.is_admin {
+        match job.work_id {
+            Some(wid) if state.db.user_can_access(&user, wid).await.unwrap_or(false) => {}
+            _ => return Err(StatusCode::FORBIDDEN),
+        }
+    }
+    let detail = job.detail.as_ref().map(|d| {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(d) {
+            if let Some(name) = v.get("name").cloned() {
+                return serde_json::json!({ "name": name }).to_string();
+            }
+        }
+        if let Some((name, _)) = d.split_once('|') {
+            return name.to_string();
+        }
+        d.clone()
+    });
+    Ok(Json(serde_json::json!({
+        "id": job.id,
+        "kind": job.kind,
+        "work_id": job.work_id,
+        "status": job.status,
+        "detail": detail,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    })))
 }
 
 async fn list_integrations(
-    AuthUser(_): AuthUser,
+    AdminUser(_): AdminUser,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<diarch_core::IntegrationHealth>>, StatusCode> {
     state
@@ -2335,7 +2420,7 @@ async fn list_integrations(
 }
 
 async fn probe_integrations(
-    AuthUser(_): AuthUser,
+    AdminUser(_): AdminUser,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<diarch_core::IntegrationHealth>>, StatusCode> {
     crate::fixer::probe_all(&state).await;
@@ -2348,7 +2433,7 @@ async fn probe_integrations(
 }
 
 async fn repair_integration(
-    AuthUser(_): AuthUser,
+    AdminUser(_): AdminUser,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Json<serde_json::Value> {
@@ -2359,7 +2444,7 @@ async fn repair_integration(
 }
 
 async fn remarkable_status(
-    AuthUser(_): AuthUser,
+    AdminUser(_): AdminUser,
 ) -> Json<crate::remarkable::RemarkableStatus> {
     Json(crate::remarkable::status())
 }
@@ -2370,7 +2455,7 @@ struct RemarkableAuthReq {
 }
 
 async fn remarkable_auth(
-    AuthUser(_): AuthUser,
+    AdminUser(_): AdminUser,
     State(state): State<Arc<AppState>>,
     Json(body): Json<RemarkableAuthReq>,
 ) -> Result<Json<crate::remarkable::RemarkableStatus>, (StatusCode, String)> {
@@ -2381,7 +2466,7 @@ async fn remarkable_auth(
 }
 
 async fn sg_status(
-    AuthUser(_): AuthUser,
+    AdminUser(_): AdminUser,
     State(state): State<Arc<AppState>>,
 ) -> Json<crate::storygraph::StoryGraphStatus> {
     Json(crate::storygraph::status(&state))
@@ -2396,7 +2481,7 @@ struct SgAuthReq {
 }
 
 async fn sg_auth(
-    AuthUser(_): AuthUser,
+    AdminUser(_): AdminUser,
     State(state): State<Arc<AppState>>,
     Json(body): Json<SgAuthReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -2465,7 +2550,7 @@ async fn sg_auth(
 }
 
 async fn sg_sync(
-    AuthUser(_): AuthUser,
+    AdminUser(_): AdminUser,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<crate::storygraph::SyncReport>, (StatusCode, String)> {
     crate::storygraph::sync_flags(&state)
@@ -2475,7 +2560,7 @@ async fn sg_sync(
 }
 
 async fn export_tts_queue(
-    AuthUser(_): AuthUser,
+    AdminUser(_): AdminUser,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let works = state

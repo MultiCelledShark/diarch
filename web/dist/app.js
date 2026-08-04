@@ -373,16 +373,29 @@ async function openReaderForWork(workId, hints = {}) {
   if (hints.has_epub === false && hints.has_md === false && hints.has_audio === false) {
     throw new Error("No EPUB, markdown, or audiobook to open yet");
   }
-  const data = await api(`/api/works/${workId}`);
-  const w = data.work;
-  const assets = data.assets || [];
-  const hasEpub = assets.some((a) => a.kind === "epub");
-  const hasMd = assets.some((a) => a.kind === "markdown");
-  const audioAssets = assets.filter((a) => a.kind === "audio");
-  const audio =
-    audioAssets.find((a) => (a.relative_path || "").endsWith("book.m4b")) ||
-    audioAssets[0] ||
-    null;
+  // Card list items already carry has_epub/has_md/has_audio (and the work
+  // fields openReader needs) — skip the extra /api/works fetch when present,
+  // and only hit the network if a hint is missing.
+  const hintsComplete =
+    hints.has_epub !== undefined && hints.has_md !== undefined && hints.has_audio !== undefined;
+  let w, hasEpub, hasMd, audio;
+  if (hintsComplete && hints.id === workId && hints.title) {
+    w = hints;
+    hasEpub = !!hints.has_epub;
+    hasMd = !!hints.has_md;
+    audio = hints.has_audio ? { relative_path: "book.m4b" } : null;
+  } else {
+    const data = await api(`/api/works/${workId}`);
+    w = data.work;
+    const assets = data.assets || [];
+    hasEpub = assets.some((a) => a.kind === "epub");
+    hasMd = assets.some((a) => a.kind === "markdown");
+    const audioAssets = assets.filter((a) => a.kind === "audio");
+    audio =
+      audioAssets.find((a) => (a.relative_path || "").endsWith("book.m4b")) ||
+      audioAssets[0] ||
+      null;
+  }
   if (!hasEpub && !hasMd && !audio) {
     throw new Error("No EPUB, markdown, or audiobook to open yet");
   }
@@ -482,11 +495,7 @@ function renderCards(el, works, empty = {}) {
       const btn = e.currentTarget;
       btn.disabled = true;
       try {
-        await openReaderForWork(w.id, {
-          has_epub: w.has_epub,
-          has_md: w.has_md,
-          has_audio: w.has_audio,
-        });
+        await openReaderForWork(w.id, w);
       } catch (err) {
         btn.disabled = false;
         alert(err.message || String(err));
@@ -608,6 +617,204 @@ function taxonomyOptions(selected) {
   return html;
 }
 
+function setDetailMsg(t, isError = false) {
+  const el = document.getElementById("detail-msg");
+  if (!el) return;
+  el.textContent = t || "";
+  el.classList.toggle("error", !!isError);
+}
+
+// Cache-bust key for cover images — tied to the work's updated_at so the
+// browser can actually cache covers between renders instead of refetching
+// on every openDetail/patchDetail via Date.now().
+function coverCacheKey(w) {
+  return encodeURIComponent(w.updated_at || "");
+}
+
+function renderDetailCovers(data) {
+  const w = data.work;
+  const v = coverCacheKey(w);
+  return `
+      <img src="/api/works/${w.id}/cover?v=${v}" alt="" />
+      ${data.has_cover_candidate ? `
+        <div class="cover-candidate">
+          <p class="muted">AI candidate</p>
+          <img src="/api/works/${w.id}/cover/candidate?v=${v}" alt="Candidate cover" />
+          <div class="row">
+            <button type="button" id="btn-approve-cover">Approve cover</button>
+            <button type="button" id="btn-discard-cover">Discard</button>
+          </div>
+        </div>` : ""}`;
+}
+
+function renderDetailStatusLine(data) {
+  const w = data.work;
+  const assets = data.assets || [];
+  const hasEpub = assets.some((a) => a.kind === "epub");
+  const hasMd = assets.some((a) => a.kind === "markdown");
+  const hasAudio = assets.some((a) => a.kind === "audio");
+  const trJob = data.transcription_job || null;
+  const trFailed = (trJob?.status || null) === "failed";
+  let transcriptBadge = "";
+  if (data.has_transcript) transcriptBadge = " · Transcript ready";
+  else if (trFailed) transcriptBadge = " · Transcription failed";
+  return `${hasEpub ? "EPUB ready" : "No EPUB yet"} · ${hasMd ? "Markdown ready" : "No Markdown"} · ${hasAudio ? "M4B ready" : (w.needs_audio ? "Needs audio" : "No audio")} · Direction: ${escapeHtml(w.reading_direction)}${w.needs_review ? " · Needs review" : ""}${w.needs_cover ? " · Needs cover" : ""}${transcriptBadge}${w.sg_matched ? " · On StoryGraph" : ""}${w.sg_review_dirty ? " · Update SG review" : ""}${w.sg_needs_add ? " · Add to StoryGraph" : ""}${w.sg_audio_only_remote ? " · SG audio, missing local" : ""}`;
+}
+
+function renderDetailFlagButtons(data) {
+  const w = data.work;
+  return `
+        <button type="button" id="btn-fetch-cover"${w.isbn ? "" : " disabled title=\"Add an ISBN first\""}>Fetch cover</button>
+        <button type="button" id="btn-generate-cover" title="Generate via LocalAI (staged — approve before it replaces the cover)">Generate cover</button>
+        <button type="button" id="btn-placeholder-cover" title="Replace cover with SVG from current title &amp; authors">Reset to placeholder</button>
+        <label class="btn-file">Upload cover <input type="file" id="cover-file" accept="image/*" hidden /></label>
+        ${w.needs_cover ? `<button type="button" id="btn-clear-needs-cover">Dismiss needs cover</button>` : ""}
+        ${w.sg_review_dirty ? `<button type="button" id="btn-clear-sg-review" title="Clear after you update StoryGraph">Clear SG review flag</button>` : ""}
+        ${w.sg_needs_add ? `<button type="button" id="btn-clear-sg-add" title="Clear after you add this book on StoryGraph">Clear add-to-SG flag</button>` : ""}
+        ${w.sg_audio_only_remote ? `<button type="button" id="btn-clear-sg-audio">Dismiss SG audio gap</button>` : ""}`;
+}
+
+// Wires the cover/flag buttons rendered by renderDetailCovers /
+// renderDetailFlagButtons. Shared by openDetail's initial render and by
+// patchDetail's targeted re-render so both stay in sync.
+function wireDetailCoverAndFlagButtons(id) {
+  document.getElementById("btn-fetch-cover")?.addEventListener("click", async () => {
+    setDetailMsg("Fetching cover from Open Library / Google Books…");
+    try {
+      const r = await api(`/api/works/${id}/cover/fetch`, { method: "POST" });
+      if (!r?.ok) {
+        setDetailMsg(r?.message || "No remote cover found", true);
+        return;
+      }
+      setDetailMsg("Cover fetched");
+      await patchDetail(id);
+    } catch (e) {
+      setDetailMsg(e.message || String(e), true);
+    }
+  });
+
+  document.getElementById("btn-generate-cover")?.addEventListener("click", async () => {
+    const promptEl = document.getElementById("cover-prompt");
+    setDetailMsg("Generating cover via LocalAI (may take a minute)…");
+    try {
+      const r = await api(`/api/works/${id}/cover/generate`, { method: "POST" });
+      if (r?.prompt && promptEl) {
+        promptEl.hidden = false;
+        promptEl.textContent = `Prompt: ${r.prompt}`;
+      }
+      if (!r?.ok) {
+        setDetailMsg(r?.message || "Cover generation failed", true);
+        return;
+      }
+      setDetailMsg("Candidate ready — approve or discard");
+      await patchDetail(id);
+    } catch (e) {
+      setDetailMsg(e.message || String(e), true);
+    }
+  });
+
+  document.getElementById("btn-placeholder-cover")?.addEventListener("click", async () => {
+    const form = document.getElementById("detail-form");
+    const fd = form ? new FormData(form) : null;
+    const title = fd ? String(fd.get("title") || "").trim() : "";
+    const authors = fd ? String(fd.get("authors") || "").trim() : "";
+    setDetailMsg("Resetting cover to placeholder…");
+    try {
+      const r = await api(`/api/works/${id}/cover/placeholder`, {
+        method: "POST",
+        json: {
+          title: title || undefined,
+          authors: authors || undefined,
+        },
+      });
+      if (!r?.ok) {
+        setDetailMsg(r?.message || "Could not reset cover", true);
+        return;
+      }
+      setDetailMsg("Cover reset to placeholder SVG");
+      await patchDetail(id);
+    } catch (e) {
+      setDetailMsg(e.message || String(e), true);
+    }
+  });
+
+  document.getElementById("btn-approve-cover")?.addEventListener("click", async () => {
+    setDetailMsg("Approving candidate cover…");
+    try {
+      const r = await api(`/api/works/${id}/cover/approve`, { method: "POST" });
+      if (!r?.ok) {
+        setDetailMsg(r?.message || "Approve failed", true);
+        return;
+      }
+      setDetailMsg("Cover approved");
+      await patchDetail(id);
+    } catch (e) {
+      setDetailMsg(e.message || String(e), true);
+    }
+  });
+
+  document.getElementById("btn-discard-cover")?.addEventListener("click", async () => {
+    await api(`/api/works/${id}/cover/discard`, { method: "POST" });
+    setDetailMsg("Candidate discarded");
+    await patchDetail(id);
+  });
+
+  document.getElementById("btn-clear-needs-cover")?.addEventListener("click", async () => {
+    await api(`/api/works/${id}/flags/clear`, {
+      method: "POST",
+      json: { flags: ["needs_cover"] },
+    });
+    setDetailMsg("Cleared needs_cover");
+    await patchDetail(id);
+  });
+  async function clearSgFlag(flag, label) {
+    await api(`/api/works/${id}/flags/clear`, {
+      method: "POST",
+      json: { flags: [flag] },
+    });
+    setDetailMsg(label);
+    await patchDetail(id);
+  }
+  document.getElementById("btn-clear-sg-review")?.addEventListener("click", () =>
+    clearSgFlag("sg_review_dirty", "Cleared StoryGraph review flag")
+  );
+  document.getElementById("btn-clear-sg-add")?.addEventListener("click", () =>
+    clearSgFlag("sg_needs_add", "Cleared add-to-StoryGraph flag")
+  );
+  document.getElementById("btn-clear-sg-audio")?.addEventListener("click", () =>
+    clearSgFlag("sg_audio_only_remote", "Cleared SG audio gap flag")
+  );
+
+  document.getElementById("cover-file")?.addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append("file", file);
+    await fetch(`/api/works/${id}/cover`, { method: "POST", body: fd, credentials: "include" });
+    await patchDetail(id);
+  });
+}
+
+// Lightweight refresh for flag/status/cover changes on the work currently
+// shown in the detail view: re-fetches and patches just the covers, status
+// line, and flag buttons instead of doing openDetail's full innerHTML
+// rebuild (which also tears down the review editor and refocuses fields).
+// Falls back to a full openDetail when the work isn't the one on screen.
+async function patchDetail(id) {
+  const viewingThis =
+    state.currentWork?.work?.id === id && !document.getElementById("view-detail")?.hidden;
+  if (!viewingThis) return openDetail(id);
+  const data = await api(`/api/works/${id}`);
+  state.currentWork = data;
+  const coversEl = document.getElementById("detail-covers");
+  if (coversEl) coversEl.innerHTML = renderDetailCovers(data);
+  const statusEl = document.getElementById("detail-status-line");
+  if (statusEl) statusEl.innerHTML = renderDetailStatusLine(data);
+  const flagButtonsEl = document.getElementById("detail-flag-buttons");
+  if (flagButtonsEl) flagButtonsEl.innerHTML = renderDetailFlagButtons(data);
+  wireDetailCoverAndFlagButtons(id);
+}
+
 async function openDetail(id) {
   destroyReviewEditor();
   closeMdPreviewFloat();
@@ -665,17 +872,7 @@ async function openDetail(id) {
   const detailEl = document.getElementById("detail");
   detailEl.classList.toggle("detail-md-side", mdSideReview);
   detailEl.innerHTML = `
-    <div class="detail-covers">
-      <img src="/api/works/${w.id}/cover?t=${Date.now()}" alt="" />
-      ${data.has_cover_candidate ? `
-        <div class="cover-candidate">
-          <p class="muted">AI candidate</p>
-          <img src="/api/works/${w.id}/cover/candidate?t=${Date.now()}" alt="Candidate cover" />
-          <div class="row">
-            <button type="button" id="btn-approve-cover">Approve cover</button>
-            <button type="button" id="btn-discard-cover">Discard</button>
-          </div>
-        </div>` : ""}
+    <div class="detail-covers" id="detail-covers">${renderDetailCovers(data)}
     </div>
     <div class="detail-main">
       <form id="detail-form" class="form-grid detail-form">
@@ -713,7 +910,7 @@ async function openDetail(id) {
         </div>
         <div id="meta-hits" class="meta-hits" hidden></div>
       </form>
-      <p class="muted">${hasEpub ? "EPUB ready" : "No EPUB yet"} · ${hasMd ? "Markdown ready" : "No Markdown"} · ${hasAudio ? "M4B ready" : (w.needs_audio ? "Needs audio" : "No audio")} · Direction: ${escapeHtml(w.reading_direction)}${w.needs_review ? " · Needs review" : ""}${w.needs_cover ? " · Needs cover" : ""}${transcriptBadge}${w.sg_matched ? " · On StoryGraph" : ""}${w.sg_review_dirty ? " · Update SG review" : ""}${w.sg_needs_add ? " · Add to StoryGraph" : ""}${w.sg_audio_only_remote ? " · SG audio, missing local" : ""}</p>
+      <p class="muted" id="detail-status-line">${renderDetailStatusLine(data)}</p>
       <div id="transcribe-progress" class="transcribe-progress"${trBusy || w.needs_transcription ? "" : " hidden"}>
         <span class="transcribe-label">Transcribing…</span>
         <div class="transcribe-bar" aria-hidden="true"><i id="transcribe-bar-fill" style="width:${trProgress ? Math.max(4, Math.round((trProgress.cur / trProgress.total) * 100)) : 8}%"></i></div>
@@ -739,14 +936,7 @@ async function openDetail(id) {
         ${hasEpub ? `<a href="/api/works/${w.id}/download/epub"><button type="button">Download EPUB</button></a>` : ""}
         ${hasMd ? `<a href="/api/works/${w.id}/download/markdown"><button type="button">Download MD</button></a>` : ""}
         ${hasEpub ? `<button type="button" id="btn-remarkable">Send to reMarkable</button>` : ""}
-        <button type="button" id="btn-fetch-cover"${w.isbn ? "" : " disabled title=\"Add an ISBN first\""}>Fetch cover</button>
-        <button type="button" id="btn-generate-cover" title="Generate via LocalAI (staged — approve before it replaces the cover)">Generate cover</button>
-        <button type="button" id="btn-placeholder-cover" title="Replace cover with SVG from current title &amp; authors">Reset to placeholder</button>
-        <label class="btn-file">Upload cover <input type="file" id="cover-file" accept="image/*" hidden /></label>
-        ${w.needs_cover ? `<button type="button" id="btn-clear-needs-cover">Dismiss needs cover</button>` : ""}
-        ${w.sg_review_dirty ? `<button type="button" id="btn-clear-sg-review" title="Clear after you update StoryGraph">Clear SG review flag</button>` : ""}
-        ${w.sg_needs_add ? `<button type="button" id="btn-clear-sg-add" title="Clear after you add this book on StoryGraph">Clear add-to-SG flag</button>` : ""}
-        ${w.sg_audio_only_remote ? `<button type="button" id="btn-clear-sg-audio">Dismiss SG audio gap</button>` : ""}
+        <span id="detail-flag-buttons">${renderDetailFlagButtons(data)}</span>
         <label class="btn-file">Upload audiobook (.m4b / .aax) <input type="file" id="audio-file" accept=".m4b,.aax,audio/mp4" hidden /></label>
         <button type="button" id="btn-transcribe"${hasAudio && !trBusy ? "" : ` disabled title="${!hasAudio ? "Upload an audiobook first" : "Transcription already in progress"}"`}>${trFailed ? "Retry transcription" : "Transcribe"}</button>
         ${data.has_transcript ? `<a href="/api/works/${w.id}/transcript"><button type="button">Download transcript</button></a>` : ""}
@@ -780,11 +970,7 @@ async function openDetail(id) {
     </div>
     ${mdSideReview ? reviewMdPane : ""}`;
 
-  const msg = (t, isError = false) => {
-    const el = document.getElementById("detail-msg");
-    el.textContent = t || "";
-    el.classList.toggle("error", !!isError);
-  };
+  const msg = setDetailMsg;
 
   if (trBusy && trJob?.id) {
     pollTranscribeJob(w.id, trJob.id);
@@ -970,86 +1156,7 @@ async function openDetail(id) {
     }
   });
 
-  document.getElementById("btn-fetch-cover")?.addEventListener("click", async () => {
-    msg("Fetching cover from Open Library / Google Books…");
-    try {
-      const r = await api(`/api/works/${w.id}/cover/fetch`, { method: "POST" });
-      if (!r?.ok) {
-        msg(r?.message || "No remote cover found", true);
-        return;
-      }
-      msg("Cover fetched");
-      await openDetail(w.id);
-    } catch (e) {
-      msg(e.message || String(e), true);
-    }
-  });
-
-  document.getElementById("btn-generate-cover")?.addEventListener("click", async () => {
-    const promptEl = document.getElementById("cover-prompt");
-    msg("Generating cover via LocalAI (may take a minute)…");
-    try {
-      const r = await api(`/api/works/${w.id}/cover/generate`, { method: "POST" });
-      if (r?.prompt && promptEl) {
-        promptEl.hidden = false;
-        promptEl.textContent = `Prompt: ${r.prompt}`;
-      }
-      if (!r?.ok) {
-        msg(r?.message || "Cover generation failed", true);
-        return;
-      }
-      msg("Candidate ready — approve or discard");
-      await openDetail(w.id);
-    } catch (e) {
-      msg(e.message || String(e), true);
-    }
-  });
-
-  document.getElementById("btn-placeholder-cover")?.addEventListener("click", async () => {
-    const form = document.getElementById("detail-form");
-    const fd = form ? new FormData(form) : null;
-    const title = fd ? String(fd.get("title") || "").trim() : "";
-    const authors = fd ? String(fd.get("authors") || "").trim() : "";
-    msg("Resetting cover to placeholder…");
-    try {
-      const r = await api(`/api/works/${w.id}/cover/placeholder`, {
-        method: "POST",
-        json: {
-          title: title || undefined,
-          authors: authors || undefined,
-        },
-      });
-      if (!r?.ok) {
-        msg(r?.message || "Could not reset cover", true);
-        return;
-      }
-      msg("Cover reset to placeholder SVG");
-      await openDetail(w.id);
-    } catch (e) {
-      msg(e.message || String(e), true);
-    }
-  });
-
-  document.getElementById("btn-approve-cover")?.addEventListener("click", async () => {
-    msg("Approving candidate cover…");
-    try {
-      const r = await api(`/api/works/${w.id}/cover/approve`, { method: "POST" });
-      if (!r?.ok) {
-        msg(r?.message || "Approve failed", true);
-        return;
-      }
-      msg("Cover approved");
-      await openDetail(w.id);
-    } catch (e) {
-      msg(e.message || String(e), true);
-    }
-  });
-
-  document.getElementById("btn-discard-cover")?.addEventListener("click", async () => {
-    await api(`/api/works/${w.id}/cover/discard`, { method: "POST" });
-    msg("Candidate discarded");
-    await openDetail(w.id);
-  });
+  wireDetailCoverAndFlagButtons(w.id);
 
   document.getElementById("btn-transcribe")?.addEventListener("click", async () => {
     msg("Queueing transcription…");
@@ -1066,31 +1173,6 @@ async function openDetail(id) {
     }
   });
 
-  document.getElementById("btn-clear-needs-cover")?.addEventListener("click", async () => {
-    await api(`/api/works/${w.id}/flags/clear`, {
-      method: "POST",
-      json: { flags: ["needs_cover"] },
-    });
-    msg("Cleared needs_cover");
-    await openDetail(w.id);
-  });
-  async function clearSgFlag(flag, label) {
-    await api(`/api/works/${w.id}/flags/clear`, {
-      method: "POST",
-      json: { flags: [flag] },
-    });
-    msg(label);
-    await openDetail(w.id);
-  }
-  document.getElementById("btn-clear-sg-review")?.addEventListener("click", () =>
-    clearSgFlag("sg_review_dirty", "Cleared StoryGraph review flag")
-  );
-  document.getElementById("btn-clear-sg-add")?.addEventListener("click", () =>
-    clearSgFlag("sg_needs_add", "Cleared add-to-StoryGraph flag")
-  );
-  document.getElementById("btn-clear-sg-audio")?.addEventListener("click", () =>
-    clearSgFlag("sg_audio_only_remote", "Cleared SG audio gap flag")
-  );
   document.getElementById("btn-remarkable")?.addEventListener("click", async () => {
     msg("Sending EPUB to reMarkable via rmapi…");
     try {
@@ -1149,15 +1231,6 @@ async function openDetail(id) {
       else await openDetail(w.id);
     });
   });
-  document.getElementById("cover-file")?.addEventListener("change", async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const fd = new FormData();
-    fd.append("file", file);
-    await fetch(`/api/works/${w.id}/cover`, { method: "POST", body: fd, credentials: "include" });
-    await openDetail(w.id);
-  });
-
   document.getElementById("audio-file")?.addEventListener("change", async (e) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -2076,6 +2149,36 @@ async function applyReaderMode(useMd) {
   }
 }
 
+/* —— Reading progress save (debounced, like scheduleTypoServerSave) —— */
+let progressSaveTimer = null;
+let pendingProgressSave = null;
+
+function persistProgress(workId, payload) {
+  return api(`/api/works/${workId}/progress`, {
+    method: "PUT",
+    json: payload,
+  }).catch(() => {});
+}
+
+function scheduleProgressSave(workId, payload) {
+  pendingProgressSave = { workId, payload };
+  clearTimeout(progressSaveTimer);
+  progressSaveTimer = setTimeout(() => {
+    progressSaveTimer = null;
+    const p = pendingProgressSave;
+    pendingProgressSave = null;
+    if (p) persistProgress(p.workId, p.payload);
+  }, 400);
+}
+
+function flushProgressSave() {
+  clearTimeout(progressSaveTimer);
+  progressSaveTimer = null;
+  const p = pendingProgressSave;
+  pendingProgressSave = null;
+  if (p) persistProgress(p.workId, p.payload);
+}
+
 function updateMarkdownProgressUi(area) {
   const percent =
     area.scrollHeight <= area.clientHeight
@@ -2117,10 +2220,7 @@ async function loadMarkdown(id) {
   updateMarkdownProgressUi(area);
   area.onscroll = () => {
     const percent = updateMarkdownProgressUi(area);
-    api(`/api/works/${id}/progress`, {
-      method: "PUT",
-      json: { mode: "markdown", position: String(area.scrollTop), percent },
-    }).catch(() => {});
+    scheduleProgressSave(id, { mode: "markdown", position: String(area.scrollTop), percent });
   };
 }
 
@@ -2191,12 +2291,10 @@ async function loadEpub(w) {
     if (prog?.position) await state.rendition.display(prog.position);
     else await state.rendition.display();
     state.rendition.on("relocated", (loc) => {
-      applyEpubTypography(state.readerTypo || loadTypo());
+      // Typography is applied on open and on typo-form changes; re-applying
+      // it on every page turn is redundant and was causing jank.
       const percent = updateEpubProgressUi(loc);
-      api(`/api/works/${w.id}/progress`, {
-        method: "PUT",
-        json: { mode: "epub", position: loc.start.cfi, percent },
-      }).catch(() => {});
+      scheduleProgressSave(w.id, { mode: "epub", position: loc.start.cfi, percent });
     });
     try {
       const loc = state.rendition.currentLocation();
@@ -2225,6 +2323,7 @@ function readerTurn(dir) {
 }
 
 function closeReaderView() {
+  flushProgressSave();
   closeReaderMenu();
   closeReaderPanels();
   if (state.book) {
@@ -2314,6 +2413,10 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     readerTurn("right");
   }
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flushProgressSave();
 });
 
 

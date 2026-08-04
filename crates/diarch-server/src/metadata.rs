@@ -66,6 +66,58 @@ pub struct TaxonomyHint {
     pub authors: Option<String>,
 }
 
+/// Fill empty Work metadata fields from optional strings (does not overwrite set values).
+pub fn fill_empty_work_fields(
+    work: &mut diarch_core::Work,
+    title: Option<&str>,
+    authors: Option<&str>,
+    isbn: Option<&str>,
+    description: Option<&str>,
+) {
+    if work.isbn.is_none() {
+        if let Some(i) = isbn.filter(|s| !s.is_empty()) {
+            work.isbn = Some(i.to_string());
+        }
+    }
+    if work.description.is_none() {
+        if let Some(d) = description.filter(|s| !s.is_empty()) {
+            work.description = Some(d.to_string());
+        }
+    }
+    if work.authors.is_empty() {
+        if let Some(a) = authors.filter(|s| !s.is_empty()) {
+            work.authors = a.to_string();
+        }
+    }
+    if work.title.is_empty() || work.title == "Untitled" {
+        if let Some(t) = title.filter(|s| !s.is_empty()) {
+            work.title = t.to_string();
+        }
+    }
+}
+
+/// Fill empty Work fields from a catalog [`MetaHit`].
+pub fn fill_work_from_meta_hit(work: &mut diarch_core::Work, hit: &MetaHit) {
+    fill_empty_work_fields(
+        work,
+        Some(hit.title.as_str()).filter(|s| !s.is_empty()),
+        Some(hit.authors.as_str()).filter(|s| !s.is_empty()),
+        hit.isbn.as_deref(),
+        hit.description.as_deref(),
+    );
+}
+
+/// Fill empty Work fields from a [`TaxonomyHint`].
+pub fn fill_work_from_hint(work: &mut diarch_core::Work, hint: &TaxonomyHint) {
+    fill_empty_work_fields(
+        work,
+        hint.title.as_deref(),
+        hint.authors.as_deref(),
+        hint.isbn.as_deref(),
+        hint.description.as_deref(),
+    );
+}
+
 #[derive(Debug)]
 enum ProviderOutcome {
     Hit(MetaHit),
@@ -269,8 +321,81 @@ pub async fn fetch_remote_cover(state: &AppState, isbn: &str) -> Result<Option<V
     Ok(None)
 }
 
+/// Remote cover fetches only ever target these providers — anything else is
+/// refused outright (SSRF guard: no internal/LAN hosts, no surprise
+/// redirects to attacker-controlled endpoints).
+fn is_allowed_cover_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    const EXACT: &[&str] = &["covers.openlibrary.org", "books.google.com"];
+    const SUFFIXES: &[&str] = &[".googleapis.com", ".googleusercontent.com"];
+    if EXACT.contains(&host.as_str()) {
+        return true;
+    }
+    SUFFIXES
+        .iter()
+        .any(|suf| host.len() > suf.len() && host.ends_with(suf))
+}
+
+/// Parse + validate a candidate cover URL: HTTPS only, host on the allowlist.
+fn validate_cover_url(url: &str) -> Result<reqwest::Url> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| anyhow::anyhow!("bad cover url: {e}"))?;
+    if parsed.scheme() != "https" {
+        anyhow::bail!("cover url must be https: {url}");
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("cover url missing host: {url}"))?;
+    if !is_allowed_cover_host(host) {
+        anyhow::bail!("cover host not allowlisted: {host}");
+    }
+    Ok(parsed)
+}
+
+/// Max response size for a fetched cover image.
+const MAX_COVER_BYTES: usize = 5 * 1024 * 1024;
+/// Manual redirect hops we'll follow (each re-validated against the allowlist).
+const MAX_COVER_REDIRECTS: u8 = 5;
+
 async fn fetch_image_url(state: &AppState, url: &str) -> Result<Option<Vec<u8>>> {
-    let resp = state.http.get(url).send().await?;
+    let mut current = match validate_cover_url(url) {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::warn!(url, error = %e, "rejected cover fetch (SSRF guard)");
+            return Ok(None);
+        }
+    };
+
+    let mut redirects = 0u8;
+    let resp = loop {
+        let resp = state.http_no_redirect.get(current.clone()).send().await?;
+        if resp.status().is_redirection() {
+            redirects += 1;
+            if redirects > MAX_COVER_REDIRECTS {
+                return Ok(None);
+            }
+            let Some(location) = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+            else {
+                return Ok(None);
+            };
+            let next = match current.join(location) {
+                Ok(u) => u,
+                Err(_) => return Ok(None),
+            };
+            current = match validate_cover_url(next.as_str()) {
+                Ok(u) => u,
+                Err(e) => {
+                    tracing::warn!(url = %next, error = %e, "rejected cover redirect (SSRF guard)");
+                    return Ok(None);
+                }
+            };
+            continue;
+        }
+        break resp;
+    };
+
     if !resp.status().is_success() {
         return Ok(None);
     }
@@ -283,12 +408,27 @@ async fn fetch_image_url(state: &AppState, url: &str) -> Result<Option<Vec<u8>>>
     if !ct.starts_with("image/") {
         return Ok(None);
     }
-    let bytes = resp.bytes().await?;
+    if let Some(len) = resp.content_length() {
+        if len > MAX_COVER_BYTES as u64 {
+            return Ok(None);
+        }
+    }
+
+    use futures::StreamExt;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if buf.len() + chunk.len() > MAX_COVER_BYTES {
+            return Ok(None);
+        }
+        buf.extend_from_slice(&chunk);
+    }
     // Open Library sometimes returns a tiny 1x1 GIF for missing covers.
-    if bytes.len() < 2_000 {
+    if buf.len() < 2_000 {
         return Ok(None);
     }
-    Ok(Some(bytes.to_vec()))
+    Ok(Some(buf))
 }
 
 async fn fetch_ol_cover_by_isbn(state: &AppState, isbn: &str) -> Result<Option<Vec<u8>>> {

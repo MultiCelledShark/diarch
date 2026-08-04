@@ -62,6 +62,10 @@ class ApiClient {
         return api ?: error("Server URL not configured")
     }
 
+    /** Shared OkHttp client (already attaches the Authorization header). Used by the
+     * reader WebView's shouldInterceptRequest to proxy content requests with auth. */
+    fun httpClient(): OkHttpClient = okHttp
+
     fun coverUrl(workId: String, cacheBust: String? = null): String {
         val base = baseUrlRef.get().trimEnd('/')
         val bust = cacheBust?.let { "?v=$it" }.orEmpty()

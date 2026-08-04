@@ -122,6 +122,8 @@ fun WorkDetailScreen(
             return@Scaffold
         }
 
+        val offlineCover = remember(work.id) { offline.localCoverUri(work.id) }
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -132,7 +134,7 @@ fun WorkDetailScreen(
             Row(modifier = Modifier.fillMaxWidth()) {
                 AsyncImage(
                     model = ImageRequest.Builder(context)
-                        .data(repo.coverUrl(work.id, work.updatedAt))
+                        .data(offlineCover ?: repo.coverUrl(work.id, work.updatedAt))
                         .crossfade(true)
                         .build(),
                     contentDescription = null,

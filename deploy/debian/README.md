@@ -147,6 +147,11 @@ Add to `/etc/systemd/system/diarch.service` or prefer `EnvironmentFile=/etc/diar
 ```ini
 # EnvironmentFile=/etc/diarch.env
 
+# Fresh install only — once admin exists the password is never overwritten unless FORCE=1
+# Environment=DIARCH_ADMIN_PASS=your-strong-bootstrap-pass
+# Environment=DIARCH_ADMIN_PASS_FORCE=1
+# Environment=DIARCH_COOKIE_SECURE=1
+# Environment=DIARCH_TRUST_PROXY=1
 Environment=DIARCH_AUDIBLE_KEY=your-activation-bytes
 Environment=DIARCH_GOOGLE_BOOKS_KEY=your-google-books-key
 Environment=DIARCH_STORYGRAPH_USER=your_sg_username
@@ -160,6 +165,7 @@ Environment=DIARCH_LOCALAI_URL=http://192.168.0.104:30286
 # Environment=DIARCH_SHOW_AUDIO_GAPS=true
 ```
 
+**Admin password:** `DIARCH_ADMIN_PASS` applies only when creating the admin user on a fresh database (min 12 characters; cannot be `admin`). Existing deployments keep their current hash across upgrades. To rotate, set a strong `DIARCH_ADMIN_PASS` and `DIARCH_ADMIN_PASS_FORCE=1`, restart once, then remove FORCE.
 Defaults when `DIARCH_LOCALAI_URL` is set but model vars are omitted: image `flux.2-klein-4b`, size `512x512`, ASR `nemo-parakeet-tdt-0.6b`.
 
 StoryGraph: prefer **Integrations → StoryGraph** (writes `/var/lib/diarch/storygraph.conf`). Env vars still work as bootstrap when no file exists.

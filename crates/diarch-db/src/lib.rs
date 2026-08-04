@@ -59,9 +59,16 @@ impl Db {
             "CREATE INDEX IF NOT EXISTS idx_works_year_list ON works(year_list)",
             "CREATE INDEX IF NOT EXISTS idx_works_needs_review ON works(needs_review)",
             "CREATE INDEX IF NOT EXISTS idx_works_needs_cover ON works(needs_cover)",
+            "CREATE INDEX IF NOT EXISTS idx_works_needs_tts ON works(needs_tts)",
+            "CREATE INDEX IF NOT EXISTS idx_works_needs_audio ON works(needs_audio)",
+            "CREATE INDEX IF NOT EXISTS idx_works_needs_transcription ON works(needs_transcription)",
+            "CREATE INDEX IF NOT EXISTS idx_works_sg_review_dirty ON works(sg_review_dirty)",
+            "CREATE INDEX IF NOT EXISTS idx_works_sg_needs_add ON works(sg_needs_add)",
+            "CREATE INDEX IF NOT EXISTS idx_works_sg_audio_only_remote ON works(sg_audio_only_remote)",
             "CREATE INDEX IF NOT EXISTS idx_work_assets_work ON work_assets(work_id)",
             "CREATE INDEX IF NOT EXISTS idx_work_assets_work_kind ON work_assets(work_id, kind)",
             "CREATE INDEX IF NOT EXISTS idx_jobs_work_kind ON jobs(work_id, kind)",
+            "CREATE INDEX IF NOT EXISTS idx_work_grants_work ON work_grants(work_id)",
         ] {
             let _ = sqlx::query(stmt).execute(&self.pool).await;
         }
@@ -84,11 +91,70 @@ impl Db {
         Ok(flat.len())
     }
 
-    pub async fn ensure_admin(&self, username: &str, password: &str) -> Result<User> {
+    /// Minimum password length for bootstrap / API user creation.
+    pub const MIN_PASSWORD_LEN: usize = 12;
+
+    /// Bootstrap admin if missing. Existing admin passwords are never changed here.
+    ///
+    /// Fresh create refuses password `"admin"` or length under [`Self::MIN_PASSWORD_LEN`].
+    /// Opt-in rotate: set `force_password = Some(new_pass)` only when the operator
+    /// explicitly requests it (e.g. `DIARCH_ADMIN_PASS_FORCE=1`); never with `"admin"`.
+    pub async fn ensure_admin(
+        &self,
+        username: &str,
+        password: &str,
+        force_password: Option<&str>,
+    ) -> Result<User> {
         if let Some(u) = self.get_user_by_username(username).await? {
+            if let Some(hash) = self.get_password_hash(username).await? {
+                if Self::verify_password("admin", &hash).unwrap_or(false) {
+                    tracing::warn!(
+                        user = %username,
+                        "admin password is still the default 'admin' — change it when you can"
+                    );
+                }
+            }
+            if let Some(new_pass) = force_password {
+                Self::validate_password_strength(new_pass)?;
+                self.set_password(u.id, new_pass).await?;
+                tracing::info!(user = %username, "admin password rotated via DIARCH_ADMIN_PASS_FORCE");
+                return self
+                    .get_user(u.id)
+                    .await?
+                    .ok_or_else(|| anyhow!("admin missing after rotate"));
+            }
             return Ok(u);
         }
+        Self::validate_password_strength(password)?;
         self.create_user(username, password, true).await
+    }
+
+    pub fn validate_password_strength(password: &str) -> Result<()> {
+        if password == "admin" {
+            return Err(anyhow!(
+                "refusing default password 'admin'; set a strong DIARCH_ADMIN_PASS"
+            ));
+        }
+        if password.len() < Self::MIN_PASSWORD_LEN {
+            return Err(anyhow!(
+                "password must be at least {} characters",
+                Self::MIN_PASSWORD_LEN
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn set_password(&self, user_id: Uuid, password: &str) -> Result<()> {
+        let hash = Self::hash_password(password)?;
+        let r = sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+            .bind(hash)
+            .bind(user_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        if r.rows_affected() == 0 {
+            return Err(anyhow!("user not found"));
+        }
+        Ok(())
     }
 
     pub fn hash_password(password: &str) -> Result<String> {

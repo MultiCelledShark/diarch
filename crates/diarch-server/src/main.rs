@@ -27,6 +27,12 @@ async fn main() -> Result<()> {
     let addr: SocketAddr = config.listen.parse()?;
     tracing::info!(%addr, data = %config.data_dir.display(), "Diarch listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router).await?;
+    // ConnectInfo powers login rate limiting keyed by client IP; honor
+    // X-Forwarded-For only when DIARCH_TRUST_PROXY=1 (see login_limit).
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

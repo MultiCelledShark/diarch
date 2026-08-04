@@ -1,10 +1,45 @@
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use diarch_core::{AssetKind, WorkAsset};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::state::AppState;
+
+/// Parse import job detail: prefer JSON `{name, rel_path}`, fall back to legacy `name|absolute`.
+fn parse_import_detail(state: &AppState, detail: &str) -> Result<(String, PathBuf)> {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(detail) {
+        let name = v
+            .get("name")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| anyhow!("import detail missing name"))?
+            .to_string();
+        let rel = v
+            .get("rel_path")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| anyhow!("import detail missing rel_path"))?;
+        if rel.contains("..") || Path::new(rel).is_absolute() {
+            bail!("invalid import rel_path");
+        }
+        let path = state.config.data_dir.join(rel);
+        let imports = state.config.data_dir.join("imports");
+        if !path.starts_with(&imports) {
+            bail!("import path escapes imports/");
+        }
+        return Ok((name, path));
+    }
+    // Legacy: name|/absolute/path
+    let (name, path_str) = detail
+        .split_once('|')
+        .ok_or_else(|| anyhow!("bad import detail"))?;
+    let path = PathBuf::from(path_str);
+    let imports = state.config.data_dir.join("imports");
+    if !path.starts_with(&imports) {
+        bail!("legacy import path outside imports/");
+    }
+    Ok((name.to_string(), path))
+}
 
 pub async fn process_one(state: &Arc<AppState>) -> Result<bool> {
     let Some(job) = state.db.next_pending_job().await? else {
@@ -56,9 +91,7 @@ async fn run_import(state: &Arc<AppState>, job: &diarch_core::Job) -> Result<Opt
         .detail
         .as_deref()
         .ok_or_else(|| anyhow!("import job missing path detail"))?;
-    let (name, path) = detail
-        .split_once('|')
-        .ok_or_else(|| anyhow!("bad import detail"))?;
+    let (name, path) = parse_import_detail(state, detail)?;
 
     // Lower priority
     #[cfg(unix)]
@@ -67,7 +100,7 @@ async fn run_import(state: &Arc<AppState>, job: &diarch_core::Job) -> Result<Opt
     }
 
     let result =
-        diarch_import::ingest_file(&state.config.library_dir(), work_id, std::path::Path::new(path), name)
+        diarch_import::ingest_file(&state.config.library_dir(), work_id, &path, &name)
             .await?;
 
     if let Some(ref p) = result.epub_path {

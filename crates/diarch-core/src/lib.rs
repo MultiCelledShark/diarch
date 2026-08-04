@@ -375,6 +375,44 @@ pub fn export_stem(title: &str) -> String {
     }
 }
 
+/// Sanitize a multipart upload filename for use under `imports/`.
+/// Returns only a basename with safe characters; rejects traversal and empty names.
+pub fn sanitize_upload_filename(name: &str) -> Result<String, &'static str> {
+    use std::path::Path;
+    if name.is_empty() || name.contains('\0') || name.contains("..") {
+        return Err("empty or invalid filename");
+    }
+    if name.contains('/') || name.contains('\\') {
+        // Allow only after taking basename — reject raw path separators in the
+        // original string so clients cannot sneak directory components in.
+        let base = Path::new(name)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or("invalid filename")?;
+        return sanitize_upload_filename(base);
+    }
+    let base = name;
+    if base.is_empty() || base == "." || base == ".." {
+        return Err("invalid filename");
+    }
+    let mut out = String::with_capacity(base.len());
+    for c in base.chars() {
+        match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '-' | ' ' => out.push(c),
+            _ => out.push('_'),
+        }
+    }
+    let out = out.trim().trim_matches('.').to_string();
+    if out.is_empty() || out == "." || out == ".." {
+        return Err("invalid filename");
+    }
+    if out.len() > 200 {
+        Ok(out.chars().take(200).collect())
+    } else {
+        Ok(out)
+    }
+}
+
 /// `{export_stem(title)}.{ext}` — e.g. `A Covenant of Ice.epub`.
 pub fn export_filename(title: &str, extension: &str) -> String {
     let ext = extension.trim().trim_start_matches('.');
@@ -383,6 +421,21 @@ pub fn export_filename(title: &str, extension: &str) -> String {
     } else {
         format!("{}.{}", export_stem(title), ext)
     }
+}
+
+/// Sniff raster image magic bytes. Returns the MIME type for JPEG/PNG/WebP only;
+/// anything else (SVG, HTML, arbitrary binaries, etc.) is rejected.
+pub fn sniff_image_mime(data: &[u8]) -> Option<&'static str> {
+    if data.len() >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
+        return Some("image/jpeg");
+    }
+    if data.len() >= 8 && data[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
+        return Some("image/png");
+    }
+    if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
 }
 
 /// `Content-Disposition: attachment` value using a sanitized SQLite title.
@@ -584,6 +637,39 @@ mod tests {
         assert_eq!(export_stem("Foo/Bar: Baz?"), "Foo-Bar Baz");
         assert_eq!(export_stem("   "), "Untitled");
         assert!(content_disposition_attachment("Ice", "epub").contains("Ice.epub"));
+    }
+
+    #[test]
+    fn sanitize_upload_filename_rejects_traversal() {
+        assert!(sanitize_upload_filename("../../etc/passwd").is_err());
+        assert!(sanitize_upload_filename("..\\win.ini").is_err());
+        assert!(sanitize_upload_filename("").is_err());
+        assert!(sanitize_upload_filename("..").is_err());
+        assert_eq!(
+            sanitize_upload_filename("My Book.epub").unwrap(),
+            "My Book.epub"
+        );
+        // Basename-only from a path without `..`
+        assert_eq!(
+            sanitize_upload_filename("subdir/evil.epub").unwrap(),
+            "evil.epub"
+        );
+    }
+
+    #[test]
+    fn sniff_image_mime_detects_known_formats_only() {
+        assert_eq!(sniff_image_mime(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("image/jpeg"));
+        assert_eq!(
+            sniff_image_mime(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00]),
+            Some("image/png")
+        );
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&[0, 0, 0, 0]);
+        webp.extend_from_slice(b"WEBP");
+        assert_eq!(sniff_image_mime(&webp), Some("image/webp"));
+        assert_eq!(sniff_image_mime(b"<svg xmlns=..."), None);
+        assert_eq!(sniff_image_mime(b"not an image"), None);
+        assert_eq!(sniff_image_mime(&[]), None);
     }
 
     #[test]

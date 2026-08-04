@@ -10,7 +10,7 @@ Personal ebook / audiobook library. **Rust** (Axum + SQLite), multi-user ACL, de
 | Remote | `ssh://git@192.168.0.102/key/Diarch.git` |
 | Local path | `~/Projects/diarch` |
 
-Default admin: `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` (defaults `admin` / `admin`).
+Default admin: `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` for **fresh bootstrap only** (min 12 chars; not `admin`). Existing admin passwords are never overwritten on upgrade unless `DIARCH_ADMIN_PASS_FORCE=1`.
 
 **How to read status:** *API/MVP* means endpoints and a minimal web shell exist. It does **not** mean polished UX or production-hardened integrations.
 
@@ -98,7 +98,10 @@ diarch-server (Axum) ── SQLite ── /var/lib/diarch/library
 |----------|---------|
 | `DIARCH_LISTEN` | Bind address (default `0.0.0.0:8083`) |
 | `DIARCH_DATA_DIR` | Data root |
-| `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` | Bootstrap admin |
+| `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` | Fresh-DB bootstrap only (min 12 chars; not `admin`). Ignored once admin exists |
+| `DIARCH_ADMIN_PASS_FORCE` | Set `1` with a new pass to rotate existing admin hash once |
+| `DIARCH_COOKIE_SECURE` | Set `1` for Secure session cookie (HTTPS) |
+| `DIARCH_TRUST_PROXY` | Set `1` to trust `X-Forwarded-For` for login rate limit |
 | `DIARCH_LOCALAI_URL` / `DIARCH_HERMES_URL` | LocalAI base (+ optional Hermes cover shim) |
 | `DIARCH_LOCALAI_IMAGE_MODEL` | Image model (default `flux.2-klein-4b` when URL set) |
 | `DIARCH_LOCALAI_TRANSCRIBE_MODEL` | ASR model (default `nemo-parakeet-tdt-0.6b` when URL set) |

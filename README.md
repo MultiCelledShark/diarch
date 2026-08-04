@@ -28,7 +28,7 @@ Pandoc 3.x cannot read PDF directly; Diarch OCRs with `ocrmypdf --skip-text`, co
 ```bash
 export DIARCH_DATA_DIR=./data
 export DIARCH_ADMIN_USER=admin
-export DIARCH_ADMIN_PASS='change-me'
+export DIARCH_ADMIN_PASS='change-me-now'
 export PATH="$HOME/.local/bin:$PATH"
 cargo run -p diarch-server
 ```
@@ -43,7 +43,10 @@ Optional local file: copy [`.env.example`](.env.example) → `.env` (gitignored)
 |----------|---------|---------|
 | `DIARCH_LISTEN` | `0.0.0.0:8083` | Bind address |
 | `DIARCH_DATA_DIR` | `./data` | DB + library (Keystone: `/var/lib/diarch`) |
-| `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` | `admin` / `admin` | Bootstrap admin |
+| `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` | `admin` / (required strong on **fresh** DB) | Bootstrap admin only. Existing admin passwords are never changed on upgrade. Min 12 chars; not `admin`. |
+| `DIARCH_ADMIN_PASS_FORCE` | unset | Set `1` once with a new `DIARCH_ADMIN_PASS` to rotate the existing admin hash |
+| `DIARCH_COOKIE_SECURE` | unset | Set `1` to mark the session cookie `Secure` (HTTPS terminator) |
+| `DIARCH_TRUST_PROXY` | unset | Set `1` to trust `X-Forwarded-For` for login rate limiting |
 | `DIARCH_LOCALAI_URL` | — | LocalAI base URL (covers + transcription) |
 | `DIARCH_LOCALAI_IMAGE_MODEL` | `flux.2-klein-4b` when URL set | Image model id for Generate cover |
 | `DIARCH_LOCALAI_IMAGE_SIZE` | `512x512` when URL set | Cover size (`WxH`); lower if GPU OOMs |

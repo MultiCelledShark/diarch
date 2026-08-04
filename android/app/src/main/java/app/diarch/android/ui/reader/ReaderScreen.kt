@@ -1,8 +1,11 @@
 package app.diarch.android.ui.reader
 
 import android.annotation.SuppressLint
+import android.net.Uri
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -57,7 +60,9 @@ import app.diarch.android.data.AudioChapter
 import app.diarch.android.data.ReaderTypography
 import app.diarch.android.data.UpdateSettingsRequest
 import app.diarch.android.data.WorkDetailResponse
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -68,9 +73,21 @@ import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.Request
 import org.json.JSONObject
+import java.io.FileInputStream
+import java.io.IOException
 
 data class TocItem(val label: String, val href: String)
+
+/** Virtual origin the reader WebView is pointed at for offline EPUBs; served entirely by
+ * [ReaderWebView]'s shouldInterceptRequest from the on-disk file, never touching the network. */
+private const val OFFLINE_EPUB_ORIGIN = "https://diarch.offline/epub"
+
+/** Matches the online content endpoints so the WebView can proxy them with an
+ * Authorization header from [app.diarch.android.data.ApiClient] without exposing the
+ * token to JS. */
+private val CONTENT_PATH_REGEX = Regex("^/api/works/[^/]+/content/[^/]+/?$")
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -112,6 +129,8 @@ fun ReaderScreen(
     var audioReady by remember { mutableStateOf(false) }
     var lastSyncedChapter by remember { mutableStateOf<Int?>(null) }
     var lastAudioSaveMs by remember { mutableStateOf(0L) }
+    var lastProgressSaveMs by remember { mutableStateOf(0L) }
+    var pendingProgress by remember { mutableStateOf<Triple<String, String, Double>?>(null) }
 
     fun eval(script: String) {
         webView?.evaluateJavascript(script, null)
@@ -159,13 +178,10 @@ fun ReaderScreen(
                     opts.put("offline", true)
                 }
             } else {
-                val localBytes = withContext(Dispatchers.IO) { offline.readEpubBytes(work.id) }
-                if (localBytes != null) {
-                    val b64 = android.util.Base64.encodeToString(
-                        localBytes,
-                        android.util.Base64.NO_WRAP,
-                    )
-                    opts.put("localEpubBase64", b64)
+                val hasLocalEpub = withContext(Dispatchers.IO) { offline.epubFile(work.id).isFile }
+                if (hasLocalEpub) {
+                    // Served by the WebView's shouldInterceptRequest — no base64 round-trip.
+                    opts.put("localEpubUrl", "$OFFLINE_EPUB_ORIGIN/${work.id}")
                     opts.put("offline", true)
                 }
             }
@@ -216,7 +232,8 @@ fun ReaderScreen(
     LaunchedEffect(bridgeReady, webView) {
         if (!bridgeReady || webView == null || opened) return@LaunchedEffect
         opened = true
-        val token = repo.authHeader()?.removePrefix("Bearer ") ?: ""
+        // No token is passed to the WebView: content requests are authenticated
+        // natively via shouldInterceptRequest (see ReaderWebView below).
         val base = repo.baseUrl()
         val rtl = work.readingDirection == "rtl" || work.isManga
         eval(
@@ -224,7 +241,6 @@ fun ReaderScreen(
             DiarchReader.init({
               workId: ${JSONObject.quote(work.id)},
               baseUrl: ${JSONObject.quote(base)},
-              token: ${JSONObject.quote(token)},
               rtl: $rtl,
               typography: ${typoJson(typography)}
             });
@@ -353,6 +369,11 @@ fun ReaderScreen(
                                         val position = obj["position"]?.jsonPrimitive?.contentOrNull ?: ""
                                         val percent = obj["percent"]?.jsonPrimitive?.doubleOrNull ?: 0.0
                                         progressText = "${percent.toInt()}% read"
+                                        pendingProgress = Triple(mode, position, percent)
+                                        val now = System.currentTimeMillis()
+                                        if (now - lastProgressSaveMs < 500) return@ReaderWebView
+                                        lastProgressSaveMs = now
+                                        pendingProgress = null
                                         scope.launch {
                                             repo.putProgress(work.id, mode, position, percent)
                                         }
@@ -458,6 +479,16 @@ fun ReaderScreen(
 
     DisposableEffect(Unit) {
         onDispose {
+            // Flush any progress update that was still waiting out the throttle window,
+            // mirroring the audio player's lastAudioSaveMs pattern. rememberCoroutineScope
+            // is cancelled around the same time as this callback, so use a detached
+            // best-effort scope rather than `scope.launch`.
+            pendingProgress?.let { (mode, position, percent) ->
+                @OptIn(DelicateCoroutinesApi::class)
+                GlobalScope.launch(Dispatchers.IO) {
+                    runCatching { repo.putProgress(work.id, mode, position, percent) }
+                }
+            }
             webView?.destroy()
             webView = null
         }
@@ -572,6 +603,16 @@ private fun ReaderWebView(
                     override fun onPageFinished(view: WebView?, url: String?) {
                         // bridge posts bridgeReady itself
                     }
+
+                    override fun shouldInterceptRequest(
+                        view: WebView?,
+                        request: WebResourceRequest?,
+                    ): WebResourceResponse? {
+                        val url = request?.url ?: return super.shouldInterceptRequest(view, request)
+                        offlineEpubResponse(url)?.let { return it }
+                        contentProxyResponse(url)?.let { return it }
+                        return super.shouldInterceptRequest(view, request)
+                    }
                 }
                 loadUrl("file:///android_asset/reader/reader.html")
                 onCreated(this)
@@ -580,4 +621,44 @@ private fun ReaderWebView(
         modifier = Modifier.fillMaxSize(),
         update = { /* keep */ },
     )
+}
+
+/** Serves an offline EPUB straight off disk for `OFFLINE_EPUB_ORIGIN/{workId}` requests. */
+private fun offlineEpubResponse(url: Uri): WebResourceResponse? {
+    if (!url.toString().startsWith(OFFLINE_EPUB_ORIGIN)) return null
+    val workId = url.lastPathSegment
+    if (workId.isNullOrBlank()) {
+        return WebResourceResponse("application/epub+zip", "utf-8", 400, "Bad Request", emptyMap(), null)
+    }
+    val file = DiarchApp.instance.offlineStore.epubFile(workId)
+    if (!file.isFile) {
+        return WebResourceResponse("application/epub+zip", "utf-8", 404, "Not Found", emptyMap(), null)
+    }
+    return WebResourceResponse("application/epub+zip", null, FileInputStream(file))
+}
+
+/** Proxies `/api/works/{id}/content/{kind}` requests through the app's authenticated OkHttp
+ * client, so the WebView never needs the bearer token exposed to JS. */
+private fun contentProxyResponse(url: Uri): WebResourceResponse? {
+    val apiClient = DiarchApp.instance.apiClient
+    val baseUri = runCatching { Uri.parse(apiClient.baseUrl()) }.getOrNull() ?: return null
+    if (url.scheme != baseUri.scheme || !url.host.equals(baseUri.host, ignoreCase = true)) return null
+    val path = url.path ?: return null
+    if (!CONTENT_PATH_REGEX.matches(path)) return null
+    return try {
+        val request = Request.Builder().url(url.toString()).build()
+        val response = apiClient.httpClient().newCall(request).execute()
+        val body = response.body
+        if (body == null) {
+            response.close()
+            return WebResourceResponse("text/plain", "utf-8", 502, "Bad Gateway", emptyMap(), null)
+        }
+        val mediaType = body.contentType()
+        val mime = mediaType?.let { "${it.type}/${it.subtype}" } ?: "application/octet-stream"
+        val charset = mediaType?.charset()?.name()
+        val reason = response.message.ifBlank { "OK" }
+        WebResourceResponse(mime, charset, response.code, reason, emptyMap(), body.byteStream())
+    } catch (e: IOException) {
+        WebResourceResponse("text/plain", "utf-8", 502, "Bad Gateway", emptyMap(), null)
+    }
 }

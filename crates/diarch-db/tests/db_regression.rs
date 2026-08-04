@@ -46,13 +46,27 @@ fn sample_work(created_by: Option<Uuid>, status: ReadingStatus) -> Work {
 #[tokio::test]
 async fn admin_bootstrap_and_password_verify() {
     let (_dir, db) = fresh_db().await;
-    let admin = db.ensure_admin("admin", "secret").await.unwrap();
+    let admin = db
+        .ensure_admin("admin", "secretpassword", None)
+        .await
+        .unwrap();
     assert!(admin.is_admin);
-    let again = db.ensure_admin("admin", "other").await.unwrap();
+    // Existing admin password must not change without force.
+    let again = db
+        .ensure_admin("admin", "otherpasswordxx", None)
+        .await
+        .unwrap();
     assert_eq!(admin.id, again.id);
     let hash = db.get_password_hash("admin").await.unwrap().unwrap();
-    assert!(Db::verify_password("secret", &hash).unwrap());
-    assert!(!Db::verify_password("wrong", &hash).unwrap());
+    assert!(Db::verify_password("secretpassword", &hash).unwrap());
+    assert!(!Db::verify_password("otherpasswordxx", &hash).unwrap());
+    // Opt-in force rotate.
+    let _ = db
+        .ensure_admin("admin", "ignored", Some("rotatedpass12"))
+        .await
+        .unwrap();
+    let hash2 = db.get_password_hash("admin").await.unwrap().unwrap();
+    assert!(Db::verify_password("rotatedpass12", &hash2).unwrap());
 }
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use diarch_core::{work_cover_path, work_markdown_path, work_media_dir};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -29,10 +29,35 @@ pub struct EpubMeta {
     pub description: Option<String>,
 }
 
+/// Zip-bomb guardrails for untrusted EPUB uploads: cap entry count and total
+/// uncompressed size before doing any real work on the archive.
+const MAX_ZIP_ENTRIES: usize = 10_000;
+const MAX_ZIP_UNCOMPRESSED_BYTES: u64 = 200 * 1024 * 1024;
+
+fn check_zip_bounds(archive: &mut ZipArchive<std::fs::File>) -> Result<()> {
+    let len = archive.len();
+    if len > MAX_ZIP_ENTRIES {
+        bail!("EPUB has too many zip entries ({len} > {MAX_ZIP_ENTRIES})");
+    }
+    let mut total: u64 = 0;
+    for i in 0..len {
+        let entry = archive.by_index(i)?;
+        total = total.saturating_add(entry.size());
+        if total > MAX_ZIP_UNCOMPRESSED_BYTES {
+            bail!(
+                "EPUB uncompressed size exceeds {} bytes",
+                MAX_ZIP_UNCOMPRESSED_BYTES
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Read Dublin Core fields from an EPUB's package OPF.
 pub fn read_epub_metadata(epub: &Path) -> Result<EpubMeta> {
     let file = std::fs::File::open(epub)?;
     let mut archive = ZipArchive::new(file)?;
+    check_zip_bounds(&mut archive)?;
     let mut opf_path: Option<String> = None;
     if let Ok(mut container) = archive.by_name("META-INF/container.xml") {
         let mut xml = String::new();
@@ -129,6 +154,16 @@ pub fn read_epub_metadata(epub: &Path) -> Result<EpubMeta> {
     })
 }
 
+/// Run [`read_epub_metadata`] on a blocking-pool thread — ZIP parsing does
+/// synchronous file I/O and CPU-bound XML scanning that shouldn't block the
+/// async runtime, especially for larger untrusted uploads.
+pub async fn read_epub_metadata_async(epub: &Path) -> Result<EpubMeta> {
+    let epub = epub.to_path_buf();
+    tokio::task::spawn_blocking(move || read_epub_metadata(&epub))
+        .await
+        .context("read epub metadata task")?
+}
+
 fn dc_text(xml: &str, local: &str) -> Option<String> {
     tag_inner(xml, &format!("dc:{local}")).or_else(|| tag_inner(xml, local))
 }
@@ -212,7 +247,7 @@ async fn ingest_epub(library_root: &Path, work_id: Uuid, source: &Path) -> Resul
     }
 
     let cover = extract_epub_cover(&epub_dest, &work_cover_path(library_root, work_id)).await?;
-    let meta = read_epub_metadata(&epub_dest).unwrap_or_default();
+    let meta = read_epub_metadata_async(&epub_dest).await.unwrap_or_default();
 
     Ok(ImportResult {
         epub_path: Some(epub_dest),
@@ -640,6 +675,7 @@ pub async fn extract_epub_cover(epub: &Path, dest: &Path) -> Result<Option<PathB
 pub fn extract_epub_cover_sync(epub: &Path, dest: &Path) -> Result<Option<PathBuf>> {
     let file = std::fs::File::open(epub)?;
     let mut archive = ZipArchive::new(file)?;
+    check_zip_bounds(&mut archive)?;
 
     let opf_path = find_opf_path(&mut archive);
     let mut cover_href: Option<String> = None;
@@ -766,7 +802,9 @@ fn resolve_cover_href(opf: &str, opf_dir: &str) -> Option<String> {
 
     if let Some(id) = cover_id {
         if let Some(href) = find_manifest_href(opf, &id) {
-            return Some(join_opf_href(opf_dir, &href));
+            if let Some(joined) = join_opf_href(opf_dir, &href) {
+                return Some(joined);
+            }
         }
     }
 
@@ -777,7 +815,7 @@ fn resolve_cover_href(opf: &str, opf_dir: &str) -> Option<String> {
         let end = opf[idx..].find('>').map(|e| idx + e).unwrap_or(opf.len());
         let tag = &opf[start..end];
         if let Some(href) = attr_value(tag, "href") {
-            return Some(join_opf_href(opf_dir, &href));
+            return join_opf_href(opf_dir, &href);
         }
     }
     None
@@ -805,13 +843,19 @@ fn attr_value(tag: &str, name: &str) -> Option<String> {
     None
 }
 
-fn join_opf_href(opf_dir: &str, href: &str) -> String {
+/// Join an OPF-relative href onto the OPF's directory. Returns `None` for any
+/// href containing a `..` path segment (zip-slip guard for a value we don't
+/// otherwise control — it comes straight from the untrusted EPUB's manifest).
+fn join_opf_href(opf_dir: &str, href: &str) -> Option<String> {
     let href = href.split('#').next().unwrap_or(href);
-    if opf_dir.is_empty() {
+    if href.split('/').any(|seg| seg == "..") {
+        return None;
+    }
+    Some(if opf_dir.is_empty() {
         href.to_string()
     } else {
         format!("{opf_dir}/{href}")
-    }
+    })
 }
 
 pub fn zip_markdown_bundle(library_root: &Path, work_id: Uuid, out: &Path) -> Result<()> {
@@ -919,6 +963,16 @@ pub async fn export_needs_tts_queue(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn join_opf_href_rejects_traversal() {
+        assert_eq!(
+            join_opf_href("OEBPS", "images/cover.jpg"),
+            Some("OEBPS/images/cover.jpg".into())
+        );
+        assert_eq!(join_opf_href("OEBPS", "../../../etc/passwd"), None);
+        assert_eq!(join_opf_href("", "../secret.jpg"), None);
+    }
 
     #[test]
     fn resolve_cover_from_opf_meta() {

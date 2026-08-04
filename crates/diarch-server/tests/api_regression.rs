@@ -15,7 +15,7 @@ async fn test_app() -> (tempfile::TempDir, axum::Router, Arc<diarch_server::stat
         listen: "127.0.0.1:0".into(),
         data_dir: dir.path().to_path_buf(),
         admin_username: "admin".into(),
-        admin_password: "adminpass".into(),
+        admin_password: "adminpass1234".into(),
         ..Config::default()
     };
     let state = build_state(config).await.unwrap();
@@ -93,7 +93,7 @@ async fn auth_me_requires_session() {
     let (_dir, app, _) = test_app().await;
     let (status, _, _) = json_req(&app, "GET", "/api/auth/me", None, None).await;
     assert_eq!(status, 401);
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, me, _) = json_req(&app, "GET", "/api/auth/me", Some(&token), None).await;
     assert_eq!(status, 200);
     assert_eq!(me["username"], "admin");
@@ -103,7 +103,7 @@ async fn auth_me_requires_session() {
 #[tokio::test]
 async fn wishlist_primary_code_and_taxonomy() {
     let (_dir, app, _) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, tax, _) = json_req(&app, "GET", "/api/taxonomy", Some(&token), None).await;
     assert_eq!(status, 200);
     assert!(tax.as_array().unwrap().len() > 50);
@@ -138,14 +138,14 @@ async fn wishlist_primary_code_and_taxonomy() {
 #[tokio::test]
 async fn acl_regression_grant_required() {
     let (_dir, app, state) = test_app().await;
-    let admin = login(&app, "admin", "adminpass").await;
+    let admin = login(&app, "admin", "adminpass1234").await;
 
     let (status, reader, _) = json_req(
         &app,
         "POST",
         "/api/users",
         Some(&admin),
-        Some(json!({"username":"reader","password":"reader","is_admin":false})),
+        Some(json!({"username":"reader","password":"readerpass12","is_admin":false})),
     )
     .await;
     assert_eq!(status, 201);
@@ -184,7 +184,7 @@ async fn acl_regression_grant_required() {
     assert_eq!(status, 204);
     let _ = reader_id;
 
-    let reader_tok = login(&app, "reader", "reader").await;
+    let reader_tok = login(&app, "reader", "readerpass12").await;
     let (status, works, _) = json_req(&app, "GET", "/api/works", Some(&reader_tok), None).await;
     assert_eq!(status, 200);
     let titles: Vec<_> = works
@@ -207,7 +207,7 @@ async fn acl_regression_grant_required() {
 #[tokio::test]
 async fn review_edit_sets_storygraph_dirty_flag() {
     let (_dir, app, _) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, work, _) = json_req(
         &app,
         "POST",
@@ -244,7 +244,7 @@ async fn review_edit_sets_storygraph_dirty_flag() {
 #[tokio::test]
 async fn manga_code_sets_rtl_direction() {
     let (_dir, app, _) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, work, _) = json_req(
         &app,
         "POST",
@@ -266,7 +266,7 @@ async fn manga_code_sets_rtl_direction() {
 #[tokio::test]
 async fn progress_and_settings_persist() {
     let (_dir, app, _) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, work, _) = json_req(
         &app,
         "POST",
@@ -358,7 +358,7 @@ async fn progress_and_settings_persist() {
 #[tokio::test]
 async fn markdown_import_job_and_confirm() {
     let (_dir, app, state) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, work, _) = json_req(
         &app,
         "POST",
@@ -452,7 +452,7 @@ async fn cover_prompt_and_placeholder_helpers() {
 #[tokio::test]
 async fn attention_filter_endpoint() {
     let (_dir, app, _) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, work, _) = json_req(
         &app,
         "POST",
@@ -515,7 +515,7 @@ async fn library_import_epub_creates_work_and_assets() {
     }
 
     let (_td, app, state) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let bytes = std::fs::read(&epub_path).unwrap();
     let boundary = "----diarchboundary";
     let mut body = Vec::new();
@@ -578,7 +578,7 @@ async fn library_import_epub_creates_work_and_assets() {
 #[tokio::test]
 async fn tts_queue_export_documents_todo() {
     let (_dir, app, _) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, body, _) =
         json_req(&app, "POST", "/api/queue/needs_tts/export", Some(&token), None).await;
     assert_eq!(status, 200);
@@ -588,7 +588,7 @@ async fn tts_queue_export_documents_todo() {
 #[tokio::test]
 async fn currently_reading_shelf_caps_at_three() {
     let (_dir, app, _) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let mut ids = Vec::new();
     for i in 0..3 {
         let (status, body, _) = json_req(
@@ -671,7 +671,7 @@ async fn raw_req(
 #[tokio::test]
 async fn put_markdown_keeps_needs_review() {
     let (_dir, app, state) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, work, _) = json_req(
         &app,
         "POST",
@@ -766,7 +766,7 @@ async fn pdf_import_put_md_confirm_api() {
     }
 
     let (_dir, app, state) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, work, _) = json_req(
         &app,
         "POST",
@@ -880,7 +880,7 @@ async fn pdf_import_put_md_confirm_api() {
 #[tokio::test]
 async fn cover_candidate_approve_and_discard() {
     let (dir, app, state) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, work, _) = json_req(
         &app,
         "POST",
@@ -914,7 +914,10 @@ async fn cover_candidate_approve_and_discard() {
     tokio::fs::create_dir_all(candidate.parent().unwrap())
         .await
         .unwrap();
-    tokio::fs::write(&candidate, b"fake-candidate-jpeg")
+    // Real JPEG magic bytes so apply_cover_bytes' format sniff accepts it.
+    let mut fake_jpeg = vec![0xFFu8, 0xD8, 0xFF, 0xE0];
+    fake_jpeg.extend_from_slice(b"fake-candidate-jpeg");
+    tokio::fs::write(&candidate, &fake_jpeg)
         .await
         .unwrap();
 
@@ -987,7 +990,7 @@ async fn cover_candidate_approve_and_discard() {
 #[tokio::test]
 async fn m4b_upload_attaches_and_streams_with_range() {
     let (_dir, app, _) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, work, _) = json_req(
         &app,
         "POST",
@@ -1091,7 +1094,7 @@ async fn m4b_upload_attaches_and_streams_with_range() {
 #[tokio::test]
 async fn aax_upload_without_key_fails_clearly() {
     let (_dir, app, _) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, work, _) = json_req(
         &app,
         "POST",
@@ -1137,7 +1140,7 @@ async fn aax_upload_without_key_fails_clearly() {
 #[tokio::test]
 async fn mp3_audio_upload_rejected() {
     let (_dir, app, _) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, work, _) = json_req(
         &app,
         "POST",
@@ -1180,7 +1183,7 @@ async fn mp3_audio_upload_rejected() {
 #[tokio::test]
 async fn library_import_m4b_creates_work_with_audio() {
     let (_dir, app, _) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let fake = b"ftypM4B library import bytes!!!!";
     let boundary = "----libAudioBoundary";
     let mut body = Vec::new();
@@ -1228,7 +1231,7 @@ async fn library_import_m4b_creates_work_with_audio() {
 #[tokio::test]
 async fn library_import_aax_without_key_fails() {
     let (_dir, app, _) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let boundary = "----libAaxBoundary";
     let mut body = Vec::new();
     body.extend_from_slice(
@@ -1263,7 +1266,7 @@ async fn library_import_aax_without_key_fails() {
 #[tokio::test]
 async fn delete_work_removes_row_and_files() {
     let (dir, app, state) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, work, _) = json_req(
         &app,
         "POST",
@@ -1293,7 +1296,7 @@ async fn delete_work_removes_row_and_files() {
 #[tokio::test]
 async fn metadata_isbn_report_has_providers() {
     let (_dir, app, _) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     // Nonsense ISBN that OL does not map (0000000000000 wrongly hits a real work).
     // Open Library miss; Google may be miss or error (429).
     let (status, body, _) = json_req(
@@ -1348,7 +1351,7 @@ async fn metadata_isbn_report_has_providers() {
 #[tokio::test]
 async fn integrations_probe_and_list() {
     let (_dir, app, _) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, health, _) =
         json_req(&app, "POST", "/api/integrations/probe", Some(&token), None).await;
     assert_eq!(status, 200, "{health}");
@@ -1380,26 +1383,28 @@ async fn integrations_probe_and_list() {
 }
 
 #[tokio::test]
-async fn remarkable_status_and_auth_validation_for_any_user() {
+async fn remarkable_status_and_auth_admin_only() {
     let (_dir, app, state) = test_app().await;
-    let admin = login(&app, "admin", "adminpass").await;
+    let admin = login(&app, "admin", "adminpass1234").await;
     let (status, _, _) = json_req(
         &app,
         "POST",
         "/api/users",
         Some(&admin),
-        Some(json!({"username":"reader1","password":"readerpass","is_admin":false})),
+        Some(json!({"username":"reader1","password":"readerpass12","is_admin":false})),
     )
     .await;
     assert_eq!(status, 201);
-    let reader = login(&app, "reader1", "readerpass").await;
+    let reader = login(&app, "reader1", "readerpass12").await;
 
     let (status, st, _) =
-        json_req(&app, "GET", "/api/remarkable/status", Some(&reader), None).await;
+        json_req(&app, "GET", "/api/remarkable/status", Some(&admin), None).await;
     assert_eq!(status, 200, "{st}");
     assert!(st["connect_url"].as_str().unwrap().contains("my.remarkable.com"));
-    assert!(st.get("authenticated").is_some());
-    assert!(st.get("rmapi_installed").is_some());
+
+    let (status, _, _) =
+        json_req(&app, "GET", "/api/remarkable/status", Some(&reader), None).await;
+    assert_eq!(status, 403);
 
     let (status, body, _) = json_req(
         &app,
@@ -1409,14 +1414,14 @@ async fn remarkable_status_and_auth_validation_for_any_user() {
         Some(json!({"code":"short"})),
     )
     .await;
-    assert_eq!(status, 400, "{body}");
+    assert_eq!(status, 403, "{body}");
     let _ = state;
 }
 
 #[tokio::test]
 async fn remarkable_send_without_epub_reports_error() {
     let (_dir, app, _) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, work, _) = json_req(
         &app,
         "POST",
@@ -1444,7 +1449,7 @@ async fn remarkable_send_without_epub_reports_error() {
 #[tokio::test]
 async fn clear_storygraph_flags_via_flags_endpoint() {
     let (_dir, app, state) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, work, _) = json_req(
         &app,
         "POST",
@@ -1485,7 +1490,7 @@ async fn clear_storygraph_flags_via_flags_endpoint() {
 #[tokio::test]
 async fn apply_meta_hit_sets_primary_from_subjects() {
     let (_dir, app, _) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, work, _) = json_req(
         &app,
         "POST",
@@ -1525,7 +1530,7 @@ async fn apply_meta_hit_sets_primary_from_subjects() {
 #[tokio::test]
 async fn storygraph_sync_without_credentials_is_empty_ok() {
     let (_dir, app, _) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, body, _) =
         json_req(&app, "POST", "/api/storygraph/sync", Some(&token), None).await;
     // No username → empty pull, still a report.
@@ -1537,7 +1542,7 @@ async fn storygraph_sync_without_credentials_is_empty_ok() {
 #[tokio::test]
 async fn storygraph_status_and_auth_save_credentials() {
     let (_dir, app, state) = test_app().await;
-    let token = login(&app, "admin", "adminpass").await;
+    let token = login(&app, "admin", "adminpass1234").await;
     let (status, st, _) =
         json_req(&app, "GET", "/api/storygraph/status", Some(&token), None).await;
     assert_eq!(status, 200, "{st}");

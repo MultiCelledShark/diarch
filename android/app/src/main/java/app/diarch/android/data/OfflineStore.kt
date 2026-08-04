@@ -11,6 +11,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.IOException
+import java.time.Instant
 
 @Serializable
 data class OfflineManifest(
@@ -26,6 +27,16 @@ data class OfflineManifest(
     val hasAudio: Boolean = false,
     val hasCover: Boolean = false,
     val audioFile: String? = null,
+    val savedAt: Long = System.currentTimeMillis(),
+)
+
+/** Locally persisted reading progress, timestamped so it can be compared against the
+ * server's `updated_at` to decide which copy is newer (see LibraryRepository.getProgress). */
+@Serializable
+data class LocalProgress(
+    val mode: String,
+    val position: String,
+    val percent: Double,
     val savedAt: Long = System.currentTimeMillis(),
 )
 
@@ -105,11 +116,6 @@ class OfflineStore(
         return if (f.isFile) Uri.fromFile(f) else null
     }
 
-    fun readEpubBytes(workId: String): ByteArray? {
-        val f = epubFile(workId)
-        return if (f.isFile) f.readBytes() else null
-    }
-
     fun readMarkdownText(workId: String): String? {
         val f = mdFile(workId)
         return if (f.isFile) f.readText() else null
@@ -125,7 +131,7 @@ class OfflineStore(
 
     fun saveLocalProgress(workId: String, mode: String, position: String, percent: Double) {
         val body = json.encodeToString(
-            ProgressBody(mode = mode, position = position, percent = percent),
+            LocalProgress(mode = mode, position = position, percent = percent),
         )
         progressFile(workId, mode).writeText(body)
     }
@@ -134,11 +140,12 @@ class OfflineStore(
         val f = progressFile(workId, mode)
         if (!f.isFile) return null
         return runCatching {
-            val body = json.decodeFromString<ProgressBody>(f.readText())
+            val body = json.decodeFromString<LocalProgress>(f.readText())
             ReadingProgress(
                 mode = body.mode,
                 position = body.position,
                 percent = body.percent,
+                updatedAt = Instant.ofEpochMilli(body.savedAt).toString(),
             )
         }.getOrNull()
     }
