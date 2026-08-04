@@ -3,6 +3,7 @@ package app.diarch.android
 import android.app.Application
 import app.diarch.android.data.ApiClient
 import app.diarch.android.data.LibraryRepository
+import app.diarch.android.data.OfflineStore
 import app.diarch.android.data.SessionStore
 import coil.ImageLoader
 import coil.ImageLoaderFactory
@@ -16,13 +17,16 @@ class DiarchApp : Application(), ImageLoaderFactory {
         private set
     lateinit var repository: LibraryRepository
         private set
+    lateinit var offlineStore: OfflineStore
+        private set
 
     override fun onCreate() {
         super.onCreate()
         instance = this
         sessionStore = SessionStore(this)
         apiClient = ApiClient()
-        repository = LibraryRepository(apiClient, sessionStore, this)
+        offlineStore = OfflineStore(this, apiClient)
+        repository = LibraryRepository(apiClient, sessionStore, this, offlineStore)
     }
 
     override fun newImageLoader(): ImageLoader {

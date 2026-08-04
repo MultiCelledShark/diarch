@@ -18,10 +18,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.LibraryBooks
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Schedule
-import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -48,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import app.diarch.android.DiarchApp
 import app.diarch.android.data.Shelf
 import app.diarch.android.data.Work
+import app.diarch.android.data.toWork
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import kotlinx.coroutines.launch
@@ -57,6 +59,7 @@ import kotlinx.coroutines.launch
 fun ShelvesScreen(
     onOpenWork: (String) -> Unit,
     onImport: () -> Unit,
+    onWishlistAdd: () -> Unit,
     onLogout: () -> Unit,
 ) {
     var shelf by remember { mutableStateOf(Shelf.Reading) }
@@ -73,7 +76,15 @@ fun ShelvesScreen(
             try {
                 works = repo.listWorks(shelf)
             } catch (e: Exception) {
-                error = e.message ?: "Failed to load"
+                val offlineOnly = DiarchApp.instance.offlineStore.listDownloaded()
+                    .map { it.toWork() }
+                    .filter { it.status == shelf.apiStatus || shelf == Shelf.Library }
+                if (offlineOnly.isNotEmpty()) {
+                    works = offlineOnly
+                    error = "Showing offline copies (server unreachable)"
+                } else {
+                    error = e.message ?: "Failed to load"
+                }
             } finally {
                 loading = false
             }
@@ -110,6 +121,7 @@ fun ShelvesScreen(
                                     Shelf.Reading -> Icons.Default.MenuBook
                                     Shelf.ToRead -> Icons.Default.Schedule
                                     Shelf.Library -> Icons.Default.LibraryBooks
+                                    Shelf.Wishlist -> Icons.Default.FavoriteBorder
                                     Shelf.Finished -> Icons.Default.DoneAll
                                 },
                                 contentDescription = s.label,
@@ -121,8 +133,15 @@ fun ShelvesScreen(
             }
         },
         floatingActionButton = {
-            FloatingActionButton(onClick = onImport) {
-                Icon(Icons.Default.Add, contentDescription = "Import")
+            FloatingActionButton(
+                onClick = {
+                    if (shelf == Shelf.Wishlist) onWishlistAdd() else onImport()
+                },
+            ) {
+                Icon(
+                    Icons.Default.Add,
+                    contentDescription = if (shelf == Shelf.Wishlist) "Add to wishlist" else "Import",
+                )
             }
         },
     ) { padding ->
@@ -146,6 +165,7 @@ fun ShelvesScreen(
                                 Shelf.Reading -> "Nothing in progress"
                                 Shelf.ToRead -> "To Read is empty"
                                 Shelf.Library -> "Library is empty — import a file"
+                                Shelf.Wishlist -> "Wishlist is empty — add a title or scan an ISBN"
                                 Shelf.Finished -> "No finished books yet"
                             },
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -170,6 +190,7 @@ fun ShelvesScreen(
 @Composable
 private fun WorkRow(work: Work, onClick: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val offlineCover = DiarchApp.instance.offlineStore.localCoverUri(work.id)
     val coverUrl = DiarchApp.instance.repository.coverUrl(work.id, work.updatedAt)
     Row(
         modifier = Modifier
@@ -180,7 +201,7 @@ private fun WorkRow(work: Work, onClick: () -> Unit) {
     ) {
         AsyncImage(
             model = ImageRequest.Builder(context)
-                .data(coverUrl)
+                .data(offlineCover ?: coverUrl)
                 .crossfade(true)
                 .build(),
             contentDescription = null,
@@ -219,6 +240,10 @@ private fun WorkRow(work: Work, onClick: () -> Unit) {
                         append("Audio")
                     }
                     if (isEmpty()) append("No files yet")
+                    if (DiarchApp.instance.offlineStore.isDownloaded(work.id)) {
+                        if (isNotEmpty()) append(" · ")
+                        append("Offline")
+                    }
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

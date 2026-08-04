@@ -35,6 +35,8 @@
     rtl: false,
     mdScrollTimer: null,
     epubLocationsReady: false,
+    tocItems: [],
+    offline: false,
   };
 
   function post(type, payload) {
@@ -132,13 +134,13 @@
     if (area) area.innerHTML = "";
   }
 
-  async function loadEpub(progress) {
+  async function loadEpub(progress, localBase64) {
     destroyEpub();
     const epubArea = document.getElementById("epub-area");
     const mdArea = document.getElementById("md-area");
     epubArea.hidden = false;
     mdArea.hidden = true;
-    setStatus("Loading EPUB…");
+    setStatus(localBase64 ? "Opening offline EPUB…" : "Loading EPUB…");
     state.mode = "epub";
 
     if (typeof ePub === "undefined") {
@@ -147,7 +149,15 @@
       return;
     }
 
-    const buf = await fetchBinary("/api/works/" + state.workId + "/content/epub");
+    let buf;
+    if (localBase64) {
+      const binary = atob(localBase64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      buf = bytes.buffer;
+    } else {
+      buf = await fetchBinary("/api/works/" + state.workId + "/content/epub");
+    }
     state.book = ePub(buf);
     const width = Math.max(epubArea.clientWidth || 0, window.innerWidth || 320);
     const height = Math.max(epubArea.clientHeight || 0, window.innerHeight || 480);
@@ -161,11 +171,10 @@
     await state.book.ready;
 
     const toc = (state.book.navigation && state.book.navigation.toc) || [];
-    post("toc", {
-      items: toc.map(function (t) {
-        return { label: t.label || "", href: t.href || "" };
-      }),
+    state.tocItems = toc.map(function (t) {
+      return { label: t.label || "", href: t.href || "" };
     });
+    post("toc", { items: state.tocItems });
 
     try {
       await state.book.locations.generate(1024);
@@ -199,7 +208,7 @@
     });
 
     setStatus("");
-    post("ready", { mode: "epub" });
+    post("ready", { mode: "epub", offline: !!localBase64 });
   }
 
   function mdPercent(area) {
@@ -207,16 +216,19 @@
     return (area.scrollTop / (area.scrollHeight - area.clientHeight)) * 100;
   }
 
-  async function loadMarkdown(progress, forceJustify) {
+  async function loadMarkdown(progress, forceJustify, localText) {
     destroyEpub();
     const epubArea = document.getElementById("epub-area");
     const mdArea = document.getElementById("md-area");
     epubArea.hidden = true;
     mdArea.hidden = false;
-    setStatus("Loading markdown…");
+    setStatus(localText != null ? "Opening offline markdown…" : "Loading markdown…");
     state.mode = "markdown";
 
-    const raw = await fetchText("/api/works/" + state.workId + "/content/markdown");
+    const raw =
+      localText != null
+        ? localText
+        : await fetchText("/api/works/" + state.workId + "/content/markdown");
     const typo = Object.assign({}, state.typo || {});
     if (forceJustify) typo.justify = true;
     applyTypography(typo);
@@ -230,13 +242,13 @@
     }
     mdArea.innerHTML = '<div class="md-inner">' + html + "</div>";
 
-    // Heading TOC from markdown
     const headings = [];
     mdArea.querySelectorAll("h1,h2,h3").forEach(function (h, i) {
       const id = "md-h-" + i;
       h.id = id;
       headings.push({ label: h.textContent || "", href: "#" + id });
     });
+    state.tocItems = headings;
     post("toc", { items: headings });
 
     requestAnimationFrame(function () {
@@ -253,7 +265,7 @@
         percent: mdPercent(mdArea),
       });
       setStatus("");
-      post("ready", { mode: "markdown" });
+      post("ready", { mode: "markdown", offline: localText != null });
     });
 
     mdArea.onscroll = function () {
@@ -281,10 +293,15 @@
       try {
         const mode = opts.mode || "epub";
         const progress = opts.progress || null;
+        state.offline = !!opts.offline;
         if (mode === "markdown") {
-          await loadMarkdown(progress, opts.forceJustify !== false);
+          await loadMarkdown(
+            progress,
+            opts.forceJustify !== false,
+            opts.localMarkdown != null ? opts.localMarkdown : null,
+          );
         } else {
-          await loadEpub(progress);
+          await loadEpub(progress, opts.localEpubBase64 || null);
         }
       } catch (e) {
         setStatus(e.message || String(e));
@@ -315,6 +332,48 @@
       }
       if (state.rendition) state.rendition.display(href);
     },
+    /** Match an audiobook chapter title to the text TOC and jump there. */
+    goChapterTitle: function (title) {
+      if (!title) return false;
+      const needle = normalizeTitle(title);
+      if (!needle) return false;
+      const items = state.tocItems || [];
+      let best = null;
+      let bestScore = 0;
+      for (let i = 0; i < items.length; i++) {
+        const label = normalizeTitle(items[i].label || "");
+        if (!label) continue;
+        let score = 0;
+        if (label === needle) score = 100;
+        else if (label.indexOf(needle) >= 0 || needle.indexOf(label) >= 0) score = 80;
+        else {
+          const a = label.split(/\s+/);
+          const b = needle.split(/\s+/);
+          let shared = 0;
+          for (let j = 0; j < b.length; j++) {
+            if (a.indexOf(b[j]) >= 0) shared++;
+          }
+          if (shared > 0) score = (shared / Math.max(a.length, b.length)) * 60;
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          best = items[i];
+        }
+      }
+      if (!best || bestScore < 40) {
+        post("chapterSync", { matched: false, title: title });
+        return false;
+      }
+      window.DiarchReader.goToc(best.href);
+      post("chapterSync", {
+        matched: true,
+        title: title,
+        label: best.label,
+        href: best.href,
+        mode: state.mode,
+      });
+      return true;
+    },
     resize: function () {
       if (!state.rendition || state.mode !== "epub") return;
       const area = document.getElementById("epub-area");
@@ -325,6 +384,15 @@
       } catch (e) {}
     },
   };
+
+  function normalizeTitle(s) {
+    return String(s || "")
+      .toLowerCase()
+      .replace(/^chapter\s+\d+[:.\s-]*/i, "")
+      .replace(/[^a-z0-9\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
 
   setStatus("Ready");
   post("bridgeReady", {});

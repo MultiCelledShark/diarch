@@ -59,16 +59,25 @@ fun WorkDetailScreen(
     var loading by remember { mutableStateOf(true) }
     var moveMenu by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
+    var offlineBusy by remember { mutableStateOf(false) }
+    var offlineStatus by remember { mutableStateOf("") }
+    var isOffline by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val repo = DiarchApp.instance.repository
+    val offline = DiarchApp.instance.offlineStore
     val context = LocalContext.current
+
+    fun refreshOfflineFlag() {
+        isOffline = offline.isDownloaded(workId)
+    }
 
     fun reload() {
         scope.launch {
             loading = true
             try {
                 detail = repo.getWork(workId)
+                refreshOfflineFlag()
             } catch (e: Exception) {
                 snackbar.showSnackbar(e.message ?: "Failed to load")
             } finally {
@@ -82,6 +91,7 @@ fun WorkDetailScreen(
     val work = detail?.work
     val hasEpub = detail?.resolvedHasEpub == true
     val hasMd = detail?.resolvedHasMd == true
+    val hasAudio = detail?.resolvedHasAudio == true
 
     Scaffold(
         topBar = {
@@ -149,6 +159,8 @@ fun WorkDetailScreen(
                             append(if (hasEpub) "EPUB ready" else "No EPUB")
                             append(" · ")
                             append(if (hasMd) "Markdown ready" else "No Markdown")
+                            append(" · ")
+                            append(if (hasAudio) "Audio ready" else "No audio")
                         },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -158,13 +170,87 @@ fun WorkDetailScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            if (hasEpub || hasMd) {
+            if (hasEpub || hasMd || hasAudio) {
                 Button(
                     onClick = { detail?.let(onRead) },
                     modifier = Modifier.fillMaxWidth(),
                     enabled = !busy,
                 ) {
-                    Text("Read")
+                    Text(
+                        when {
+                            (hasEpub || hasMd) && hasAudio -> "Read / Listen"
+                            hasAudio -> "Listen"
+                            else -> "Read"
+                        },
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            if (hasEpub || hasMd || hasAudio) {
+                if (isOffline) {
+                    OutlinedButton(
+                        onClick = {
+                            offlineBusy = true
+                            scope.launch {
+                                try {
+                                    offline.remove(workId)
+                                    refreshOfflineFlag()
+                                    snackbar.showSnackbar("Removed offline copy")
+                                } finally {
+                                    offlineBusy = false
+                                    offlineStatus = ""
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !offlineBusy,
+                    ) {
+                        Text("Remove offline copy")
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = {
+                            val d = detail ?: return@OutlinedButton
+                            offlineBusy = true
+                            offlineStatus = "Starting…"
+                            scope.launch {
+                                try {
+                                    offline.download(d) { offlineStatus = it }
+                                    refreshOfflineFlag()
+                                    snackbar.showSnackbar("Saved for offline use")
+                                } catch (e: Exception) {
+                                    snackbar.showSnackbar(e.message ?: "Download failed")
+                                } finally {
+                                    offlineBusy = false
+                                    offlineStatus = ""
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !offlineBusy,
+                    ) {
+                        if (offlineBusy) {
+                            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.height(18.dp).width(18.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(offlineStatus.ifBlank { "Downloading…" })
+                            }
+                        } else {
+                            Text("Save offline")
+                        }
+                    }
+                }
+                if (isOffline && !offlineBusy) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "Available without network",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 Spacer(modifier = Modifier.height(8.dp))
             }
@@ -227,3 +313,6 @@ private val WorkDetailResponse.resolvedHasEpub: Boolean
 
 private val WorkDetailResponse.resolvedHasMd: Boolean
     get() = hasMd || assets.any { it.kind == "markdown" } || work.hasMd
+
+private val WorkDetailResponse.resolvedHasAudio: Boolean
+    get() = hasAudio || assets.any { it.kind == "audio" } || work.hasAudio

@@ -27,6 +27,7 @@ import app.diarch.android.ui.detail.WorkDetailScreen
 import app.diarch.android.ui.login.LoginScreen
 import app.diarch.android.ui.reader.ReaderScreen
 import app.diarch.android.ui.shelves.ShelvesScreen
+import app.diarch.android.ui.wishlist.WishlistAddScreen
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -76,9 +77,20 @@ private fun DiarchNav() {
             ShelvesScreen(
                 onOpenWork = { id -> nav.navigate("work/$id") },
                 onImport = { nav.navigate("import") },
+                onWishlistAdd = { nav.navigate("wishlist-add") },
                 onLogout = {
                     nav.navigate("login") {
                         popUpTo(0) { inclusive = true }
+                    }
+                },
+            )
+        }
+        composable("wishlist-add") {
+            WishlistAddScreen(
+                onBack = { nav.popBackStack() },
+                onAdded = { id ->
+                    nav.navigate("work/$id") {
+                        popUpTo("shelves")
                     }
                 },
             )

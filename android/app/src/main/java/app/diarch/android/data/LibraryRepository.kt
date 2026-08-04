@@ -13,6 +13,7 @@ class LibraryRepository(
     private val apiClient: ApiClient,
     private val sessionStore: SessionStore,
     private val appContext: Context,
+    private val offlineStore: OfflineStore,
 ) {
     suspend fun login(baseUrl: String, username: String, password: String): User {
         val normalized = SessionStore.normalizeBaseUrl(baseUrl)
@@ -29,11 +30,31 @@ class LibraryRepository(
         apiClient.updateSession(apiClient.baseUrl(), "")
     }
 
-    suspend fun listWorks(shelf: Shelf): List<Work> =
-        apiClient.api().listWorks(shelf.apiStatus)
+    suspend fun listWorks(shelf: Shelf): List<Work> {
+        return try {
+            apiClient.api().listWorks(shelf.apiStatus)
+        } catch (e: Exception) {
+            offlineStore.listDownloaded()
+                .map { it.toWork() }
+                .filter { it.status == shelf.apiStatus || shelf == Shelf.Library }
+                .ifEmpty { throw e }
+        }
+    }
 
-    suspend fun getWork(id: String): WorkDetailResponse =
-        apiClient.api().getWork(id)
+    suspend fun getWork(id: String): WorkDetailResponse {
+        return try {
+            apiClient.api().getWork(id)
+        } catch (e: Exception) {
+            val manifest = offlineStore.readManifest(id) ?: throw e
+            val avail = offlineStore.availability(id)
+            WorkDetailResponse(
+                work = manifest.toWork(),
+                hasEpub = avail.hasEpub,
+                hasMd = avail.hasMd,
+                hasAudio = avail.hasAudio,
+            )
+        }
+    }
 
     suspend fun setStatus(id: String, status: String): Work {
         try {
@@ -67,13 +88,17 @@ class LibraryRepository(
         apiClient.api().putSettings(body)
     }
 
-    suspend fun getProgress(id: String, mode: String): ReadingProgress? =
-        runCatching { apiClient.api().getProgress(id, mode) }.getOrNull()
-
     suspend fun putProgress(id: String, mode: String, position: String, percent: Double) {
+        offlineStore.saveLocalProgress(id, mode, position, percent)
         runCatching {
             apiClient.api().putProgress(id, ProgressBody(mode, position, percent))
         }
+    }
+
+    suspend fun getProgress(id: String, mode: String): ReadingProgress? {
+        val remote = runCatching { apiClient.api().getProgress(id, mode) }.getOrNull()
+        if (remote != null) return remote
+        return offlineStore.readLocalProgress(id, mode)
     }
 
     fun coverUrl(workId: String, updatedAt: String? = null): String =
@@ -82,6 +107,21 @@ class LibraryRepository(
     fun authHeader(): String? = apiClient.authHeader()
 
     fun baseUrl(): String = apiClient.baseUrl()
+
+    fun audioUrl(workId: String, filename: String = "book.m4b"): String =
+        "${apiClient.baseUrl()}/api/works/$workId/audio/$filename"
+
+    suspend fun audioChapters(workId: String): List<AudioChapter> =
+        runCatching { apiClient.api().audioChapters(workId).chapters }.getOrDefault(emptyList())
+
+    suspend fun addWishlist(title: String?, authors: String?, isbn: String?): Work =
+        apiClient.api().addWishlist(
+            WishlistRequest(
+                title = title?.takeIf { it.isNotBlank() },
+                authors = authors?.takeIf { it.isNotBlank() },
+                isbn = isbn?.takeIf { it.isNotBlank() },
+            ),
+        )
 
     private fun queryDisplayName(uri: Uri): String? {
         val cursor = appContext.contentResolver.query(uri, null, null, null, null) ?: return null

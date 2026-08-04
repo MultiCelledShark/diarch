@@ -53,6 +53,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import app.diarch.android.DiarchApp
+import app.diarch.android.data.AudioChapter
 import app.diarch.android.data.ReaderTypography
 import app.diarch.android.data.UpdateSettingsRequest
 import app.diarch.android.data.WorkDetailResponse
@@ -60,7 +61,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -76,8 +79,19 @@ fun ReaderScreen(
     onClose: () -> Unit,
 ) {
     val work = detail.work
-    val hasEpub = detail.assets.any { it.kind == "epub" } || detail.hasEpub || work.hasEpub
-    val hasMd = detail.assets.any { it.kind == "markdown" } || detail.hasMd || work.hasMd
+    val offline = DiarchApp.instance.offlineStore
+    val offlineAvail = remember(work.id) { offline.availability(work.id) }
+    val hasEpub =
+        detail.assets.any { it.kind == "epub" } || detail.hasEpub || work.hasEpub || offlineAvail.hasEpub
+    val hasMd =
+        detail.assets.any { it.kind == "markdown" } || detail.hasMd || work.hasMd || offlineAvail.hasMd
+    val hasAudio =
+        detail.assets.any { it.kind == "audio" } || detail.hasAudio || work.hasAudio || offlineAvail.hasAudio
+    val audioAsset = detail.assets.firstOrNull { it.kind == "audio" }
+    val audioFile = offlineAvail.manifest?.audioFile
+        ?: audioAsset?.relativePath?.substringAfterLast('/')?.ifBlank { null }
+        ?: "book.m4b"
+    val localAudioUri = remember(work.id, hasAudio) { offline.localAudioUri(work.id) }
     val repo = DiarchApp.instance.repository
     val scope = rememberCoroutineScope()
     val json = remember { Json { ignoreUnknownKeys = true } }
@@ -93,6 +107,11 @@ fun ReaderScreen(
     var menuOpen by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var opened by remember { mutableStateOf(false) }
+    var chapters by remember { mutableStateOf<List<AudioChapter>>(emptyList()) }
+    var audioStartSec by remember { mutableStateOf<Double?>(null) }
+    var audioReady by remember { mutableStateOf(false) }
+    var lastSyncedChapter by remember { mutableStateOf<Int?>(null) }
+    var lastAudioSaveMs by remember { mutableStateOf(0L) }
 
     fun eval(script: String) {
         webView?.evaluateJavascript(script, null)
@@ -113,34 +132,55 @@ fun ReaderScreen(
             .toString()
 
     fun openMode(useMd: Boolean) {
+        if (!hasEpub && !hasMd) return
         if (useMd && !hasMd) return
         if (!useMd && !hasEpub) return
         infiniteScroll = useMd
         scope.launch {
             val mode = if (useMd) "markdown" else "epub"
             val progress = withContext(Dispatchers.IO) { repo.getProgress(work.id, mode) }
-            val progressJson = if (progress != null) {
-                JSONObject()
-                    .put("position", progress.position)
-                    .put("percent", progress.percent)
-                    .toString()
+            val opts = JSONObject()
+                .put("mode", mode)
+                .put("forceJustify", useMd)
+            if (progress != null) {
+                opts.put(
+                    "progress",
+                    JSONObject()
+                        .put("position", progress.position)
+                        .put("percent", progress.percent),
+                )
             } else {
-                "null"
+                opts.put("progress", JSONObject.NULL)
             }
-            val forceJustify = if (useMd) "true" else "false"
-            eval(
-                """
-                DiarchReader.open({
-                  mode: '$mode',
-                  forceJustify: $forceJustify,
-                  progress: $progressJson
-                });
-                """.trimIndent(),
-            )
+            if (useMd) {
+                val localMd = withContext(Dispatchers.IO) { offline.readMarkdownText(work.id) }
+                if (localMd != null) {
+                    opts.put("localMarkdown", localMd)
+                    opts.put("offline", true)
+                }
+            } else {
+                val localBytes = withContext(Dispatchers.IO) { offline.readEpubBytes(work.id) }
+                if (localBytes != null) {
+                    val b64 = android.util.Base64.encodeToString(
+                        localBytes,
+                        android.util.Base64.NO_WRAP,
+                    )
+                    opts.put("localEpubBase64", b64)
+                    opts.put("offline", true)
+                }
+            }
+            eval("DiarchReader.open($opts);")
             runCatching {
                 repo.putSettings(UpdateSettingsRequest(readerInfiniteScroll = useMd))
             }
         }
+    }
+
+    fun syncTextToChapter(chapter: AudioChapter) {
+        if (chapter.index == lastSyncedChapter) return
+        lastSyncedChapter = chapter.index
+        val title = chapter.title.ifBlank { return }
+        eval("DiarchReader.goChapterTitle(${JSONObject.quote(title)});")
     }
 
     LaunchedEffect(Unit) {
@@ -151,6 +191,25 @@ fun ReaderScreen(
             infiniteScroll = preferScroll || (!hasEpub && hasMd)
         } catch (_: Exception) {
             infiniteScroll = !hasEpub && hasMd
+        }
+        if (hasAudio) {
+            chapters = withContext(Dispatchers.IO) {
+                val remote = runCatching { repo.audioChapters(work.id) }.getOrDefault(emptyList())
+                if (remote.isNotEmpty()) {
+                    remote
+                } else {
+                    val local = offline.readChaptersJson(work.id) ?: return@withContext emptyList()
+                    runCatching {
+                        json.decodeFromString(
+                            app.diarch.android.data.AudioChaptersResponse.serializer(),
+                            local,
+                        ).chapters
+                    }.getOrDefault(emptyList())
+                }
+            }
+            val audioProg = withContext(Dispatchers.IO) { repo.getProgress(work.id, "audio") }
+            audioStartSec = audioProg?.position?.toDoubleOrNull()
+            audioReady = true
         }
     }
 
@@ -171,7 +230,9 @@ fun ReaderScreen(
             });
             """.trimIndent(),
         )
-        openMode(infiniteScroll)
+        if (hasEpub || hasMd) {
+            openMode(infiniteScroll)
+        }
     }
 
     Scaffold(
@@ -251,50 +312,96 @@ fun ReaderScreen(
             )
         },
     ) { padding ->
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            ReaderWebView(
-                onCreated = { webView = it },
-                onMessage = { raw ->
-                    try {
-                        val obj = json.parseToJsonElement(raw).jsonObject
-                        when (obj["type"]?.jsonPrimitive?.contentOrNull) {
-                            "bridgeReady" -> bridgeReady = true
-                            "ready" -> error = null
-                            "error" -> error = obj["message"]?.jsonPrimitive?.contentOrNull
-                            "toc" -> {
-                                val items = obj["items"]?.jsonArray.orEmpty().mapNotNull { el ->
-                                    val o = el.jsonObject
-                                    val label = o["label"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-                                    val href = o["href"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-                                    TocItem(label, href)
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+            ) {
+                if (hasEpub || hasMd) {
+                    ReaderWebView(
+                        onCreated = { webView = it },
+                        onMessage = { raw ->
+                            try {
+                                val obj = json.parseToJsonElement(raw).jsonObject
+                                when (obj["type"]?.jsonPrimitive?.contentOrNull) {
+                                    "bridgeReady" -> bridgeReady = true
+                                    "ready" -> error = null
+                                    "error" -> error = obj["message"]?.jsonPrimitive?.contentOrNull
+                                    "toc" -> {
+                                        val items = obj["items"]?.jsonArray.orEmpty().mapNotNull { el ->
+                                            val o = el.jsonObject
+                                            val label = o["label"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                                            val href = o["href"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                                            TocItem(label, href)
+                                        }
+                                        toc = items
+                                    }
+                                    "chapterSync" -> {
+                                        val matched = obj["matched"]?.jsonPrimitive?.booleanOrNull == true
+                                        val label = obj["label"]?.jsonPrimitive?.contentOrNull
+                                        if (matched && !label.isNullOrBlank()) {
+                                            progressText = "Synced · $label"
+                                        }
+                                    }
+                                    "progress" -> {
+                                        val mode = obj["mode"]?.jsonPrimitive?.contentOrNull ?: return@ReaderWebView
+                                        val position = obj["position"]?.jsonPrimitive?.contentOrNull ?: ""
+                                        val percent = obj["percent"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                                        progressText = "${percent.toInt()}% read"
+                                        scope.launch {
+                                            repo.putProgress(work.id, mode, position, percent)
+                                        }
+                                    }
                                 }
-                                toc = items
+                            } catch (_: Exception) {
                             }
-                            "progress" -> {
-                                val mode = obj["mode"]?.jsonPrimitive?.contentOrNull ?: return@ReaderWebView
-                                val position = obj["position"]?.jsonPrimitive?.contentOrNull ?: ""
-                                val percent = obj["percent"]?.jsonPrimitive?.doubleOrNull ?: 0.0
-                                progressText = "${percent.toInt()}% read"
-                                scope.launch {
-                                    repo.putProgress(work.id, mode, position, percent)
-                                }
+                        },
+                    )
+                } else {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(
+                            "Audiobook only — use the player below",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                if (error != null) {
+                    Text(
+                        error!!,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(16.dp),
+                    )
+                }
+            }
+            if (hasAudio && audioReady) {
+                AudioPlayerBar(
+                    streamUrl = repo.audioUrl(work.id, audioFile),
+                    authHeader = repo.authHeader(),
+                    chapters = chapters,
+                    initialPositionSec = audioStartSec,
+                    localUri = localAudioUri,
+                    onChapterChanged = { chapter -> syncTextToChapter(chapter) },
+                    onProgress = { posSec, percent, chapter ->
+                        val now = System.currentTimeMillis()
+                        if (now - lastAudioSaveMs < 2000) return@AudioPlayerBar
+                        lastAudioSaveMs = now
+                        scope.launch {
+                            repo.putProgress(work.id, "audio", posSec.toString(), percent)
+                        }
+                        if (chapter != null && (hasEpub || hasMd)) {
+                            // keep subtitle fresh while listening
+                            if (progressText.isBlank() || progressText.startsWith("Synced") || progressText.contains("audio")) {
+                                progressText = "${percent.toInt()}% audio · ${chapter.title.ifBlank { "ch ${chapter.index}" }}"
                             }
                         }
-                    } catch (_: Exception) {
-                    }
-                },
-            )
-            if (error != null) {
-                Text(
-                    error!!,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(16.dp),
+                    },
                 )
             }
         }

@@ -63,4 +63,10 @@ interface DiarchApi {
     @Streaming
     @GET("api/works/{id}/content/markdown")
     suspend fun downloadMarkdown(@Path("id") id: String): ResponseBody
+
+    @GET("api/works/{id}/audio/chapters")
+    suspend fun audioChapters(@Path("id") id: String): AudioChaptersResponse
+
+    @POST("api/wishlist")
+    suspend fun addWishlist(@Body body: WishlistRequest): Work
 }

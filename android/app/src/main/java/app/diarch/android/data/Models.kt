@@ -136,9 +136,30 @@ data class ImportResponse(
     val kind: String? = null,
 )
 
+@Serializable
+data class AudioChapter(
+    val index: Int,
+    val title: String = "",
+    val start: Double = 0.0,
+    val end: Double? = null,
+)
+
+@Serializable
+data class AudioChaptersResponse(
+    val chapters: List<AudioChapter> = emptyList(),
+)
+
+@Serializable
+data class WishlistRequest(
+    val title: String? = null,
+    val authors: String? = null,
+    val isbn: String? = null,
+)
+
 enum class Shelf(val apiStatus: String, val label: String) {
     Reading("reading", "Currently Reading"),
     ToRead("to_read", "To Read"),
     Library("unread", "Library"),
+    Wishlist("wishlist", "Wishlist"),
     Finished("read", "Finished"),
 }
