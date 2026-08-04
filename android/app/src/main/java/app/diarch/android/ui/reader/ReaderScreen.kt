@@ -55,20 +55,16 @@ import androidx.compose.ui.viewinterop.AndroidView
 import app.diarch.android.DiarchApp
 import app.diarch.android.data.ReaderTypography
 import app.diarch.android.data.UpdateSettingsRequest
-import app.diarch.android.data.Work
 import app.diarch.android.data.WorkDetailResponse
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import org.json.JSONArray
 import org.json.JSONObject
 
 data class TocItem(val label: String, val href: String)
@@ -316,7 +312,7 @@ fun ReaderScreen(
                     .verticalScroll(rememberScrollState()),
             ) {
                 Text("Contents", style = MaterialTheme.typography.titleLarge)
-                Spacer(Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(8.dp))
                 if (toc.isEmpty()) {
                     Text("No table of contents", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
@@ -332,7 +328,7 @@ fun ReaderScreen(
                         }
                     }
                 }
-                Spacer(Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(24.dp))
             }
         }
     }
@@ -361,6 +357,7 @@ fun ReaderScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TypographySheet(
     typography: ReaderTypography,
@@ -428,7 +425,7 @@ private fun TypographySheet(
                 )
                 Text("Hyphenate")
             }
-            Spacer(Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(24.dp))
         }
     }
 }

@@ -51,7 +51,7 @@ Default admin: `DIARCH_ADMIN_USER` / `DIARCH_ADMIN_PASS` (defaults `admin` / `ad
 | **4 Metadata / covers / wishlist** | **Complete** | OL + Google Books + LoC; ISBN authors fixed; remote cover fetch; wishlist enrich + barcode; extract/placeholder/upload covers. LocalAI/Hermes deferred → Phase 8 |
 | **5 Audio** | **Complete** | Canonical `book.m4b` upload + Range stream; Audible AAX→M4B server job (`DIARCH_AUDIBLE_KEY` + ffmpeg, same flags as audible2m4b). Transcription stubbed → Phase 8 |
 | **6 StoryGraph / reMarkable / fixer** | **Complete** | SG pull + flags; Integrations for all users (health, Probe, SG sync); reMarkable connect URL + in-app 8-char code auth; rmapi send to `Diarch/`; Keystone dep docs. Scrapers/CLI remain upstream-fragile |
-| **7 Android / KOReader** | Skipped for now | Docs/stubs only — deferred |
+| **7 Android / KOReader** | **In progress** | Android thin client under `android/` (login + server URL, shelves, import, dual-mode EPUB/MD reader). KOReader sync still deferred |
 | **8 Deferred AI + polish** | **Complete*** | LocalAI covers (staged approve), transcription→MD review, health probe (model id checks), SQL list filters + indexes, lazy CDN, library year filter / grants revoke. *Live LocalAI/TrueNAS exercise still recommended on deploy.* |
 | **Regression tests** | Done | `cargo test --workspace` (core/db/import/server; Phase 6 coverage included) |
 
@@ -71,7 +71,7 @@ Restart `cargo run -p diarch-server` after pulling UI changes (assets are embedd
 
 1. **Deploy to Keystone** — musl (or Debian-built) `diarch` binary + systemd unit; apt deps + `rmapi` per [`deploy/debian/README.md`](../deploy/debian/README.md); secrets via `/etc/diarch.env`.
 2. **Exercise Phase 8 on Keystone** — Generate cover + Approve against TrueNAS LocalAI; long-audiobook transcription timing; Integrations Probe all green.
-3. **Android / KOReader** — deferred (Phase 7).
+3. **Android / KOReader** — finish Phase 7: ship/test the Compose client on device against Keystone; optional KOReader sync later.
 4. **ebook2audiobook watcher** — separate desktop project; TTS → `queue/incoming_audio` as `.m4b` — see [TODO-ebook2audiobook-watcher.md](TODO-ebook2audiobook-watcher.md).
 
 ---
@@ -79,7 +79,7 @@ Restart `cargo run -p diarch-server` after pulling UI changes (assets are embedd
 ## Architecture (quick)
 
 ```
-Clients (Web :8083, Android later)
+Clients (Web :8083, Android app)
         │
         ▼
 diarch-server (Axum) ── SQLite ── /var/lib/diarch/library
@@ -112,7 +112,7 @@ diarch-server (Axum) ── SQLite ── /var/lib/diarch/library
 
 ## Phase 8 — AI integration + polish
 
-LocalAI on the LAN (e.g. TrueNAS) drives covers and transcription. Phase 7 (Android / KOReader) is skipped for now.
+LocalAI on the LAN (e.g. TrueNAS) drives covers and transcription. Phase 7 Android client is in progress under `android/`; KOReader sync remains deferred.
 
 ### LocalAI / Hermes covers
 
@@ -145,7 +145,7 @@ LocalAI on the LAN (e.g. TrueNAS) drives covers and transcription. Phase 7 (Andr
 | Phase 4 | Cover “reset to placeholder” / regenerate SVG from current title+authors (`POST …/cover/placeholder`) | **Done** |
 | Phase 4 | Attention one-click clear for soft flags without opening detail | **Done** |
 | Product | ebook2audiobook desktop watcher — [TODO-ebook2audiobook-watcher.md](TODO-ebook2audiobook-watcher.md) | Open |
-| Phase 7 | Android thin client / KOReader sync | Deferred |
+| Phase 7 | Android thin client / KOReader sync | **In progress** (client scaffold; KOReader deferred) |
 
 ---
 

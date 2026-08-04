@@ -41,8 +41,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.diarch.android.DiarchApp
@@ -189,8 +189,8 @@ private fun WorkRow(work: Work, onClick: () -> Unit) {
                 .width(56.dp)
                 .aspectRatio(2f / 3f),
         )
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier = Modifier.weight(1f)) {
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
             Text(
                 work.title,
                 style = MaterialTheme.typography.titleLarge,
@@ -206,7 +206,7 @@ private fun WorkRow(work: Work, onClick: () -> Unit) {
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            Spacer(Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(4.dp))
             Text(
                 buildString {
                     if (work.hasEpub) append("EPUB")

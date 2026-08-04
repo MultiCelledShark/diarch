@@ -80,13 +80,13 @@ fun LoginScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text("Diarch", style = MaterialTheme.typography.displayLarge)
-        Spacer(Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(8.dp))
         Text(
             "Library on your network",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(32.dp))
 
         OutlinedTextField(
             value = baseUrl,
@@ -100,7 +100,7 @@ fun LoginScreen(
                 imeAction = ImeAction.Next,
             ),
         )
-        Spacer(Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(12.dp))
         OutlinedTextField(
             value = username,
             onValueChange = { username = it },
@@ -109,7 +109,7 @@ fun LoginScreen(
             modifier = Modifier.fillMaxWidth(),
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
         )
-        Spacer(Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(12.dp))
         OutlinedTextField(
             value = password,
             onValueChange = { password = it },
@@ -125,11 +125,11 @@ fun LoginScreen(
         )
 
         if (error != null) {
-            Spacer(Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(12.dp))
             Text(error!!, color = MaterialTheme.colorScheme.error)
         }
 
-        Spacer(Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(24.dp))
         Button(
             onClick = { submit() },
             enabled = !loading,

@@ -35,8 +35,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import app.diarch.android.DiarchApp
@@ -119,7 +119,7 @@ fun WorkDetailScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp),
         ) {
-            Row(Modifier = Modifier.fillMaxWidth()) {
+            Row(modifier = Modifier.fillMaxWidth()) {
                 AsyncImage(
                     model = ImageRequest.Builder(context)
                         .data(repo.coverUrl(work.id, work.updatedAt))
@@ -131,19 +131,19 @@ fun WorkDetailScreen(
                         .width(120.dp)
                         .aspectRatio(2f / 3f),
                 )
-                Spacer(Modifier.width(16.dp))
+                Spacer(modifier = Modifier.width(16.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(work.title, style = MaterialTheme.typography.headlineMedium)
                     if (work.authors.isNotBlank()) {
-                        Spacer(Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(8.dp))
                         Text(work.authors, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         "Shelf: ${shelfLabel(work.status)}",
                         style = MaterialTheme.typography.bodyMedium,
                     )
-                    Spacer(Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         buildString {
                             append(if (hasEpub) "EPUB ready" else "No EPUB")
@@ -156,7 +156,7 @@ fun WorkDetailScreen(
                 }
             }
 
-            Spacer(Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(24.dp))
 
             if (hasEpub || hasMd) {
                 Button(
@@ -166,7 +166,7 @@ fun WorkDetailScreen(
                 ) {
                     Text("Read")
                 }
-                Spacer(Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(8.dp))
             }
 
             OutlinedButton(
@@ -203,9 +203,9 @@ fun WorkDetailScreen(
             }
 
             work.description?.takeIf { it.isNotBlank() }?.let { desc ->
-                Spacer(Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(24.dp))
                 Text("Description", style = MaterialTheme.typography.titleLarge)
-                Spacer(Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(8.dp))
                 Text(desc, style = MaterialTheme.typography.bodyLarge)
             }
         }

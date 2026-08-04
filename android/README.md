@@ -1,21 +1,42 @@
 # Diarch Android client
 
-Thin client against `http://<host>:8083` (VPN).
+Thin Kotlin/Compose client against `http://<host>:8083` (LAN/VPN).
 
-## Planned capabilities
+## Capabilities (v1)
 
-- Store base URL + login (session cookie or Bearer token from `POST /api/auth/login`)
-- Browse ACL-filtered works, covers, download EPUB
-- Stream M4A (`Range` requests)
-- Wishlist: type ISBN / title, or camera barcode → `POST /api/wishlist`
-- Reader: open EPUB in system reader or WebView with epub.js; manga RTL when `is_manga` / `reading_direction=rtl`
+- **Login** with editable **server URL**, username, and password (Bearer token; URL remembered after logout)
+- Browse shelves: Currently Reading (`reading`, max 3), To Read (`to_read`, max 9), Library (`unread`), Finished (`read`)
+- Move works between shelves (server 409 when a capped shelf is full)
+- Import files via the system document picker → `POST /api/library/import`
+- **In-app reader**
+  - Paginated EPUB (epub.js in a WebView): page turns, TOC, progress CFI, RTL/manga
+  - **Infinite scroll** switches to a justified markdown stream (`GET …/content/markdown`)
+  - Typography + infinite-scroll preference synced via `GET`/`PUT /api/settings`
 
-## Suggested stack
+Not included: in-app document editing, audio player, wishlist/barcode, KOReader sync, cover/admin tooling.
 
-Kotlin + Jetpack Compose, OkHttp/Retrofit, CameraX + ML Kit barcode.
+## Stack
 
-## KOReader (optional)
+Kotlin, Jetpack Compose, Material 3, Navigation, Retrofit/OkHttp, DataStore, Coil, WebView reader assets (`epub.js`, marked, DOMPurify).
 
-Prefer self-hosted [koreader-sync-server](https://github.com/koreader/koreader-sync-server) beside Diarch, or add compatible `/users/*` + `/syncs/progress` endpoints later. Progress can be mirrored into Diarch `reading_progress` when desired.
+## Build
 
-This directory is a stub; implement the app in a follow-up once the API is deployed on Keystone.
+Requires JDK 17+ and Android SDK (compile/target 36).
+
+```bash
+cd android
+echo "sdk.dir=$ANDROID_HOME" > local.properties   # if needed
+./gradlew :app:assembleDebug
+```
+
+APK: `app/build/outputs/apk/debug/app-debug.apk`
+
+Optional env for this tree’s Gradle cache:
+
+```bash
+export GRADLE_USER_HOME="$PWD/.gradle-home"
+```
+
+## Pointing at Keystone
+
+On the login screen set **Server URL** to your Diarch host, e.g. `http://keystone:8083` or `http://192.168.x.x:8083`. Cleartext HTTP is allowed for LAN/VPN.
