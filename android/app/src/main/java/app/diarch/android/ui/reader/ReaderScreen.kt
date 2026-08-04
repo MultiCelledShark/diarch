@@ -608,9 +608,9 @@ private fun ReaderWebView(
                         view: WebView?,
                         request: WebResourceRequest?,
                     ): WebResourceResponse? {
-                        val url = request?.url ?: return super.shouldInterceptRequest(view, request)
-                        offlineEpubResponse(url)?.let { return it }
-                        contentProxyResponse(url)?.let { return it }
+                        if (request == null) return super.shouldInterceptRequest(view, request)
+                        offlineEpubResponse(request)?.let { return it }
+                        contentProxyResponse(request)?.let { return it }
                         return super.shouldInterceptRequest(view, request)
                     }
                 }
@@ -623,42 +623,124 @@ private fun ReaderWebView(
     )
 }
 
+/**
+ * Chromium still enforces CORS on responses returned from [WebViewClient.shouldInterceptRequest]
+ * when JS `fetch()` runs from `file://` against `http(s)://…`. Without ACAO, every content
+ * load fails with TypeError: Failed to fetch — even though OkHttp already succeeded.
+ */
+private fun corsHeaders(extra: Map<String, String> = emptyMap()): Map<String, String> =
+    buildMap {
+        put("Access-Control-Allow-Origin", "*")
+        put("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+        put("Access-Control-Allow-Headers", "*")
+        putAll(extra)
+    }
+
+private fun defaultPort(uri: Uri): Int =
+    when {
+        uri.port != -1 -> uri.port
+        uri.scheme.equals("https", ignoreCase = true) -> 443
+        else -> 80
+    }
+
 /** Serves an offline EPUB straight off disk for `OFFLINE_EPUB_ORIGIN/{workId}` requests. */
-private fun offlineEpubResponse(url: Uri): WebResourceResponse? {
+private fun offlineEpubResponse(request: WebResourceRequest): WebResourceResponse? {
+    val url = request.url
     if (!url.toString().startsWith(OFFLINE_EPUB_ORIGIN)) return null
+    val headers = corsHeaders()
+    if (request.method.equals("OPTIONS", ignoreCase = true)) {
+        return WebResourceResponse(
+            "text/plain",
+            "utf-8",
+            204,
+            "No Content",
+            headers,
+            ByteArray(0).inputStream(),
+        )
+    }
     val workId = url.lastPathSegment
     if (workId.isNullOrBlank()) {
-        return WebResourceResponse("application/epub+zip", "utf-8", 400, "Bad Request", emptyMap(), null)
+        return WebResourceResponse(
+            "application/epub+zip",
+            "utf-8",
+            400,
+            "Bad Request",
+            headers,
+            ByteArray(0).inputStream(),
+        )
     }
     val file = DiarchApp.instance.offlineStore.epubFile(workId)
     if (!file.isFile) {
-        return WebResourceResponse("application/epub+zip", "utf-8", 404, "Not Found", emptyMap(), null)
+        return WebResourceResponse(
+            "application/epub+zip",
+            "utf-8",
+            404,
+            "Not Found",
+            headers,
+            ByteArray(0).inputStream(),
+        )
     }
-    return WebResourceResponse("application/epub+zip", null, FileInputStream(file))
+    return WebResourceResponse(
+        "application/epub+zip",
+        null,
+        200,
+        "OK",
+        headers,
+        FileInputStream(file),
+    )
 }
 
 /** Proxies `/api/works/{id}/content/{kind}` requests through the app's authenticated OkHttp
  * client, so the WebView never needs the bearer token exposed to JS. */
-private fun contentProxyResponse(url: Uri): WebResourceResponse? {
+private fun contentProxyResponse(request: WebResourceRequest): WebResourceResponse? {
+    val url = request.url
     val apiClient = DiarchApp.instance.apiClient
     val baseUri = runCatching { Uri.parse(apiClient.baseUrl()) }.getOrNull() ?: return null
-    if (url.scheme != baseUri.scheme || !url.host.equals(baseUri.host, ignoreCase = true)) return null
+    if (url.scheme != baseUri.scheme || !url.host.equals(baseUri.host, ignoreCase = true)) {
+        return null
+    }
+    if (defaultPort(url) != defaultPort(baseUri)) return null
     val path = url.path ?: return null
     if (!CONTENT_PATH_REGEX.matches(path)) return null
+    val headers = corsHeaders()
+    if (request.method.equals("OPTIONS", ignoreCase = true)) {
+        return WebResourceResponse(
+            "text/plain",
+            "utf-8",
+            204,
+            "No Content",
+            headers,
+            ByteArray(0).inputStream(),
+        )
+    }
     return try {
-        val request = Request.Builder().url(url.toString()).build()
-        val response = apiClient.httpClient().newCall(request).execute()
+        val okRequest = Request.Builder().url(url.toString()).build()
+        val response = apiClient.httpClient().newCall(okRequest).execute()
         val body = response.body
         if (body == null) {
             response.close()
-            return WebResourceResponse("text/plain", "utf-8", 502, "Bad Gateway", emptyMap(), null)
+            return WebResourceResponse(
+                "text/plain",
+                "utf-8",
+                502,
+                "Bad Gateway",
+                headers,
+                ByteArray(0).inputStream(),
+            )
         }
         val mediaType = body.contentType()
         val mime = mediaType?.let { "${it.type}/${it.subtype}" } ?: "application/octet-stream"
         val charset = mediaType?.charset()?.name()
         val reason = response.message.ifBlank { "OK" }
-        WebResourceResponse(mime, charset, response.code, reason, emptyMap(), body.byteStream())
+        WebResourceResponse(mime, charset, response.code, reason, headers, body.byteStream())
     } catch (e: IOException) {
-        WebResourceResponse("text/plain", "utf-8", 502, "Bad Gateway", emptyMap(), null)
+        WebResourceResponse(
+            "text/plain",
+            "utf-8",
+            502,
+            "Bad Gateway",
+            headers,
+            ByteArray(0).inputStream(),
+        )
     }
 }
