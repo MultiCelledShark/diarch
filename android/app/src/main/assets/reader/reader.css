@@ -1,0 +1,74 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: var(--page-bg, #0c1210);
+  color: var(--ink, #f3e6d4);
+  font-family: Georgia, "Iowan Old Style", Palatino, serif;
+}
+
+#status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  text-align: center;
+  color: var(--ink, #f3e6d4);
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+#epub-area, #md-area {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+#epub-area {
+  overflow: hidden;
+}
+
+#md-area {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: var(--pad-y, 1.25rem) var(--pad-x, 1.25rem);
+  box-sizing: border-box;
+  max-width: none;
+}
+
+#md-area .md-inner {
+  max-width: var(--max-ch, 68ch);
+  margin: 0 auto;
+  font-size: var(--font-size, 100%);
+  line-height: var(--line-height, 1.7);
+  letter-spacing: var(--letter-spacing, 0);
+  text-align: var(--reader-align, start);
+  hyphens: var(--hyphens, manual);
+  -webkit-hyphens: var(--hyphens, manual);
+}
+
+#md-area .md-inner p {
+  margin: 0 0 var(--para-spacing, 0.85em);
+  text-indent: var(--indent, 0);
+}
+
+#md-area .md-inner h1,
+#md-area .md-inner h2,
+#md-area .md-inner h3 {
+  text-align: start;
+  text-indent: 0;
+  line-height: 1.3;
+}
+
+#md-area .md-inner a {
+  color: var(--link, #e8b87a);
+}
+
+#md-area[hidden], #epub-area[hidden] {
+  display: none !important;
+}

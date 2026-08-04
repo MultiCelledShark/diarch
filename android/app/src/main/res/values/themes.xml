@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_bg">#0C1210</color>
+    <style name="Theme.Diarch" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#0C1210</item>
+        <item name="android:navigationBarColor">#0C1210</item>
+        <item name="android:windowBackground">#0C1210</item>
+    </style>
+</resources>
