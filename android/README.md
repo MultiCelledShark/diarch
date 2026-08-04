@@ -24,7 +24,7 @@ Kotlin, Jetpack Compose, Material 3, Navigation, Retrofit/OkHttp, DataStore, Coi
 
 ## Build
 
-Requires JDK 17+ and Android SDK (compile/target 36).
+Requires JDK 17+ and Android SDK (compile/target 36). Builds **arm64-v8a only** (Fairphone 6 / modern phones).
 
 ```bash
 cd android
@@ -32,7 +32,9 @@ echo "sdk.dir=$ANDROID_HOME" > local.properties   # if needed
 ./gradlew :app:assembleDebug
 ```
 
-APK: `app/build/outputs/apk/debug/app-debug.apk`
+Debug APK output: `app/build/outputs/apk/debug/app-debug.apk`
+
+Checked-in installable build (arm64): [`dist/diarch-arm64-v8a-debug.apk`](dist/diarch-arm64-v8a-debug.apk)
 
 ## Pointing at Keystone
 

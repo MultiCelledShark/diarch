@@ -15,6 +15,10 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+        // Fairphone 6 / modern phones: ship arm64 only (drops unused ABIs from ML Kit etc.)
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     buildTypes {

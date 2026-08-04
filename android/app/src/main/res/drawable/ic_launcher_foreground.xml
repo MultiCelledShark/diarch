@@ -1,10 +1,68 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Diarch launcher mark: romanesque (rounded) arch with a D monogram in the portal.
+  Adaptive-icon safe zone (~66dp of the 108dp viewport). App label supplies the name.
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+
+    <!-- Left pier shaft -->
     <path
         android:fillColor="#F3E6D4"
-        android:pathData="M30,28h48v8H30zM30,48h36v8H30zM30,68h42v8H30z" />
+        android:pathData="M36,56h6v22h-6z" />
+    <!-- Right pier shaft -->
+    <path
+        android:fillColor="#F3E6D4"
+        android:pathData="M66,56h6v22h-6z" />
+
+    <!-- Capitals (tiered) -->
+    <path
+        android:fillColor="#F3E6D4"
+        android:pathData="M33,52h12v4h-12z" />
+    <path
+        android:fillColor="#F3E6D4"
+        android:pathData="M34,49h10v3h-10z" />
+    <path
+        android:fillColor="#F3E6D4"
+        android:pathData="M63,52h12v4h-12z" />
+    <path
+        android:fillColor="#F3E6D4"
+        android:pathData="M64,49h10v3h-10z" />
+
+    <!-- Bases (tiered) -->
+    <path
+        android:fillColor="#F3E6D4"
+        android:pathData="M34,78h10v3h-10z" />
+    <path
+        android:fillColor="#F3E6D4"
+        android:pathData="M33,81h12v4h-12z" />
+    <path
+        android:fillColor="#F3E6D4"
+        android:pathData="M64,78h10v3h-10z" />
+    <path
+        android:fillColor="#F3E6D4"
+        android:pathData="M63,81h12v4h-12z" />
+    <!-- Threshold -->
+    <path
+        android:fillColor="#F3E6D4"
+        android:pathData="M33,85h42v3h-42z" />
+
+    <!-- Romanesque arch ring: outer r=22, inner r=15, center (54,54) -->
+    <path
+        android:fillColor="#F3E6D4"
+        android:pathData="M32,54 A22,22 0 0,1 76,54 L69,54 A15,15 0 0,0 39,54 Z" />
+
+    <!-- Keystone -->
+    <path
+        android:fillColor="#F3E6D4"
+        android:pathData="M51,30h6l2.5,7h-11z" />
+
+    <!-- D monogram (even-odd) -->
+    <path
+        android:fillColor="#F3E6D4"
+        android:fillType="evenOdd"
+        android:pathData="M46,58h6c7.5,0 12,4.2 12,11s-4.5,11 -12,11h-6zM50,62v14h2c4.8,0 7.5,-2.6 7.5,-7s-2.7,-7 -7.5,-7z" />
 </vector>

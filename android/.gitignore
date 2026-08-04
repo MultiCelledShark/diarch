@@ -11,6 +11,7 @@
 .externalNativeBuild
 .cxx
 *.apk
+!dist/*.apk
 *.ap_
 *.dex
 build-log.txt
