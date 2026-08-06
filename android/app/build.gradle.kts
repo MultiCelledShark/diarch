@@ -19,10 +19,10 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
-        // Forgejo releases API (LAN hostname matches git remote ssh://git@forgejo/key/Diarch.git).
-        // Override at build time: ./gradlew :app:assembleDebug -PforgejoUrl=https://git.example.com
+        // Forgejo releases API. SSH remote is git@forgejo; HTTP is on :3000.
+        // Override: ./gradlew :app:assembleDebug -PforgejoUrl=https://git.example.com
         val forgejoUrl = (project.findProperty("forgejoUrl") as String?)?.trimEnd('/')
-            ?: "http://forgejo"
+            ?: "http://192.168.0.102:3000"
         buildConfigField("String", "FORGEJO_BASE_URL", "\"$forgejoUrl\"")
         buildConfigField("String", "FORGEJO_OWNER", "\"key\"")
         buildConfigField("String", "FORGEJO_REPO", "\"Diarch\"")

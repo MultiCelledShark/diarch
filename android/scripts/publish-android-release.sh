@@ -12,7 +12,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ANDROID_DIR="$ROOT/android"
 GRADLE_FILE="$ANDROID_DIR/app/build.gradle.kts"
 
-FORGEJO_URL="${FORGEJO_URL:-http://forgejo}"
+FORGEJO_URL="${FORGEJO_URL:-http://192.168.0.102:3000}"
 FORGEJO_URL="${FORGEJO_URL%/}"
 OWNER="${FORGEJO_OWNER:-key}"
 REPO="${FORGEJO_REPO:-Diarch}"
@@ -38,6 +38,7 @@ done
 
 if [[ -z "$TOKEN" ]]; then
   echo "FORGEJO_TOKEN (or --token) is required." >&2
+  echo "Create one at $FORGEJO_URL/user/settings/applications (write:repository)." >&2
   exit 1
 fi
 

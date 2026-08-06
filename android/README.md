@@ -49,7 +49,7 @@ Default release source (overridable at build time):
 
 | Setting | Default |
 |---------|---------|
-| Forgejo URL | `http://forgejo` |
+| Forgejo URL | `http://192.168.0.102:3000` |
 | Repo | `key/Diarch` |
 | API | `GET /api/v1/repos/key/Diarch/releases/latest` |
 
@@ -85,7 +85,7 @@ Helper script (needs a Forgejo API token with `write:repository`):
 
 ```bash
 export FORGEJO_TOKEN=…          # or pass --token
-export FORGEJO_URL=http://forgejo
+export FORGEJO_URL=http://192.168.0.102:3000
 ./android/scripts/publish-android-release.sh
 ```
 
