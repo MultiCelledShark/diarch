@@ -30,14 +30,26 @@ class LibraryRepository(
         apiClient.updateSession(apiClient.baseUrl(), "")
     }
 
-    suspend fun listWorks(shelf: Shelf): List<Work> {
+    data class WorksLoad(
+        val works: List<Work>,
+        val offline: Boolean = false,
+    )
+
+    suspend fun listWorks(shelf: Shelf): WorksLoad {
         return try {
-            apiClient.api().listWorks(shelf.apiStatus)
+            WorksLoad(apiClient.api().listWorks(shelf.apiStatus))
         } catch (e: Exception) {
-            offlineStore.listDownloaded()
-                .map { it.toWork() }
-                .filter { it.status == shelf.apiStatus || shelf == Shelf.Library }
-                .ifEmpty { throw e }
+            val downloaded = offlineStore.listDownloaded().map { it.toWork() }
+            if (downloaded.isEmpty()) throw e
+            // Offline mode: Library shows every download; other shelves filter by
+            // the status snapshot in the local manifest. Never rethrow when we
+            // have downloads — an empty shelf is a valid offline state.
+            val filtered = if (shelf == Shelf.Library) {
+                downloaded
+            } else {
+                downloaded.filter { it.status == shelf.apiStatus }
+            }
+            WorksLoad(filtered, offline = true)
         }
     }
 
@@ -58,7 +70,9 @@ class LibraryRepository(
 
     suspend fun setStatus(id: String, status: String): Work {
         try {
-            return apiClient.api().updateWork(id, UpdateWorkRequest(status = status))
+            val work = apiClient.api().updateWork(id, UpdateWorkRequest(status = status))
+            offlineStore.updateManifestStatus(id, status)
+            return work
         } catch (e: HttpException) {
             if (e.code() == 409) {
                 val msg = e.response()?.errorBody()?.string()?.ifBlank { null }
@@ -66,6 +80,11 @@ class LibraryRepository(
                 throw ShelfFullException(msg)
             }
             throw e
+        } catch (e: Exception) {
+            // Server unreachable: still allow shelf moves on offline copies.
+            offlineStore.updateManifestStatus(id, status)
+                ?: throw e
+            return offlineStore.readManifest(id)?.toWork() ?: throw e
         }
     }
 
@@ -82,10 +101,13 @@ class LibraryRepository(
         return apiClient.api().importFile(part, titleBody, authorsBody)
     }
 
-    suspend fun getSettings(): UserSettings = apiClient.api().getSettings()
+    suspend fun getSettings(): UserSettings =
+        runCatching { apiClient.api().getSettings() }.getOrElse {
+            UserSettings()
+        }
 
     suspend fun putSettings(body: UpdateSettingsRequest) {
-        apiClient.api().putSettings(body)
+        runCatching { apiClient.api().putSettings(body) }
     }
 
     suspend fun putProgress(id: String, mode: String, position: String, percent: Double) {
@@ -96,8 +118,15 @@ class LibraryRepository(
     }
 
     suspend fun getProgress(id: String, mode: String): ReadingProgress? {
-        val remote = runCatching { apiClient.api().getProgress(id, mode) }.getOrNull()
         val local = offlineStore.readLocalProgress(id, mode)
+        // When a local copy exists, don't block the reader on a dead/slow server.
+        val remote = if (offlineStore.isDownloaded(id)) {
+            kotlinx.coroutines.withTimeoutOrNull(3_000) {
+                runCatching { apiClient.api().getProgress(id, mode) }.getOrNull()
+            }
+        } else {
+            runCatching { apiClient.api().getProgress(id, mode) }.getOrNull()
+        }
         if (remote == null) return local
         if (local == null) return remote
         val remoteMs = parseUpdatedAtMillis(remote.updatedAt)

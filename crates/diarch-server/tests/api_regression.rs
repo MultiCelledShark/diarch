@@ -646,6 +646,105 @@ async fn currently_reading_shelf_caps_at_three() {
     assert_eq!(list.as_array().unwrap().len(), 3);
 }
 
+#[tokio::test]
+async fn reading_shelves_are_per_account() {
+    let (_dir, app, _) = test_app().await;
+    let admin_tok = login(&app, "admin", "adminpass1234").await;
+
+    // Create a second reader account.
+    let (status, reader, _) = json_req(
+        &app,
+        "POST",
+        "/api/users",
+        Some(&admin_tok),
+        Some(json!({
+            "username": "reader2",
+            "password": "readerpass1234",
+            "is_admin": false
+        })),
+    )
+    .await;
+    assert_eq!(status, 201, "{reader}");
+    let reader_tok = login(&app, "reader2", "readerpass1234").await;
+
+    // Admin creates a shared work and grants it to reader2.
+    let (status, work, _) = json_req(
+        &app,
+        "POST",
+        "/api/works",
+        Some(&admin_tok),
+        Some(json!({
+            "title": "Shared Shelf Book",
+            "authors": "A",
+            "status": "reading"
+        })),
+    )
+    .await;
+    assert_eq!(status, 201, "{work}");
+    let work_id = work["id"].as_str().unwrap();
+    let (status, _, _) = json_req(
+        &app,
+        "POST",
+        &format!("/api/works/{work_id}/grants"),
+        Some(&admin_tok),
+        Some(json!({ "username": "reader2" })),
+    )
+    .await;
+    assert_eq!(status, 204);
+
+    // Admin sees it on Currently Reading.
+    let (status, list, _) =
+        json_req(&app, "GET", "/api/works?status=reading", Some(&admin_tok), None).await;
+    assert_eq!(status, 200);
+    assert!(
+        list.as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["id"] == work_id),
+        "admin should see the book on Currently Reading"
+    );
+
+    // Reader does not share that shelf — book starts unread for them.
+    let (status, list, _) =
+        json_req(&app, "GET", "/api/works?status=reading", Some(&reader_tok), None).await;
+    assert_eq!(status, 200);
+    assert!(
+        list.as_array()
+            .unwrap()
+            .iter()
+            .all(|w| w["id"] != work_id),
+        "reader must not inherit admin's Currently Reading"
+    );
+
+    // Reader puts it on their own To Read without moving admin's shelf.
+    let (status, updated, _) = json_req(
+        &app,
+        "PUT",
+        &format!("/api/works/{work_id}"),
+        Some(&reader_tok),
+        Some(json!({ "status": "to_read" })),
+    )
+    .await;
+    assert_eq!(status, 200, "{updated}");
+    assert_eq!(updated["status"], "to_read");
+
+    let (status, list, _) =
+        json_req(&app, "GET", "/api/works?status=to_read", Some(&reader_tok), None).await;
+    assert_eq!(status, 200);
+    assert!(list.as_array().unwrap().iter().any(|w| w["id"] == work_id));
+
+    let (status, list, _) =
+        json_req(&app, "GET", "/api/works?status=reading", Some(&admin_tok), None).await;
+    assert_eq!(status, 200);
+    assert!(
+        list.as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["id"] == work_id),
+        "admin's Currently Reading must be unchanged"
+    );
+}
+
 async fn raw_req(
     app: &axum::Router,
     method: &str,

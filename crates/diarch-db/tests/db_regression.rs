@@ -173,6 +173,56 @@ async fn jobs_and_integration_health() {
 }
 
 #[tokio::test]
+async fn user_work_status_is_per_account() {
+    let (_dir, db) = fresh_db().await;
+    let admin = db.create_user("admin", "pw", true).await.unwrap();
+    let reader = db.create_user("reader", "pw", false).await.unwrap();
+    let work = sample_work(Some(admin.id), ReadingStatus::Reading);
+    db.create_work(&work, &[], Some(reader.id)).await.unwrap();
+
+    let admin_reading = db
+        .list_works_for_user(&admin, Some("reading"), None)
+        .await
+        .unwrap();
+    assert_eq!(admin_reading.len(), 1);
+
+    let reader_reading = db
+        .list_works_for_user(&reader, Some("reading"), None)
+        .await
+        .unwrap();
+    assert!(reader_reading.is_empty());
+
+    db.upsert_user_work_status(reader.id, work.id, "to_read")
+        .await
+        .unwrap();
+    let reader_to_read = db
+        .list_works_for_user(&reader, Some("to_read"), None)
+        .await
+        .unwrap();
+    assert_eq!(reader_to_read.len(), 1);
+    assert_eq!(reader_to_read[0].status, ReadingStatus::ToRead);
+
+    // Admin still on Currently Reading.
+    let admin_reading = db
+        .list_works_for_user(&admin, Some("reading"), None)
+        .await
+        .unwrap();
+    assert_eq!(admin_reading.len(), 1);
+    assert_eq!(
+        db.count_accessible_by_status(&admin, "reading", None)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.count_accessible_by_status(&reader, "reading", None)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn created_by_grants_owner_access_without_explicit_grant() {
     let (_dir, db) = fresh_db().await;
     let user = db.create_user("owner", "pw", false).await.unwrap();

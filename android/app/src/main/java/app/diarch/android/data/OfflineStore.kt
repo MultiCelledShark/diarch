@@ -104,6 +104,14 @@ class OfflineStore(
         return runCatching { json.decodeFromString<OfflineManifest>(f.readText()) }.getOrNull()
     }
 
+    /** Update the shelf status stored in a local offline manifest (if present). */
+    fun updateManifestStatus(workId: String, status: String): OfflineManifest? {
+        val current = readManifest(workId) ?: return null
+        val updated = current.copy(status = status)
+        manifestFile(workId).writeText(json.encodeToString(updated))
+        return updated
+    }
+
     fun localCoverUri(workId: String): Uri? {
         val f = coverFile(workId)
         return if (f.isFile) Uri.fromFile(f) else null

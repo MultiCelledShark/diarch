@@ -74,17 +74,13 @@ fun ShelvesScreen(
             loading = true
             error = null
             try {
-                works = repo.listWorks(shelf)
-            } catch (e: Exception) {
-                val offlineOnly = DiarchApp.instance.offlineStore.listDownloaded()
-                    .map { it.toWork() }
-                    .filter { it.status == shelf.apiStatus || shelf == Shelf.Library }
-                if (offlineOnly.isNotEmpty()) {
-                    works = offlineOnly
+                val result = repo.listWorks(shelf)
+                works = result.works
+                if (result.offline) {
                     error = "Showing offline copies (server unreachable)"
-                } else {
-                    error = e.message ?: "Failed to load"
                 }
+            } catch (e: Exception) {
+                error = e.message ?: "Failed to load"
             } finally {
                 loading = false
             }
@@ -177,6 +173,15 @@ fun ShelvesScreen(
                         contentPadding = PaddingValues(16.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
+                        if (error != null) {
+                            item {
+                                Text(
+                                    error!!,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                            }
+                        }
                         items(works, key = { it.id }) { work ->
                             WorkRow(work = work, onClick = { onOpenWork(work.id) })
                         }

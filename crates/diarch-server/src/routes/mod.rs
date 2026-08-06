@@ -550,8 +550,17 @@ async fn update_work(
     if let Some(d) = body.description {
         work.description = Some(d);
     }
+    // Shelf placement is per-account; keep works.status as catalog default and
+    // write the personal shelf separately after other field updates.
+    let mut personal_status: Option<ReadingStatus> = None;
     if let Some(s) = body.status.as_deref().and_then(ReadingStatus::parse) {
-        if s != work.status {
+        let current = state
+            .db
+            .get_user_work_status(user.id, id)
+            .await
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "db error".into()))?
+            .unwrap_or(ReadingStatus::Unread);
+        if s != current {
             if let Some(cap) = s.shelf_cap() {
                 let n = state
                     .db
@@ -571,7 +580,7 @@ async fn update_work(
                 }
             }
         }
-        work.status = s;
+        personal_status = Some(s);
     }
     if let Some(p) = body.primary_code {
         work.primary_code = Some(p);
@@ -633,6 +642,20 @@ async fn update_work(
         .update_work(&work)
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "db error".into()))?;
+    if let Some(s) = personal_status {
+        state
+            .db
+            .upsert_user_work_status(user.id, id, s.as_str())
+            .await
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "db error".into()))?;
+        work.status = s;
+    } else {
+        state
+            .db
+            .apply_user_shelf_status(&user, &mut work)
+            .await
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "db error".into()))?;
+    }
     Ok(Json(work))
 }
 
@@ -778,6 +801,21 @@ async fn add_grant(
         .grant_work(user_id, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // New grantees start on Library (unread). Don't clobber an existing personal shelf
+    // if the grant is re-applied.
+    if state
+        .db
+        .get_user_work_status(user_id, id)
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        let _ = state
+            .db
+            .upsert_user_work_status(user_id, id, ReadingStatus::Unread.as_str())
+            .await;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1313,12 +1351,18 @@ async fn require_accessible_work(
     if !state.db.user_can_access(user, id).await.unwrap_or(false) {
         return Err(StatusCode::FORBIDDEN);
     }
-    state
+    let mut work = state
         .db
         .get_work(id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    state
+        .db
+        .apply_user_shelf_status(user, &mut work)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(work)
 }
 
 async fn work_title(state: &AppState, id: Uuid) -> String {

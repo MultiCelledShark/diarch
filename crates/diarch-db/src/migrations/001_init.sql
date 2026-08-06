@@ -83,6 +83,16 @@ CREATE TABLE IF NOT EXISTS reading_progress (
     PRIMARY KEY (user_id, work_id, mode)
 );
 
+-- Per-account shelf placement (Currently Reading / To Read / etc.).
+-- works.status remains a catalog default; list/cap/update use this table.
+CREATE TABLE IF NOT EXISTS user_work_status (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    work_id TEXT NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'unread',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, work_id)
+);
+
 CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY NOT NULL,
     kind TEXT NOT NULL,
@@ -109,6 +119,8 @@ CREATE TABLE IF NOT EXISTS user_settings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_works_status ON works(status);
+CREATE INDEX IF NOT EXISTS idx_user_work_status_user_status ON user_work_status(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_user_work_status_work ON user_work_status(work_id);
 CREATE INDEX IF NOT EXISTS idx_works_primary ON works(primary_code);
 CREATE INDEX IF NOT EXISTS idx_works_updated ON works(updated_at);
 CREATE INDEX IF NOT EXISTS idx_works_created_by ON works(created_by);

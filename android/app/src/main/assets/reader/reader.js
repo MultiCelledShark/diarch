@@ -147,15 +147,21 @@
       return;
     }
 
-    // Offline books are opened directly by URL — the WebView's
-    // shouldInterceptRequest serves the local file, so the whole EPUB never
-    // has to be base64-encoded and shuttled through the JS bridge.
+    // Always open from an ArrayBuffer. Passing a bare URL (especially one
+    // without a `.epub` suffix) makes epub.js treat it as an unpacked root and
+    // request META-INF/container.xml etc. — those subpaths 404 through our
+    // interceptor and `book.ready` never resolves (stuck "Opening offline…").
+    // Offline bytes are still served locally via shouldInterceptRequest; we
+    // just fetch them as binary the same way as the online path.
+    let buf;
     if (localEpubUrl) {
-      state.book = ePub(localEpubUrl);
+      const res = await fetch(localEpubUrl);
+      if (!res.ok) throw new Error("Offline EPUB HTTP " + res.status);
+      buf = await res.arrayBuffer();
     } else {
-      const buf = await fetchBinary("/api/works/" + state.workId + "/content/epub");
-      state.book = ePub(buf);
+      buf = await fetchBinary("/api/works/" + state.workId + "/content/epub");
     }
+    state.book = ePub(buf);
     const width = Math.max(epubArea.clientWidth || 0, window.innerWidth || 320);
     const height = Math.max(epubArea.clientHeight || 0, window.innerHeight || 480);
     state.rendition = state.book.renderTo(epubArea, {

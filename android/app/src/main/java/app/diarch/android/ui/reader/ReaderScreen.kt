@@ -81,7 +81,8 @@ import java.io.IOException
 data class TocItem(val label: String, val href: String)
 
 /** Virtual origin the reader WebView is pointed at for offline EPUBs; served entirely by
- * [ReaderWebView]'s shouldInterceptRequest from the on-disk file, never touching the network. */
+ * [ReaderWebView]'s shouldInterceptRequest from the on-disk file, never touching the network.
+ * Path ends with `.epub` so epub.js (and fetch) treat the resource as a single archive. */
 private const val OFFLINE_EPUB_ORIGIN = "https://diarch.offline/epub"
 
 /** Matches the online content endpoints so the WebView can proxy them with an
@@ -180,8 +181,8 @@ fun ReaderScreen(
             } else {
                 val hasLocalEpub = withContext(Dispatchers.IO) { offline.epubFile(work.id).isFile }
                 if (hasLocalEpub) {
-                    // Served by the WebView's shouldInterceptRequest — no base64 round-trip.
-                    opts.put("localEpubUrl", "$OFFLINE_EPUB_ORIGIN/${work.id}")
+                    // Served by shouldInterceptRequest; `.epub` suffix + ArrayBuffer open in JS.
+                    opts.put("localEpubUrl", "$OFFLINE_EPUB_ORIGIN/${work.id}/book.epub")
                     opts.put("offline", true)
                 }
             }
@@ -608,7 +609,7 @@ private fun ReaderWebView(
                         view: WebView?,
                         request: WebResourceRequest?,
                     ): WebResourceResponse? {
-                        if (request == null) return super.shouldInterceptRequest(view, request)
+                        if (request == null) return null
                         offlineEpubResponse(request)?.let { return it }
                         contentProxyResponse(request)?.let { return it }
                         return super.shouldInterceptRequest(view, request)
@@ -643,7 +644,8 @@ private fun defaultPort(uri: Uri): Int =
         else -> 80
     }
 
-/** Serves an offline EPUB straight off disk for `OFFLINE_EPUB_ORIGIN/{workId}` requests. */
+/** Serves an offline EPUB straight off disk for
+ * `OFFLINE_EPUB_ORIGIN/{workId}` or `…/{workId}/book.epub` requests. */
 private fun offlineEpubResponse(request: WebResourceRequest): WebResourceResponse? {
     val url = request.url
     if (!url.toString().startsWith(OFFLINE_EPUB_ORIGIN)) return null
@@ -658,7 +660,12 @@ private fun offlineEpubResponse(request: WebResourceRequest): WebResourceRespons
             ByteArray(0).inputStream(),
         )
     }
-    val workId = url.lastPathSegment
+    // Paths: /epub/{workId} or /epub/{workId}/book.epub
+    val segments = url.pathSegments
+    val workId = segments
+        .getOrNull(1)
+        ?.takeIf { it.isNotBlank() && it != "book.epub" }
+        ?: url.lastPathSegment?.takeIf { it != "book.epub" }
     if (workId.isNullOrBlank()) {
         return WebResourceResponse(
             "application/epub+zip",
@@ -680,12 +687,18 @@ private fun offlineEpubResponse(request: WebResourceRequest): WebResourceRespons
             ByteArray(0).inputStream(),
         )
     }
+    val withLength = corsHeaders(
+        mapOf(
+            "Content-Length" to file.length().toString(),
+            "Content-Type" to "application/epub+zip",
+        ),
+    )
     return WebResourceResponse(
         "application/epub+zip",
         null,
         200,
         "OK",
-        headers,
+        withLength,
         FileInputStream(file),
     )
 }

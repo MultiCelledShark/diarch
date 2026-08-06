@@ -51,6 +51,12 @@ impl Db {
         )
         .execute(&self.pool)
         .await;
+        // Per-account shelves (Currently Reading / To Read / …).
+        let user_shelf_sql = include_str!("migrations/002_user_work_status.sql");
+        sqlx::raw_sql(user_shelf_sql)
+            .execute(&self.pool)
+            .await
+            .context("migrate user_work_status")?;
         // Indexes are IF NOT EXISTS in 001_init; re-run safe index DDL for older DBs
         // that already had the tables when new indexes were added.
         for stmt in [
@@ -69,6 +75,8 @@ impl Db {
             "CREATE INDEX IF NOT EXISTS idx_work_assets_work_kind ON work_assets(work_id, kind)",
             "CREATE INDEX IF NOT EXISTS idx_jobs_work_kind ON jobs(work_id, kind)",
             "CREATE INDEX IF NOT EXISTS idx_work_grants_work ON work_grants(work_id)",
+            "CREATE INDEX IF NOT EXISTS idx_user_work_status_user_status ON user_work_status(user_id, status)",
+            "CREATE INDEX IF NOT EXISTS idx_user_work_status_work ON user_work_status(work_id)",
         ] {
             let _ = sqlx::query(stmt).execute(&self.pool).await;
         }
@@ -343,6 +351,17 @@ impl Db {
         if let Some(uid) = grant_user {
             self.grant_work(uid, work.id).await?;
         }
+        // Personal shelf for the creator (and grantee if different).
+        if let Some(uid) = work.created_by {
+            self.upsert_user_work_status(uid, work.id, work.status.as_str())
+                .await?;
+        }
+        if let Some(uid) = grant_user {
+            if work.created_by != Some(uid) {
+                self.upsert_user_work_status(uid, work.id, ReadingStatus::Unread.as_str())
+                    .await?;
+            }
+        }
         Ok(())
     }
 
@@ -461,6 +480,9 @@ impl Db {
     }
 
     /// List accessible works with optional status / attention / year_list filters in SQL.
+    ///
+    /// Status filters use the requesting user's per-account shelf
+    /// ([`user_work_status`]), not the global `works.status` column.
     pub async fn list_works_for_user_filtered(
         &self,
         user: &User,
@@ -482,29 +504,36 @@ impl Db {
 
         let mut qb = sqlx::QueryBuilder::new("");
         if user.is_admin {
-            qb.push("SELECT * FROM works WHERE 1=1");
+            qb.push(
+                "SELECT w.*, uws.status AS user_status FROM works w
+                 LEFT JOIN user_work_status uws ON uws.work_id = w.id AND uws.user_id = ",
+            );
+            qb.push_bind(user.id.to_string());
+            qb.push(" WHERE 1=1");
             if let Some(st) = status {
-                qb.push(" AND status = ").push_bind(st.to_string());
+                qb.push(" AND COALESCE(uws.status, 'unread') = ").push_bind(st.to_string());
             }
             if let Some(col) = att_col {
-                qb.push(format!(" AND {col} = 1"));
+                qb.push(format!(" AND w.{col} = 1"));
             }
             if let Some(y) = year_list {
-                qb.push(" AND year_list = ").push_bind(y);
+                qb.push(" AND w.year_list = ").push_bind(y);
             }
-            qb.push(" ORDER BY updated_at DESC");
+            qb.push(" ORDER BY w.updated_at DESC");
         } else {
             qb.push(
-                "SELECT DISTINCT w.* FROM works w
+                "SELECT DISTINCT w.*, uws.status AS user_status FROM works w
                  LEFT JOIN work_grants g ON g.work_id = w.id
-                 WHERE (g.user_id = ",
+                 LEFT JOIN user_work_status uws ON uws.work_id = w.id AND uws.user_id = ",
             );
+            qb.push_bind(user.id.to_string());
+            qb.push(" WHERE (g.user_id = ");
             qb.push_bind(user.id.to_string());
             qb.push(" OR w.created_by = ");
             qb.push_bind(user.id.to_string());
             qb.push(")");
             if let Some(st) = status {
-                qb.push(" AND w.status = ").push_bind(st.to_string());
+                qb.push(" AND COALESCE(uws.status, 'unread') = ").push_bind(st.to_string());
             }
             if let Some(col) = att_col {
                 qb.push(format!(" AND w.{col} = 1"));
@@ -516,10 +545,14 @@ impl Db {
         }
 
         let rows = qb.build().fetch_all(&self.pool).await?;
-        Ok(rows.into_iter().filter_map(|r| row_work(&r).ok()).collect())
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| row_work_with_user_status(&r).ok())
+            .collect())
     }
 
-    /// Count works the user can access that are in `status`, optionally excluding one id.
+    /// Count works the user can access that are on their personal shelf `status`,
+    /// optionally excluding one id.
     pub async fn count_accessible_by_status(
         &self,
         user: &User,
@@ -527,22 +560,29 @@ impl Db {
         exclude: Option<Uuid>,
     ) -> Result<usize> {
         let n: i64 = if user.is_admin {
-            let mut qb = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM works WHERE status = ");
+            let mut qb = sqlx::QueryBuilder::new(
+                "SELECT COUNT(*) FROM works w
+                 LEFT JOIN user_work_status uws ON uws.work_id = w.id AND uws.user_id = ",
+            );
+            qb.push_bind(user.id.to_string());
+            qb.push(" WHERE COALESCE(uws.status, 'unread') = ");
             qb.push_bind(status.to_string());
             if let Some(id) = exclude {
-                qb.push(" AND id != ").push_bind(id.to_string());
+                qb.push(" AND w.id != ").push_bind(id.to_string());
             }
             qb.build_query_scalar().fetch_one(&self.pool).await?
         } else {
             let mut qb = sqlx::QueryBuilder::new(
                 "SELECT COUNT(DISTINCT w.id) FROM works w
                  LEFT JOIN work_grants g ON g.work_id = w.id
-                 WHERE (g.user_id = ",
+                 LEFT JOIN user_work_status uws ON uws.work_id = w.id AND uws.user_id = ",
             );
+            qb.push_bind(user.id.to_string());
+            qb.push(" WHERE (g.user_id = ");
             qb.push_bind(user.id.to_string());
             qb.push(" OR w.created_by = ");
             qb.push_bind(user.id.to_string());
-            qb.push(") AND w.status = ");
+            qb.push(") AND COALESCE(uws.status, 'unread') = ");
             qb.push_bind(status.to_string());
             if let Some(id) = exclude {
                 qb.push(" AND w.id != ").push_bind(id.to_string());
@@ -550,6 +590,55 @@ impl Db {
             qb.build_query_scalar().fetch_one(&self.pool).await?
         };
         Ok(n as usize)
+    }
+
+    pub async fn upsert_user_work_status(
+        &self,
+        user_id: Uuid,
+        work_id: Uuid,
+        status: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO user_work_status (user_id, work_id, status, updated_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(user_id, work_id) DO UPDATE SET
+               status = excluded.status,
+               updated_at = excluded.updated_at",
+        )
+        .bind(user_id.to_string())
+        .bind(work_id.to_string())
+        .bind(status)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_user_work_status(
+        &self,
+        user_id: Uuid,
+        work_id: Uuid,
+    ) -> Result<Option<ReadingStatus>> {
+        let row = sqlx::query(
+            "SELECT status FROM user_work_status WHERE user_id = ? AND work_id = ?",
+        )
+        .bind(user_id.to_string())
+        .bind(work_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|r| {
+            let s: String = r.get("status");
+            ReadingStatus::parse(&s)
+        }))
+    }
+
+    /// Overlay the user's personal shelf status onto a work (defaults to Unread).
+    pub async fn apply_user_shelf_status(&self, user: &User, work: &mut Work) -> Result<()> {
+        work.status = self
+            .get_user_work_status(user.id, work.id)
+            .await?
+            .unwrap_or(ReadingStatus::Unread);
+        Ok(())
     }
 
     /// Per-work presence of epub / markdown / audio assets (for library cards).
@@ -906,6 +995,19 @@ fn row_work(r: &sqlx::sqlite::SqliteRow) -> Result<Work> {
         updated_at: chrono::DateTime::parse_from_rfc3339(&r.get::<String, _>("updated_at"))?
             .with_timezone(&Utc),
     })
+}
+
+/// Like [`row_work`], but prefers `user_status` (from a LEFT JOIN on user_work_status)
+/// when present — missing personal shelf ⇒ unread.
+fn row_work_with_user_status(r: &sqlx::sqlite::SqliteRow) -> Result<Work> {
+    let mut work = row_work(r)?;
+    let personal = r
+        .try_get::<Option<String>, _>("user_status")
+        .ok()
+        .flatten()
+        .and_then(|s| ReadingStatus::parse(&s));
+    work.status = personal.unwrap_or(ReadingStatus::Unread);
+    Ok(work)
 }
 
 fn row_asset(r: &sqlx::sqlite::SqliteRow) -> Result<WorkAsset> {

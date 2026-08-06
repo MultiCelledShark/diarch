@@ -182,6 +182,24 @@ async fn run_import(state: &Arc<AppState>, job: &diarch_core::Job) -> Result<Opt
         }
         work.updated_at = Utc::now();
         state.db.update_work(&work).await?;
+        if let Some(uid) = work.created_by {
+            if work.status == diarch_core::ReadingStatus::Unread {
+                let personal = state.db.get_user_work_status(uid, work_id).await?;
+                if matches!(
+                    personal,
+                    None | Some(diarch_core::ReadingStatus::Wishlist)
+                ) {
+                    let _ = state
+                        .db
+                        .upsert_user_work_status(
+                            uid,
+                            work_id,
+                            diarch_core::ReadingStatus::Unread.as_str(),
+                        )
+                        .await;
+                }
+            }
+        }
     }
 
     let _ = tokio::fs::remove_file(path).await;
@@ -220,6 +238,24 @@ async fn run_confirm(state: &Arc<AppState>, job: &diarch_core::Job) -> Result<Op
         }
         work.updated_at = Utc::now();
         state.db.update_work(&work).await?;
+        if let Some(uid) = work.created_by {
+            if work.status == diarch_core::ReadingStatus::Unread {
+                let personal = state.db.get_user_work_status(uid, work_id).await?;
+                if matches!(
+                    personal,
+                    None | Some(diarch_core::ReadingStatus::Wishlist)
+                ) {
+                    let _ = state
+                        .db
+                        .upsert_user_work_status(
+                            uid,
+                            work_id,
+                            diarch_core::ReadingStatus::Unread.as_str(),
+                        )
+                        .await;
+                }
+            }
+        }
     }
     Ok(Some("epub confirmed".into()))
 }

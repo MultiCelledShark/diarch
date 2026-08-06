@@ -39,9 +39,10 @@ class ApiClient {
     private val okHttp = OkHttpClient.Builder()
         .addInterceptor(authInterceptor)
         .addInterceptor(logging)
-        .connectTimeout(60, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
-        .writeTimeout(120, TimeUnit.SECONDS)
+        // Keep connect short so unreachable servers fall back to offline quickly.
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
         .build()
 
     @Volatile
