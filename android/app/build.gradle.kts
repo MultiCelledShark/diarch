@@ -13,8 +13,8 @@ android {
         applicationId = "app.diarch.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
         // Fairphone 6 / modern phones: ship arm64 only (drops unused ABIs from ML Kit etc.)
         ndk {
             abiFilters += listOf("arm64-v8a")
