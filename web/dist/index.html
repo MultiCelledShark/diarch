@@ -221,6 +221,7 @@
                   <button type="button" id="reader-toc-btn">Contents</button>
                   <button type="button" id="reader-typo-btn">Typography</button>
                   <button type="button" id="reader-scroll" aria-pressed="false">Infinite scroll</button>
+                  <button type="button" id="reader-audio-toggle" hidden>Show audio player</button>
                   <button type="button" id="reader-close">Close</button>
                 </div>
               </div>
@@ -295,6 +296,10 @@
             </aside>
           </div>
           <div id="audio-wrap" class="audio-wrap" hidden>
+            <div class="audio-wrap-head">
+              <strong>Audiobook</strong>
+              <button type="button" id="audio-hide-btn" title="Hide player while reading">Hide</button>
+            </div>
             <audio id="audio-player" controls></audio>
             <label class="audio-speed">
               Speed

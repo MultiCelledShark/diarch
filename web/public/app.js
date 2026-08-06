@@ -7,6 +7,10 @@ const state = {
   book: null,
   rendition: null,
   readerWorkId: null,
+  readerHasEpub: false,
+  readerHasMd: false,
+  readerHasAudio: false,
+  audioPlayerHidden: false,
 };
 
 async function api(path, opts = {}) {
@@ -2054,6 +2058,8 @@ async function openReader(w, hasEpub, hasMd, audio) {
   state.readerWorkId = w.id;
   state.readerHasEpub = !!hasEpub;
   state.readerHasMd = !!hasMd;
+  state.readerHasAudio = !!audio;
+  state.audioPlayerHidden = false;
   show("reader");
   closeReaderMenu();
   closeReaderPanels();
@@ -2071,21 +2077,61 @@ async function openReader(w, hasEpub, hasMd, audio) {
   setTocEnabled(false);
   renderTocList([]);
 
-  const audioWrap = document.getElementById("audio-wrap");
   const audioEl = document.getElementById("audio-player");
   if (audio) {
-    audioWrap.hidden = false;
     const name = (audio.relative_path || "book.m4b").split("/").pop() || "book.m4b";
     audioEl.src = `/api/works/${w.id}/audio/${name}`;
     wireAudioSpeed(audioEl, "audio-speed", "audio-speed-val");
+    setAudioPlayerVisible(true);
   } else {
-    audioWrap.hidden = true;
+    audioEl.pause?.();
     audioEl.removeAttribute("src");
+    audioEl.load?.();
+    setAudioPlayerVisible(false);
   }
 
   if (audioOnly) return;
   if (useMd) await loadMarkdown(w.id);
   else if (hasEpub) await loadEpub(w);
+}
+
+/** Show/hide the bottom audiobook bar. Only meaningful when the work has audio. */
+function setAudioPlayerVisible(visible) {
+  const wrap = document.getElementById("audio-wrap");
+  const menuBtn = document.getElementById("reader-audio-toggle");
+  const hasAudio = !!state.readerHasAudio;
+  if (!hasAudio) {
+    state.audioPlayerHidden = false;
+    if (wrap) wrap.hidden = true;
+    if (menuBtn) menuBtn.hidden = true;
+    return;
+  }
+  const show = !!visible;
+  state.audioPlayerHidden = !show;
+  if (wrap) wrap.hidden = !show;
+  if (menuBtn) {
+    menuBtn.hidden = false;
+    menuBtn.textContent = show ? "Hide audio player" : "Show audio player";
+  }
+  // Let flex layout settle, then resize the EPUB viewport so pages aren't
+  // clipped under (or short of) the player bar.
+  requestAnimationFrame(() => resizeReaderEpub());
+}
+
+function toggleAudioPlayer() {
+  if (!state.readerHasAudio) return;
+  setAudioPlayerVisible(!!state.audioPlayerHidden);
+}
+
+function resizeReaderEpub() {
+  if (!state.rendition || isInfiniteScrollActive()) return;
+  const area = document.getElementById("epub-area");
+  if (!area || area.hidden) return;
+  const width = Math.max(area.clientWidth || 0, 1);
+  const height = Math.max(area.clientHeight || 0, 1);
+  try {
+    state.rendition.resize(width, height);
+  } catch {}
 }
 
 function isInfiniteScrollActive() {
@@ -2252,8 +2298,10 @@ async function loadEpub(w) {
     state.book = ePub(buf);
     state.epubLocationsReady = false;
     void area.offsetHeight;
-    const width = Math.max(area.clientWidth || 0, window.innerWidth || 320);
-    const height = Math.max(area.clientHeight || 0, (window.innerHeight || 480) - 56);
+    // Size to the stage area only — never window.innerHeight. The bottom
+    // audio bar (when present) must shrink the page, not cover the last lines.
+    const width = Math.max(area.clientWidth || 0, 320);
+    const height = Math.max(area.clientHeight || 0, 240);
     state.rendition = state.book.renderTo(area, {
       width,
       height,
@@ -2331,6 +2379,15 @@ function closeReaderView() {
     state.book = null;
     state.rendition = null;
   }
+  const audioEl = document.getElementById("audio-player");
+  if (audioEl) {
+    try { audioEl.pause(); } catch {}
+    audioEl.removeAttribute("src");
+    try { audioEl.load(); } catch {}
+  }
+  state.readerHasAudio = false;
+  state.audioPlayerHidden = false;
+  setAudioPlayerVisible(false);
   setReaderProgress("");
   if (state.readerWorkId) openDetail(state.readerWorkId);
   else {
@@ -2348,6 +2405,15 @@ document.getElementById("reader-scroll").addEventListener("click", async () => {
   const next = !isInfiniteScrollActive();
   closeReaderMenu();
   await applyReaderMode(next);
+});
+
+document.getElementById("reader-audio-toggle")?.addEventListener("click", () => {
+  closeReaderMenu();
+  toggleAudioPlayer();
+});
+
+document.getElementById("audio-hide-btn")?.addEventListener("click", () => {
+  setAudioPlayerVisible(false);
 });
 
 document.getElementById("reader-close").addEventListener("click", () => {
@@ -2413,6 +2479,13 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     readerTurn("right");
   }
+});
+
+let readerResizeTimer = null;
+window.addEventListener("resize", () => {
+  if (!readerIsOpen()) return;
+  clearTimeout(readerResizeTimer);
+  readerResizeTimer = setTimeout(() => resizeReaderEpub(), 100);
 });
 
 document.addEventListener("visibilitychange", () => {

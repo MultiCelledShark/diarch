@@ -801,6 +801,27 @@ main { padding: 1.25rem; }
   border-top: 1px solid var(--line);
   background: color-mix(in srgb, var(--panel) 80%, transparent);
 }
+/* Author display:flex beats the UA [hidden] rule — without this the bar
+   stays visible even when openReader sets hidden (and covers text). */
+.audio-wrap[hidden] { display: none !important; }
+.audio-wrap-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.audio-wrap-head strong {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.audio-wrap-head button {
+  flex-shrink: 0;
+  font-size: 0.82rem;
+  padding: 0.2rem 0.55rem;
+}
 .audio-wrap audio { width: 100%; }
 .audio-speed {
   display: flex;
