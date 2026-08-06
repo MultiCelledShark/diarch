@@ -15,16 +15,20 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.LibraryBooks
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SystemUpdate
-import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -34,6 +38,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -46,8 +51,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.diarch.android.BuildConfig
@@ -57,6 +63,8 @@ import app.diarch.android.data.Work
 import app.diarch.android.ui.update.UpdateCheckTrigger
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -72,15 +80,18 @@ fun ShelvesScreen(
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var menuOpen by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    var searchDraft by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
     val repo = DiarchApp.instance.repository
+    var searchJob by remember { mutableStateOf<Job?>(null) }
 
-    fun refresh() {
+    fun refresh(query: String = searchQuery) {
         scope.launch {
             loading = true
             error = null
             try {
-                val result = repo.listWorks(shelf)
+                val result = repo.listWorks(shelf, query)
                 works = result.works
                 if (result.offline) {
                     error = "Showing offline copies (server unreachable)"
@@ -93,12 +104,26 @@ fun ShelvesScreen(
         }
     }
 
-    LaunchedEffect(shelf) { refresh() }
+    fun scheduleSearch(raw: String) {
+        searchDraft = raw
+        searchJob?.cancel()
+        searchJob = scope.launch {
+            delay(220)
+            searchQuery = raw.trim()
+        }
+    }
+
+    LaunchedEffect(shelf, searchQuery) { refresh(searchQuery) }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(shelf.label) },
+                title = {
+                    Text(
+                        if (searchQuery.isNotBlank()) "Search"
+                        else shelf.label,
+                    )
+                },
                 actions = {
                     IconButton(onClick = { menuOpen = true }) {
                         Icon(Icons.Default.MoreVert, contentDescription = "Menu")
@@ -136,8 +161,13 @@ fun ShelvesScreen(
             NavigationBar {
                 Shelf.entries.forEach { s ->
                     NavigationBarItem(
-                        selected = shelf == s,
-                        onClick = { shelf = s },
+                        selected = shelf == s && searchQuery.isBlank(),
+                        onClick = {
+                            searchJob?.cancel()
+                            searchDraft = ""
+                            searchQuery = ""
+                            shelf = s
+                        },
                         icon = {
                             Icon(
                                 when (s) {
@@ -168,49 +198,85 @@ fun ShelvesScreen(
             }
         },
     ) { padding ->
-        PullToRefreshBox(
-            isRefreshing = loading,
-            onRefresh = { refresh() },
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            when {
-                error != null && works.isEmpty() -> {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text(error!!, color = MaterialTheme.colorScheme.error)
-                    }
-                }
-                works.isEmpty() && !loading -> {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text(
-                            when (shelf) {
-                                Shelf.Reading -> "Nothing in progress"
-                                Shelf.ToRead -> "To Read is empty"
-                                Shelf.Library -> "Library is empty — import a file"
-                                Shelf.Wishlist -> "Wishlist is empty — add a title or scan an ISBN"
-                                Shelf.Finished -> "No finished books yet"
-                            },
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-                else -> {
-                    LazyColumn(
-                        contentPadding = PaddingValues(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        if (error != null) {
-                            item {
-                                Text(
-                                    error!!,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                )
-                            }
+            OutlinedTextField(
+                value = searchDraft,
+                onValueChange = { scheduleSearch(it) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                singleLine = true,
+                placeholder = { Text("Search title, author, ISBN…") },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                trailingIcon = {
+                    if (searchDraft.isNotEmpty()) {
+                        IconButton(onClick = {
+                            searchJob?.cancel()
+                            searchDraft = ""
+                            searchQuery = ""
+                        }) {
+                            Icon(Icons.Default.Clear, contentDescription = "Clear search")
                         }
-                        items(works, key = { it.id }) { work ->
-                            WorkRow(work = work, onClick = { onOpenWork(work.id) })
+                    }
+                },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(
+                    onSearch = {
+                        searchJob?.cancel()
+                        searchQuery = searchDraft.trim()
+                    },
+                ),
+            )
+            PullToRefreshBox(
+                isRefreshing = loading,
+                onRefresh = { refresh() },
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+            ) {
+                when {
+                    error != null && works.isEmpty() -> {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text(error!!, color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                    works.isEmpty() && !loading -> {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text(
+                                when {
+                                    searchQuery.isNotBlank() -> "No books match “$searchQuery”"
+                                    shelf == Shelf.Reading -> "Nothing in progress"
+                                    shelf == Shelf.ToRead -> "To Read is empty"
+                                    shelf == Shelf.Library -> "Library is empty — import a file"
+                                    shelf == Shelf.Wishlist -> "Wishlist is empty — add a title or scan an ISBN"
+                                    shelf == Shelf.Finished -> "No finished books yet"
+                                    else -> "Nothing here"
+                                },
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    else -> {
+                        LazyColumn(
+                            contentPadding = PaddingValues(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            if (error != null) {
+                                item {
+                                    Text(
+                                        error!!,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                    )
+                                }
+                            }
+                            items(works, key = { it.id }) { work ->
+                                WorkRow(work = work, onClick = { onOpenWork(work.id) })
+                            }
                         }
                     }
                 }

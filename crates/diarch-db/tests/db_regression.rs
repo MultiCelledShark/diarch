@@ -223,6 +223,49 @@ async fn user_work_status_is_per_account() {
 }
 
 #[tokio::test]
+async fn list_works_text_search_matches_title_author_isbn() {
+    let (_dir, db) = fresh_db().await;
+    let user = db.create_user("u", "pw", false).await.unwrap();
+
+    let mut dune = sample_work(Some(user.id), ReadingStatus::Unread);
+    dune.title = "Dune".into();
+    dune.authors = "Frank Herbert".into();
+    dune.isbn = Some("9780441172719".into());
+    db.create_work(&dune, &[], None).await.unwrap();
+
+    let mut other = sample_work(Some(user.id), ReadingStatus::Unread);
+    other.title = "Neuromancer".into();
+    other.authors = "William Gibson".into();
+    other.isbn = Some("9780441569595".into());
+    db.create_work(&other, &[], None).await.unwrap();
+
+    let by_title = db
+        .list_works_for_user_filtered(&user, None, None, None, Some("dune"))
+        .await
+        .unwrap();
+    assert_eq!(by_title.len(), 1);
+    assert_eq!(by_title[0].title, "Dune");
+
+    let by_author = db
+        .list_works_for_user_filtered(&user, None, None, None, Some("herbert"))
+        .await
+        .unwrap();
+    assert_eq!(by_author.len(), 1);
+
+    let by_isbn = db
+        .list_works_for_user_filtered(&user, None, None, None, Some("441172719"))
+        .await
+        .unwrap();
+    assert_eq!(by_isbn.len(), 1);
+
+    let miss = db
+        .list_works_for_user_filtered(&user, None, None, None, Some("asimov"))
+        .await
+        .unwrap();
+    assert!(miss.is_empty());
+}
+
+#[tokio::test]
 async fn created_by_grants_owner_access_without_explicit_grant() {
     let (_dir, db) = fresh_db().await;
     let user = db.create_user("owner", "pw", false).await.unwrap();

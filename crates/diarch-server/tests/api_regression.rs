@@ -647,6 +647,51 @@ async fn currently_reading_shelf_caps_at_three() {
 }
 
 #[tokio::test]
+async fn works_text_search_filters_by_q() {
+    let (_dir, app, _) = test_app().await;
+    let token = login(&app, "admin", "adminpass1234").await;
+
+    let (status, _, _) = json_req(
+        &app,
+        "POST",
+        "/api/works",
+        Some(&token),
+        Some(json!({
+            "title": "The Left Hand of Darkness",
+            "authors": "Ursula K. Le Guin",
+            "isbn": "9780441478125"
+        })),
+    )
+    .await;
+    assert_eq!(status, 201);
+
+    let (status, _, _) = json_req(
+        &app,
+        "POST",
+        "/api/works",
+        Some(&token),
+        Some(json!({
+            "title": "Snow Crash",
+            "authors": "Neal Stephenson"
+        })),
+    )
+    .await;
+    assert_eq!(status, 201);
+
+    let (status, list, _) =
+        json_req(&app, "GET", "/api/works?q=le%20guin", Some(&token), None).await;
+    assert_eq!(status, 200, "{list}");
+    let arr = list.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["title"], "The Left Hand of Darkness");
+
+    let (status, list, _) =
+        json_req(&app, "GET", "/api/works?q=9780441478125", Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn reading_shelves_are_per_account() {
     let (_dir, app, _) = test_app().await;
     let admin_tok = login(&app, "admin", "adminpass1234").await;

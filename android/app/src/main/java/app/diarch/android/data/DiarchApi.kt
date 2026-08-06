@@ -25,7 +25,10 @@ interface DiarchApi {
     suspend fun me(): User
 
     @GET("api/works")
-    suspend fun listWorks(@Query("status") status: String? = null): List<Work>
+    suspend fun listWorks(
+        @Query("status") status: String? = null,
+        @Query("q") q: String? = null,
+    ): List<Work>
 
     @GET("api/works/{id}")
     suspend fun getWork(@Path("id") id: String): WorkDetailResponse

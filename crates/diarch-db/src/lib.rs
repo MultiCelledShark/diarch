@@ -475,20 +475,22 @@ impl Db {
         status: Option<&str>,
         attention: Option<&str>,
     ) -> Result<Vec<Work>> {
-        self.list_works_for_user_filtered(user, status, attention, None)
+        self.list_works_for_user_filtered(user, status, attention, None, None)
             .await
     }
 
-    /// List accessible works with optional status / attention / year_list filters in SQL.
+    /// List accessible works with optional status / attention / year_list / text filters.
     ///
     /// Status filters use the requesting user's per-account shelf
     /// ([`user_work_status`]), not the global `works.status` column.
+    /// `q` matches title, authors, and ISBN (case-insensitive substring).
     pub async fn list_works_for_user_filtered(
         &self,
         user: &User,
         status: Option<&str>,
         attention: Option<&str>,
         year_list: Option<i32>,
+        q: Option<&str>,
     ) -> Result<Vec<Work>> {
         let att_col = attention.and_then(|att| match att {
             "needs_review" => Some("needs_review"),
@@ -501,6 +503,10 @@ impl Db {
             "sg_audio_only_remote" => Some("sg_audio_only_remote"),
             _ => None,
         });
+        let search = q
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(like_contains_pattern);
 
         let mut qb = sqlx::QueryBuilder::new("");
         if user.is_admin {
@@ -519,6 +525,7 @@ impl Db {
             if let Some(y) = year_list {
                 qb.push(" AND w.year_list = ").push_bind(y);
             }
+            push_works_text_search(&mut qb, search.as_deref());
             qb.push(" ORDER BY w.updated_at DESC");
         } else {
             qb.push(
@@ -541,6 +548,7 @@ impl Db {
             if let Some(y) = year_list {
                 qb.push(" AND w.year_list = ").push_bind(y);
             }
+            push_works_text_search(&mut qb, search.as_deref());
             qb.push(" ORDER BY w.updated_at DESC");
         }
 
@@ -995,6 +1003,43 @@ fn row_work(r: &sqlx::sqlite::SqliteRow) -> Result<Work> {
         updated_at: chrono::DateTime::parse_from_rfc3339(&r.get::<String, _>("updated_at"))?
             .with_timezone(&Utc),
     })
+}
+
+/// Escape `%` / `_` / `\` for SQLite LIKE and wrap with wildcards.
+fn like_contains_pattern(q: &str) -> String {
+    let mut out = String::with_capacity(q.len() + 2);
+    out.push('%');
+    for c in q.chars() {
+        match c {
+            '%' | '_' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out.push('%');
+    out
+}
+
+fn push_works_text_search(qb: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>, pattern: Option<&str>) {
+    let Some(pat) = pattern else { return };
+    qb.push(
+        " AND (
+            lower(w.title) LIKE lower(",
+    );
+    qb.push_bind(pat.to_string());
+    qb.push(
+        ") ESCAPE '\\'
+            OR lower(w.authors) LIKE lower(",
+    );
+    qb.push_bind(pat.to_string());
+    qb.push(
+        ") ESCAPE '\\'
+            OR (w.isbn IS NOT NULL AND lower(w.isbn) LIKE lower(",
+    );
+    qb.push_bind(pat.to_string());
+    qb.push(") ESCAPE '\\') )");
 }
 
 /// Like [`row_work`], but prefers `user_status` (from a LEFT JOIN on user_work_status)

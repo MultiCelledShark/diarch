@@ -280,6 +280,8 @@ struct ListQuery {
     status: Option<String>,
     attention: Option<String>,
     year_list: Option<i32>,
+    /// Case-insensitive substring match on title, authors, ISBN.
+    q: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -303,6 +305,7 @@ async fn list_works(
             q.status.as_deref(),
             q.attention.as_deref(),
             q.year_list,
+            q.q.as_deref(),
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

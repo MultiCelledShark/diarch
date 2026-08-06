@@ -35,19 +35,24 @@ class LibraryRepository(
         val offline: Boolean = false,
     )
 
-    suspend fun listWorks(shelf: Shelf): WorksLoad {
+    suspend fun listWorks(shelf: Shelf, query: String? = null): WorksLoad {
+        val q = query?.trim()?.takeIf { it.isNotEmpty() }
         return try {
-            WorksLoad(apiClient.api().listWorks(shelf.apiStatus))
+            // When searching, ignore shelf status so matches aren't hidden on other shelves.
+            val status = if (q != null) null else shelf.apiStatus
+            WorksLoad(apiClient.api().listWorks(status = status, q = q))
         } catch (e: Exception) {
             val downloaded = offlineStore.listDownloaded().map { it.toWork() }
             if (downloaded.isEmpty()) throw e
-            // Offline mode: Library shows every download; other shelves filter by
-            // the status snapshot in the local manifest. Never rethrow when we
-            // have downloads — an empty shelf is a valid offline state.
-            val filtered = if (shelf == Shelf.Library) {
-                downloaded
-            } else {
-                downloaded.filter { it.status == shelf.apiStatus }
+            val needle = q?.lowercase()
+            val filtered = downloaded.filter { work ->
+                val matchesQuery = needle == null ||
+                    work.title.lowercase().contains(needle) ||
+                    work.authors.lowercase().contains(needle) ||
+                    work.isbn?.lowercase()?.contains(needle) == true
+                if (!matchesQuery) return@filter false
+                if (q != null) true
+                else work.status == shelf.apiStatus || shelf == Shelf.Library
             }
             WorksLoad(filtered, offline = true)
         }

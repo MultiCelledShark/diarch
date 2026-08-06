@@ -275,15 +275,20 @@ document.querySelectorAll("button.nav").forEach((b) => {
 async function loadWorks() {
   const status = document.getElementById("filter-status").value;
   const year = document.getElementById("filter-year")?.value || "";
+  const search = document.getElementById("library-search")?.value?.trim() || "";
   const params = new URLSearchParams();
   if (status) params.set("status", status);
   if (year) params.set("year_list", year);
+  if (search) params.set("q", search);
   const q = params.toString() ? `?${params}` : "";
   const works = await api(`/api/works${q}`);
-  if (!year) refreshYearFilterOptions(works);
+  if (!year && !search) refreshYearFilterOptions(works);
+  const emptyHint = search
+    ? `No books match “${search}”. Try another title, author, or ISBN.`
+    : "Import an EPUB, or add something to your wishlist.";
   renderCards(document.getElementById("work-list"), works, {
-    emptyTitle: "Your library is empty",
-    emptyHint: "Import an EPUB, or add something to your wishlist.",
+    emptyTitle: search ? "No matches" : "Your library is empty",
+    emptyHint,
     libraryActions: true,
     onStatusChanged: loadWorks,
   });
@@ -291,6 +296,21 @@ async function loadWorks() {
 
 document.getElementById("filter-status").addEventListener("change", loadWorks);
 document.getElementById("filter-year")?.addEventListener("change", loadWorks);
+
+let librarySearchTimer = null;
+document.getElementById("library-search")?.addEventListener("input", () => {
+  clearTimeout(librarySearchTimer);
+  librarySearchTimer = setTimeout(() => {
+    loadWorks().catch((e) => setImportStatus(e.message || String(e), true));
+  }, 220);
+});
+document.getElementById("library-search")?.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    e.target.value = "";
+    clearTimeout(librarySearchTimer);
+    loadWorks().catch((err) => setImportStatus(err.message || String(err), true));
+  }
+});
 
 function refreshYearFilterOptions(worksHint) {
   const sel = document.getElementById("filter-year");
