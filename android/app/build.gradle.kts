@@ -13,12 +13,19 @@ android {
         applicationId = "app.diarch.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
         // Fairphone 6 / modern phones: ship arm64 only (drops unused ABIs from ML Kit etc.)
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
+        // Forgejo releases API (LAN hostname matches git remote ssh://git@forgejo/key/Diarch.git).
+        // Override at build time: ./gradlew :app:assembleDebug -PforgejoUrl=https://git.example.com
+        val forgejoUrl = (project.findProperty("forgejoUrl") as String?)?.trimEnd('/')
+            ?: "http://forgejo"
+        buildConfigField("String", "FORGEJO_BASE_URL", "\"$forgejoUrl\"")
+        buildConfigField("String", "FORGEJO_OWNER", "\"key\"")
+        buildConfigField("String", "FORGEJO_REPO", "\"Diarch\"")
     }
 
     buildTypes {
@@ -42,6 +49,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {

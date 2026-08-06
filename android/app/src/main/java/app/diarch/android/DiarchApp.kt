@@ -5,6 +5,7 @@ import app.diarch.android.data.ApiClient
 import app.diarch.android.data.LibraryRepository
 import app.diarch.android.data.OfflineStore
 import app.diarch.android.data.SessionStore
+import app.diarch.android.data.UpdateChecker
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.request.ImageRequest
@@ -19,6 +20,8 @@ class DiarchApp : Application(), ImageLoaderFactory {
         private set
     lateinit var offlineStore: OfflineStore
         private set
+    lateinit var updateChecker: UpdateChecker
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -27,6 +30,7 @@ class DiarchApp : Application(), ImageLoaderFactory {
         apiClient = ApiClient()
         offlineStore = OfflineStore(this, apiClient)
         repository = LibraryRepository(apiClient, sessionStore, this, offlineStore)
+        updateChecker = UpdateChecker(this)
     }
 
     override fun newImageLoader(): ImageLoader {

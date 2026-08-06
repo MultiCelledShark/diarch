@@ -27,6 +27,7 @@ import app.diarch.android.ui.detail.WorkDetailScreen
 import app.diarch.android.ui.login.LoginScreen
 import app.diarch.android.ui.reader.ReaderScreen
 import app.diarch.android.ui.shelves.ShelvesScreen
+import app.diarch.android.ui.update.UpdatePromptHost
 import app.diarch.android.ui.wishlist.WishlistAddScreen
 
 class MainActivity : ComponentActivity() {
@@ -56,6 +57,9 @@ private fun DiarchNav() {
         }
         sessionReady = true
     }
+
+    // Check Forgejo releases even before login (update shouldn't depend on Diarch server).
+    UpdatePromptHost(checker = app.updateChecker)
 
     if (!sessionReady) return
 

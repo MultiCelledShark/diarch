@@ -21,8 +21,12 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.LibraryBooks
 import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -46,10 +50,11 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import app.diarch.android.BuildConfig
 import app.diarch.android.DiarchApp
 import app.diarch.android.data.Shelf
 import app.diarch.android.data.Work
-import app.diarch.android.data.toWork
+import app.diarch.android.ui.update.UpdateCheckTrigger
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import kotlinx.coroutines.launch
@@ -66,6 +71,7 @@ fun ShelvesScreen(
     var works by remember { mutableStateOf<List<Work>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var menuOpen by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val repo = DiarchApp.instance.repository
 
@@ -94,13 +100,34 @@ fun ShelvesScreen(
             TopAppBar(
                 title = { Text(shelf.label) },
                 actions = {
-                    IconButton(onClick = {
-                        scope.launch {
-                            repo.logout()
-                            onLogout()
-                        }
-                    }) {
-                        Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = "Log out")
+                    IconButton(onClick = { menuOpen = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "Menu")
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Check for updates") },
+                            leadingIcon = { Icon(Icons.Default.SystemUpdate, null) },
+                            onClick = {
+                                menuOpen = false
+                                UpdateCheckTrigger.requestCheck()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("v${BuildConfig.VERSION_NAME}") },
+                            enabled = false,
+                            onClick = {},
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Log out") },
+                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.Logout, null) },
+                            onClick = {
+                                menuOpen = false
+                                scope.launch {
+                                    repo.logout()
+                                    onLogout()
+                                }
+                            },
+                        )
                     }
                 },
             )
