@@ -52,6 +52,185 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
+const UI_THEME_KEY = "diarch-ui-theme";
+const UI_THEME_CSS_KEY = "diarch-ui-theme-css";
+const UI_THEME_NAME_RE = /^[a-z][a-z0-9-]{0,39}$/;
+
+function sanitizeThemeName(name) {
+  const s = String(name || "")
+    .trim()
+    .toLowerCase();
+  return UI_THEME_NAME_RE.test(s) ? s : "diarch";
+}
+
+function colorSchemeIsDark() {
+  return (getComputedStyle(document.documentElement).getPropertyValue("color-scheme") || "")
+    .toLowerCase()
+    .includes("dark");
+}
+
+function cssValueOk(val) {
+  const v = String(val || "").replace(/\/\*[\s\S]*?\*\//g, "").trim();
+  if (!v || v.length > 220) return null;
+  const lower = v.toLowerCase();
+  if (/url\s*\(|expression|javascript:|@import|[<>{}\\]/.test(lower)) return null;
+  if (!/^[\x20-\x7e]+$/.test(v)) return null;
+  return v;
+}
+
+function parseDaisyTheme(raw) {
+  const text = String(raw || "").trim();
+  if (!text) throw new Error("Paste a daisyUI theme CSS block");
+  const nameMatch =
+    text.match(/name\s*:\s*["']?([a-z][a-z0-9-]*)["']?/i) ||
+    text.match(/\[data-theme\s*=\s*["']?([a-z][a-z0-9-]*)["']?\]/i) ||
+    text.match(/theme-controller\[value=([a-z][a-z0-9-]*)\]/i);
+  const name = sanitizeThemeName(nameMatch ? nameMatch[1] : "custom");
+  const decls = [];
+  const cs = text.match(/color-scheme\s*:\s*["']?(light|dark)["']?/i);
+  if (cs) decls.push(`color-scheme: ${cs[1].toLowerCase()}`);
+  const varRe = /(--[a-z0-9-]+)\s*:\s*([^;]+);/gi;
+  let m;
+  const seen = new Set();
+  while ((m = varRe.exec(text))) {
+    const prop = m[1].toLowerCase();
+    if (
+      !/^--(color-|radius-|size-|border$|depth$|noise$|font-family$)/.test(prop)
+    ) {
+      continue;
+    }
+    if (seen.has(prop)) continue;
+    const val = cssValueOk(m[2]);
+    if (!val) continue;
+    seen.add(prop);
+    decls.push(`${prop}: ${val}`);
+  }
+  if (seen.size < 4) {
+    throw new Error("No daisyUI --color-* variables found in that paste");
+  }
+  const css = `[data-theme="${name}"] {\n  ${decls.join(";\n  ")};\n}`;
+  return { name, css };
+}
+
+function injectImportedThemeCss(css) {
+  let el = document.getElementById("diarch-imported-theme");
+  if (!css) {
+    el?.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement("style");
+    el.id = "diarch-imported-theme";
+    document.head.appendChild(el);
+  }
+  el.textContent = css;
+}
+
+function applyUiTheme(name, css) {
+  const theme = sanitizeThemeName(name);
+  document.documentElement.setAttribute("data-theme", theme);
+  if (css) injectImportedThemeCss(css);
+  try {
+    localStorage.setItem(UI_THEME_KEY, theme);
+    if (css) localStorage.setItem(UI_THEME_CSS_KEY, css);
+  } catch (_) {
+    /* private mode */
+  }
+  document.querySelectorAll(".theme-swatch").forEach((b) => {
+    b.setAttribute("aria-pressed", b.dataset.theme === theme ? "true" : "false");
+  });
+}
+
+function listUiThemes() {
+  const names = [];
+  const seen = new Set();
+  const add = (n) => {
+    const s = sanitizeThemeName(n);
+    if (seen.has(s)) return;
+    seen.add(s);
+    names.push(s);
+  };
+  add("diarch");
+  const scan = (rules) => {
+    if (!rules) return;
+    for (const rule of rules) {
+      const sel = rule.selectorText || "";
+      const re = /\[data-theme=["']?([a-z][a-z0-9-]*)["']?\]/gi;
+      let m;
+      while ((m = re.exec(sel))) add(m[1]);
+      if (rule.cssRules) scan(rule.cssRules);
+    }
+  };
+  for (const sheet of document.styleSheets) {
+    try {
+      scan(sheet.cssRules);
+    } catch (_) {
+      /* cross-origin */
+    }
+  }
+  return names;
+}
+
+function themeLabel(name) {
+  return String(name)
+    .split("-")
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(" ");
+}
+
+function renderThemeSwatches() {
+  const host = document.getElementById("theme-swatches");
+  if (!host) return;
+  const current = sanitizeThemeName(
+    document.documentElement.getAttribute("data-theme") || "diarch"
+  );
+  host.innerHTML = listUiThemes()
+    .map(
+      (name) => `<button type="button" class="theme-swatch" data-theme="${escapeHtml(name)}"
+        aria-pressed="${name === current ? "true" : "false"}">
+        <span class="theme-swatch-chips" aria-hidden="true"><i></i><i></i><i></i></span>
+        ${escapeHtml(themeLabel(name))}
+      </button>`
+    )
+    .join("");
+}
+
+async function persistUiTheme(name, css) {
+  const theme = sanitizeThemeName(name);
+  applyUiTheme(theme, css);
+  const json = { ui_theme: theme };
+  if (css !== undefined) json.ui_theme_css = css;
+  try {
+    await api("/api/settings", { method: "PUT", json });
+    if (state.settings) {
+      state.settings.ui_theme = theme;
+      if (css !== undefined) state.settings.ui_theme_css = css;
+    }
+  } catch (e) {
+    const msg = document.getElementById("theme-import-msg");
+    if (msg) msg.textContent = e.message || "Could not save theme";
+  }
+}
+
+function hydrateUiThemeFromSettings(settings) {
+  const name = sanitizeThemeName(
+    (settings && settings.ui_theme) || localStorage.getItem(UI_THEME_KEY) || "diarch"
+  );
+  let css = "";
+  if (settings && typeof settings.ui_theme_css === "string") {
+    css = settings.ui_theme_css;
+  } else {
+    try {
+      css = localStorage.getItem(UI_THEME_CSS_KEY) || "";
+    } catch (_) {
+      css = "";
+    }
+  }
+  injectImportedThemeCss(css);
+  applyUiTheme(name, css || undefined);
+  renderThemeSwatches();
+}
+
 function parseTranscribeProgress(detail) {
   const m = String(detail || "").match(/transcribing chunk\s+(\d+)\s*\/\s*(\d+)/i);
   if (!m) return null;
@@ -116,6 +295,8 @@ async function enterApp() {
     show_audio_gaps: true,
     reader_infinite_scroll: false,
     reader_typography: { ...TYPO_DEFAULTS },
+    ui_theme: "diarch",
+    ui_theme_css: "",
   }));
   const taxonomyP = api("/api/taxonomy").catch(() => []);
   const usersP = state.user.is_admin ? api("/api/users").catch(() => []) : Promise.resolve([]);
@@ -124,6 +305,7 @@ async function enterApp() {
   state.taxonomy = taxonomy;
   state.users = users;
   hydrateTypoFromSettings(state.settings);
+  hydrateUiThemeFromSettings(state.settings);
   refreshYearFilterOptions();
   try {
     await loadWorks();
@@ -1455,15 +1637,23 @@ function openMdPreviewFloat() {
 
 function openMdPreviewTab(md) {
   const html = markdownToSafeHtml(md);
+  const cs = getComputedStyle(document.documentElement);
+  const v = (n, fb) => (cs.getPropertyValue(n).trim() || fb);
+  const bg = v("--bg", "#14201c");
+  const ink = v("--ink", "#e8efe6");
+  const accent = v("--accent", "#c4a35a");
+  const muted = v("--muted", "#9aaf9f");
+  const sunken = v("--sunken", "#0a100e");
+  const line = v("--line", "#2d4038");
   const doc = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8" />
 <title>Markdown preview — Diarch</title>
 <style>
   body { margin: 0; padding: 1.5rem max(1rem, calc(50vw - 18rem));
-    font: 1.05rem/1.6 system-ui, sans-serif; background: #0f1814; color: #e8efe6; }
-  h1,h2,h3,h4 { color: #c4a35a; font-family: Palatino, Georgia, serif; }
-  a { color: #e8b87a; } pre { overflow: auto; padding: .75rem; background: #0a100e;
-    border: 1px solid #2d4038; border-radius: 3px; }
-  blockquote { margin: .5rem 0; padding-left: .75rem; border-left: 3px solid #c4a35a; color: #9aaf9f; }
+    font: 1.05rem/1.6 system-ui, sans-serif; background: ${bg}; color: ${ink}; }
+  h1,h2,h3,h4 { color: ${accent}; font-family: Palatino, Georgia, serif; }
+  a { color: ${accent}; } pre { overflow: auto; padding: .75rem; background: ${sunken};
+    border: 1px solid ${line}; border-radius: 3px; }
+  blockquote { margin: .5rem 0; padding-left: .75rem; border-left: 3px solid ${accent}; color: ${muted}; }
   code { font-family: ui-monospace, monospace; font-size: .9em; }
 </style></head><body>${html}</body></html>`;
   if (reviewPreviewWin && !reviewPreviewWin.closed) {
@@ -1534,13 +1724,14 @@ function initReviewVditor(workId, msg) {
     });
 
   const editorHeight = Math.max(420, Math.round(window.innerHeight * 0.72));
+  const vditorDark = colorSchemeIsDark();
 
   reviewVditor = new Vditor("review-md-vditor", {
     cdn: VDITOR_CDN,
     height: editorHeight,
     minHeight: 360,
     mode: "ir",
-    theme: "dark",
+    theme: vditorDark ? "dark" : "classic",
     icon: "ant",
     typewriterMode: true,
     placeholder: "Loading…",
@@ -1549,7 +1740,7 @@ function initReviewVditor(workId, msg) {
     counter: { enable: true, type: "text" },
     outline: { enable: true, position: "left" },
     preview: {
-      theme: { current: "dark" },
+      theme: { current: vditorDark ? "dark" : "light" },
       hljs: { style: "native", lineNumber: true },
       math: { engine: "KaTeX", inlineDigit: true },
     },
@@ -2558,7 +2749,27 @@ function fillSettings() {
   const f = document.getElementById("settings-form");
   f.show_audio_gaps.checked = !!state.settings?.show_audio_gaps;
   f.reader_infinite_scroll.checked = !!state.settings?.reader_infinite_scroll;
+  renderThemeSwatches();
 }
+
+document.getElementById("theme-swatches")?.addEventListener("click", (e) => {
+  const btn = e.target.closest(".theme-swatch");
+  if (!btn) return;
+  persistUiTheme(btn.dataset.theme);
+});
+
+document.getElementById("btn-theme-import")?.addEventListener("click", async () => {
+  const ta = document.getElementById("theme-import-css");
+  const msg = document.getElementById("theme-import-msg");
+  try {
+    const { name, css } = parseDaisyTheme(ta.value);
+    await persistUiTheme(name, css);
+    renderThemeSwatches();
+    if (msg) msg.textContent = `Imported “${themeLabel(name)}” and saved.`;
+  } catch (err) {
+    if (msg) msg.textContent = err.message || String(err);
+  }
+});
 
 document.getElementById("settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -2571,6 +2782,7 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
     },
   });
   state.settings = await api("/api/settings");
+  hydrateUiThemeFromSettings(state.settings);
   alert("Saved");
 });
 

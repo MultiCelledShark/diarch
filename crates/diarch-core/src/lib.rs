@@ -569,6 +569,109 @@ impl ReaderTypography {
     }
 }
 
+const MAX_UI_THEME_CSS: usize = 16 * 1024;
+
+/// CSS `data-theme` name: `forest`, `mytheme`, …
+pub fn sanitize_ui_theme_name(name: &str) -> String {
+    let s = name.trim().to_ascii_lowercase();
+    let ok = (1..=40).contains(&s.len())
+        && s.starts_with(|c: char| c.is_ascii_alphabetic())
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if ok { s } else { "diarch".into() }
+}
+
+fn allowed_theme_prop(prop: &str) -> bool {
+    matches!(prop, "--border" | "--depth" | "--noise" | "--font-family")
+        || prop.starts_with("--color-")
+        || prop.starts_with("--radius-")
+        || prop.starts_with("--size-")
+}
+
+fn allowed_theme_css_value(val: &str) -> bool {
+    let v = val.trim();
+    if v.is_empty() || v.len() > 220 {
+        return false;
+    }
+    let lower = v.to_ascii_lowercase();
+    if lower.contains("url(")
+        || lower.contains("expression")
+        || lower.contains("javascript")
+        || lower.contains('@')
+        || lower.contains('<')
+        || lower.contains('>')
+        || lower.contains('{')
+        || lower.contains('}')
+        || lower.contains('\\')
+    {
+        return false;
+    }
+    v.chars().all(|c| c.is_ascii() && !c.is_ascii_control())
+}
+
+/// Rebuild a `[data-theme]` block from a daisyUI generator paste. Empty on junk.
+pub fn sanitize_ui_theme_css(name: &str, raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    if raw.len() > MAX_UI_THEME_CSS * 2 {
+        return String::new();
+    }
+    let name = sanitize_ui_theme_name(name);
+    let mut color_scheme: Option<&str> = None;
+    let lower = raw.to_ascii_lowercase();
+    if let Some(i) = lower.find("color-scheme") {
+        let slice = &lower[i..i.saturating_add(40).min(lower.len())];
+        if slice.contains("dark") {
+            color_scheme = Some("dark");
+        } else if slice.contains("light") {
+            color_scheme = Some("light");
+        }
+    }
+    let mut decls: Vec<(String, String)> = Vec::new();
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i + 2 < bytes.len() {
+        if bytes[i] == b'-' && bytes[i + 1] == b'-' {
+            let rest = &raw[i..];
+            let Some(colon) = rest.find(':') else { break };
+            let prop = rest[..colon].trim().to_ascii_lowercase();
+            let after = &rest[colon + 1..];
+            let Some(semi) = after.find(';') else { break };
+            let val = after[..semi].trim();
+            i += colon + 1 + semi + 1;
+            if allowed_theme_prop(&prop) && allowed_theme_css_value(val) {
+                if !decls.iter().any(|(p, _)| p == &prop) {
+                    decls.push((prop, val.to_string()));
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+    if decls.len() < 4 {
+        return String::new();
+    }
+    let mut out = format!("[data-theme=\"{name}\"] {{\n");
+    if let Some(cs) = color_scheme {
+        out.push_str("  color-scheme: ");
+        out.push_str(cs);
+        out.push_str(";\n");
+    }
+    for (prop, val) in decls {
+        out.push_str("  ");
+        out.push_str(&prop);
+        out.push_str(": ");
+        out.push_str(&val);
+        out.push_str(";\n");
+    }
+    out.push('}');
+    if out.len() > MAX_UI_THEME_CSS {
+        return String::new();
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -711,5 +814,48 @@ mod tests {
         assert_eq!(t.letter_spacing, "wide");
         assert_eq!(t.paragraph_spacing, "roomy");
         assert!(t.indent && t.hyphenate);
+    }
+
+    #[test]
+    fn ui_theme_name_sanitizes() {
+        assert_eq!(sanitize_ui_theme_name("Forest"), "forest");
+        assert_eq!(sanitize_ui_theme_name("my-theme"), "my-theme");
+        assert_eq!(sanitize_ui_theme_name("../x"), "diarch");
+        assert_eq!(sanitize_ui_theme_name(""), "diarch");
+        assert_eq!(sanitize_ui_theme_name("1bad"), "diarch");
+    }
+
+    #[test]
+    fn ui_theme_css_keeps_daisy_tokens() {
+        let css = sanitize_ui_theme_css(
+            "grove",
+            r#"@plugin "daisyui/theme" {
+              name: "grove";
+              color-scheme: dark;
+              --color-base-100: oklch(20% 0.02 140);
+              --color-base-200: oklch(18% 0.02 140);
+              --color-base-300: oklch(16% 0.02 140);
+              --color-base-content: oklch(90% 0.02 140);
+              --color-primary: #c4a35a;
+            }"#,
+        );
+        assert!(css.contains("[data-theme=\"grove\"]"));
+        assert!(css.contains("color-scheme: dark;"));
+        assert!(css.contains("--color-primary: #c4a35a;"));
+        assert!(!css.contains("@plugin"));
+    }
+
+    #[test]
+    fn ui_theme_css_rejects_url_and_markup() {
+        assert!(sanitize_ui_theme_css(
+            "x",
+            "--color-base-100: red; --color-base-200: url(https://evil); --color-base-300: a; --color-primary: b;"
+        )
+        .is_empty());
+        assert!(sanitize_ui_theme_css(
+            "x",
+            "--color-base-100: red; --color-base-200: </style>; --color-base-300: a; --color-primary: b;"
+        )
+        .is_empty());
     }
 }

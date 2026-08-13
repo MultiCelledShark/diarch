@@ -115,7 +115,9 @@ CREATE TABLE IF NOT EXISTS user_settings (
     user_id TEXT PRIMARY KEY NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     reader_infinite_scroll INTEGER NOT NULL DEFAULT 0,
     json_extra TEXT NOT NULL DEFAULT '{}',
-    reader_typography TEXT NOT NULL DEFAULT '{}'
+    reader_typography TEXT NOT NULL DEFAULT '{}',
+    ui_theme TEXT NOT NULL DEFAULT 'diarch',
+    ui_theme_css TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_works_status ON works(status);

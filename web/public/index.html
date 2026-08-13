@@ -1,9 +1,26 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="diarch">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Diarch</title>
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("diarch-ui-theme") || "diarch";
+        if (!/^[a-z][a-z0-9-]{0,39}$/.test(t)) t = "diarch";
+        document.documentElement.setAttribute("data-theme", t);
+        var css = localStorage.getItem("diarch-ui-theme-css");
+        if (css) {
+          var s = document.createElement("style");
+          s.id = "diarch-imported-theme";
+          s.textContent = css;
+          document.head.appendChild(s);
+        }
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="/assets/themes.css" />
   <link rel="stylesheet" href="/assets/app.css" />
   <!-- Heavy reader / barcode / MD preview CDNs load on demand from app.js -->
 </head>
@@ -203,6 +220,18 @@
         <div id="view-settings" class="view" hidden>
           <form id="settings-form" class="panel form-grid">
             <h2>Settings</h2>
+            <fieldset class="theme-picker">
+              <legend>Appearance</legend>
+              <p class="muted">Library chrome only — the ebook reader still has its own typography palettes. Swatches are daisyUI 5 color tokens. Build a custom palette in the <a href="https://daisyui.com/theme-generator/" target="_blank" rel="noopener noreferrer">daisyUI theme generator</a> and paste the CSS below.</p>
+              <div id="theme-swatches" class="theme-swatches"></div>
+              <label>Import daisyUI theme CSS
+                <textarea id="theme-import-css" rows="7" spellcheck="false" autocomplete="off" placeholder="@plugin &quot;daisyui/theme&quot; {&#10;  name: &quot;mytheme&quot;;&#10;  color-scheme: dark;&#10;  --color-base-100: oklch(…);&#10;  --color-primary: oklch(…);&#10;}"></textarea>
+              </label>
+              <div class="row">
+                <button type="button" id="btn-theme-import">Add imported theme</button>
+              </div>
+              <p id="theme-import-msg" class="muted" aria-live="polite"></p>
+            </fieldset>
             <label><input type="checkbox" name="show_audio_gaps" /> Show audio gap badges</label>
             <label><input type="checkbox" name="reader_infinite_scroll" /> Infinite scroll (Markdown) by default</label>
             <button type="submit">Save</button>

@@ -336,6 +336,59 @@ async fn progress_and_settings_persist() {
     assert_eq!(settings["reader_typography"]["paragraphSpacing"], "roomy");
     assert_eq!(settings["reader_typography"]["indent"], true);
     assert_eq!(settings["reader_typography"]["hyphenate"], true);
+    assert_eq!(settings["ui_theme"], "diarch");
+    assert_eq!(settings["ui_theme_css"], "");
+
+    let (status, _, _) = json_req(
+        &app,
+        "PUT",
+        "/api/settings",
+        Some(&token),
+        Some(json!({
+            "ui_theme": "Grove",
+            "ui_theme_css": "@plugin \"daisyui/theme\" { name: \"grove\"; color-scheme: dark; --color-base-100: oklch(20% 0.02 140); --color-base-200: oklch(18% 0.02 140); --color-base-300: oklch(16% 0.02 140); --color-primary: #c4a35a; }"
+        })),
+    )
+    .await;
+    assert_eq!(status, 204);
+    let (status, settings, _) = json_req(&app, "GET", "/api/settings", Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(settings["ui_theme"], "grove");
+    let css = settings["ui_theme_css"].as_str().unwrap();
+    assert!(css.contains("[data-theme=\"grove\"]"));
+    assert!(css.contains("--color-primary: #c4a35a;"));
+    assert!(!css.contains("@plugin"));
+
+    let (status, _, _) = json_req(
+        &app,
+        "PUT",
+        "/api/settings",
+        Some(&token),
+        Some(json!({ "ui_theme": "nord" })),
+    )
+    .await;
+    assert_eq!(status, 204);
+    let (status, settings, _) = json_req(&app, "GET", "/api/settings", Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(settings["ui_theme"], "nord");
+    assert!(settings["ui_theme_css"].as_str().unwrap().contains("grove"));
+
+    let (status, _, _) = json_req(
+        &app,
+        "PUT",
+        "/api/settings",
+        Some(&token),
+        Some(json!({
+            "ui_theme": "evil",
+            "ui_theme_css": "--color-base-100: red; --color-base-200: url(https://x); --color-base-300: a; --color-primary: b;"
+        })),
+    )
+    .await;
+    assert_eq!(status, 204);
+    let (status, settings, _) = json_req(&app, "GET", "/api/settings", Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(settings["ui_theme"], "evil");
+    assert_eq!(settings["ui_theme_css"], "");
 
     // Unknown enum values are sanitized to defaults.
     let (status, _, _) = json_req(

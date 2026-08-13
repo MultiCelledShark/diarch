@@ -52,6 +52,16 @@ impl Db {
         )
         .execute(&self.pool)
         .await;
+        let _ = sqlx::query(
+            "ALTER TABLE user_settings ADD COLUMN ui_theme TEXT NOT NULL DEFAULT 'diarch'",
+        )
+        .execute(&self.pool)
+        .await;
+        let _ = sqlx::query(
+            "ALTER TABLE user_settings ADD COLUMN ui_theme_css TEXT NOT NULL DEFAULT ''",
+        )
+        .execute(&self.pool)
+        .await;
         // Per-account shelves (Currently Reading / To Read / …).
         let user_shelf_sql = include_str!("migrations/002_user_work_status.sql");
         sqlx::raw_sql(user_shelf_sql)
@@ -950,6 +960,49 @@ impl Db {
         .bind(json)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    pub async fn get_ui_theme(&self, user_id: Uuid) -> Result<(String, String)> {
+        let row = sqlx::query("SELECT ui_theme, ui_theme_css FROM user_settings WHERE user_id = ?")
+            .bind(user_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row
+            .map(|r| {
+                (
+                    r.get::<String, _>("ui_theme"),
+                    r.get::<String, _>("ui_theme_css"),
+                )
+            })
+            .unwrap_or_else(|| ("diarch".into(), String::new())))
+    }
+
+    pub async fn set_ui_theme(&self, user_id: Uuid, name: &str, css: Option<&str>) -> Result<()> {
+        if let Some(css) = css {
+            sqlx::query(
+                "INSERT INTO user_settings (user_id, reader_infinite_scroll, ui_theme, ui_theme_css)
+                 VALUES (?, 0, ?, ?)
+                 ON CONFLICT(user_id) DO UPDATE SET
+                   ui_theme = excluded.ui_theme,
+                   ui_theme_css = excluded.ui_theme_css",
+            )
+            .bind(user_id.to_string())
+            .bind(name)
+            .bind(css)
+            .execute(&self.pool)
+            .await?;
+        } else {
+            sqlx::query(
+                "INSERT INTO user_settings (user_id, reader_infinite_scroll, ui_theme)
+                 VALUES (?, 0, ?)
+                 ON CONFLICT(user_id) DO UPDATE SET ui_theme = excluded.ui_theme",
+            )
+            .bind(user_id.to_string())
+            .bind(name)
+            .execute(&self.pool)
+            .await?;
+        }
         Ok(())
     }
 

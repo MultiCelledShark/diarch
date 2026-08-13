@@ -2483,6 +2483,8 @@ struct Settings {
     show_audio_gaps: bool,
     reader_infinite_scroll: bool,
     reader_typography: diarch_core::ReaderTypography,
+    ui_theme: String,
+    ui_theme_css: String,
 }
 
 async fn get_settings(
@@ -2499,10 +2501,17 @@ async fn get_settings(
         .get_reader_typography_json(user.id)
         .await
         .unwrap_or_else(|_| "{}".into());
+    let (ui_theme, ui_theme_css) = state
+        .db
+        .get_ui_theme(user.id)
+        .await
+        .unwrap_or_else(|_| ("diarch".into(), String::new()));
     Ok(Json(Settings {
         show_audio_gaps: user.show_audio_gaps && state.config.show_audio_gaps,
         reader_infinite_scroll: scroll,
         reader_typography: diarch_core::ReaderTypography::from_json_str(&typo_json),
+        ui_theme: diarch_core::sanitize_ui_theme_name(&ui_theme),
+        ui_theme_css,
     }))
 }
 
@@ -2511,6 +2520,8 @@ struct SettingsReq {
     show_audio_gaps: Option<bool>,
     reader_infinite_scroll: Option<bool>,
     reader_typography: Option<diarch_core::ReaderTypography>,
+    ui_theme: Option<String>,
+    ui_theme_css: Option<String>,
 }
 
 async fn put_settings(
@@ -2540,6 +2551,30 @@ async fn put_settings(
         state
             .db
             .set_reader_typography_json(user.id, &json)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    if body.ui_theme.is_some() || body.ui_theme_css.is_some() {
+        let name = if let Some(ref n) = body.ui_theme {
+            diarch_core::sanitize_ui_theme_name(n)
+        } else {
+            state
+                .db
+                .get_ui_theme(user.id)
+                .await
+                .map(|(n, _)| diarch_core::sanitize_ui_theme_name(&n))
+                .unwrap_or_else(|_| "diarch".into())
+        };
+        let css = body.ui_theme_css.as_deref().map(|raw| {
+            if raw.trim().is_empty() {
+                String::new()
+            } else {
+                diarch_core::sanitize_ui_theme_css(&name, raw)
+            }
+        });
+        state
+            .db
+            .set_ui_theme(user.id, &name, css.as_deref())
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
