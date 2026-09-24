@@ -45,6 +45,17 @@ class ApiClient {
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
 
+    /**
+     * Audiobook uploads (.m4b / .m4a) are hundreds of MB to a few GB and can take
+     * a long time on mobile networks. Idle timeouts stay finite so a dead socket
+     * still fails; there is no overall call deadline.
+     */
+    private val uploadHttp: OkHttpClient = okHttp.newBuilder()
+        .writeTimeout(10, TimeUnit.MINUTES)
+        .readTimeout(10, TimeUnit.MINUTES)
+        .callTimeout(0, TimeUnit.MILLISECONDS)
+        .build()
+
     @Volatile
     private var api: DiarchApi? = null
 
@@ -66,6 +77,9 @@ class ApiClient {
     /** Shared OkHttp client (already attaches the Authorization header). Used by the
      * reader WebView's shouldInterceptRequest to proxy content requests with auth. */
     fun httpClient(): OkHttpClient = okHttp
+
+    /** Same auth as [httpClient], with timeouts that allow a large audiobook upload. */
+    fun uploadClient(): OkHttpClient = uploadHttp
 
     fun coverUrl(workId: String, cacheBust: String? = null): String {
         val base = baseUrlRef.get().trimEnd('/')

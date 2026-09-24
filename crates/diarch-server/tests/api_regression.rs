@@ -1373,6 +1373,74 @@ async fn library_import_m4b_creates_work_with_audio() {
 }
 
 #[tokio::test]
+async fn library_import_m4a_streams_to_book_m4b() {
+    let (_dir, app, state) = test_app().await;
+    let token = login(&app, "admin", "adminpass1234").await;
+    // Larger than a single multipart chunk so the handler must stream, not buffer.
+    let mut fake = b"ftypM4A".to_vec();
+    fake.extend(std::iter::repeat(0xABu8).take(256 * 1024));
+    let boundary = "----libM4aBoundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"Hail Mary.m4a\"\r\nContent-Type: audio/mp4\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&fake);
+    body.extend_from_slice(
+        format!(
+            "\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nProject Hail Mary\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"authors\"\r\n\r\nAndy Weir\r\n--{boundary}--\r\n"
+        )
+        .as_bytes(),
+    );
+
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/library/import")
+        .header("cookie", format!("diarch_session={token}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), 201, "library m4a import");
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let j: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(j["kind"], "m4b");
+    assert!(j["job_id"].is_null());
+    assert_eq!(j["work"]["title"], "Project Hail Mary");
+    assert_eq!(j["work"]["authors"], "Andy Weir");
+    let id = j["work"]["id"].as_str().unwrap();
+    let wid = uuid::Uuid::parse_str(id).unwrap();
+
+    let stored = state.config.work_dir(wid).join("audio").join("book.m4b");
+    let on_disk = tokio::fs::read(&stored).await.unwrap();
+    assert_eq!(on_disk, fake);
+    assert!(!state
+        .config
+        .work_dir(wid)
+        .join("audio")
+        .join(".book.m4b.partial")
+        .exists());
+
+    let (status, detail, _) =
+        json_req(&app, "GET", &format!("/api/works/{id}"), Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(detail["work"]["needs_audio"], false);
+    let audio = detail["assets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["kind"] == "audio")
+        .expect("audio asset");
+    assert_eq!(audio["bytes"].as_i64(), Some(fake.len() as i64));
+    assert_eq!(audio["relative_path"], "audio/book.m4b");
+}
+
+#[tokio::test]
 async fn library_import_aax_without_key_fails() {
     let (_dir, app, _) = test_app().await;
     let token = login(&app, "admin", "adminpass1234").await;

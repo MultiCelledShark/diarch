@@ -1,5 +1,6 @@
 pub mod jobs;
 
+use axum::extract::multipart::Field;
 use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
@@ -13,8 +14,9 @@ use diarch_core::{
 };
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
-use std::path::Path as FsPath;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::auth::{AdminUser, AuthUser};
@@ -25,7 +27,9 @@ use crate::state::AppState;
 /// large uploads (library import, per-work import, audio upload) opt into a
 /// higher limit via their own sub-router below.
 const DEFAULT_BODY_LIMIT: usize = 32 * 1024 * 1024;
-const LARGE_UPLOAD_BODY_LIMIT: usize = 512 * 1024 * 1024;
+/// Single audiobooks are often 0.5–2 GiB. The handler streams them to disk,
+/// so this cap bounds disk use without holding the file in RAM.
+const LARGE_UPLOAD_BODY_LIMIT: usize = 8usize * 1024 * 1024 * 1024;
 
 #[derive(Embed)]
 #[folder = "../../web/dist/"]
@@ -835,6 +839,92 @@ async fn revoke_grant(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Stream a multipart file field to `dest` in chunks. A sibling `*.partial`
+/// file is renamed into place only after the body is fully written, so a
+/// dropped connection never leaves a truncated audiobook as `book.m4b`.
+async fn stream_multipart_to_file(
+    mut field: Field<'_>,
+    dest: &FsPath,
+) -> Result<u64, (StatusCode, String)> {
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent).await.map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "mkdir failed".to_string(),
+                )
+            })?;
+        }
+    }
+    let tmp_name = dest
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("upload");
+    let tmp = dest.with_file_name(format!(".{tmp_name}.partial"));
+    let mut file = tokio::fs::File::create(&tmp).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "create upload failed".to_string(),
+        )
+    })?;
+    let mut total: u64 = 0;
+    loop {
+        let next = match field.chunk().await {
+            Ok(chunk) => chunk,
+            Err(err) => {
+                drop(file);
+                let _ = tokio::fs::remove_file(&tmp).await;
+                let status = err.status();
+                let msg = if status == StatusCode::PAYLOAD_TOO_LARGE {
+                    "upload exceeds size limit".to_string()
+                } else {
+                    "bad file body".to_string()
+                };
+                return Err((status, msg));
+            }
+        };
+        let Some(chunk) = next else { break };
+        total = total.saturating_add(chunk.len() as u64);
+        if file.write_all(&chunk).await.is_err() {
+            drop(file);
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "write upload failed".to_string(),
+            ));
+        }
+    }
+    if file.flush().await.is_err() {
+        drop(file);
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "write upload failed".to_string(),
+        ));
+    }
+    drop(file);
+    if tokio::fs::rename(&tmp, dest).await.is_err() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store upload failed".to_string(),
+        ));
+    }
+    Ok(total)
+}
+
+async fn move_into_place(from: &FsPath, to: &FsPath) -> Result<(), std::io::Error> {
+    if let Some(parent) = to.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    if tokio::fs::rename(from, to).await.is_ok() {
+        return Ok(());
+    }
+    tokio::fs::copy(from, to).await?;
+    tokio::fs::remove_file(from).await?;
+    Ok(())
+}
+
 async fn import_file(
     AuthUser(user): AuthUser,
     State(state): State<Arc<AppState>>,
@@ -855,16 +945,16 @@ async fn import_file(
         .map_err(|_| StatusCode::BAD_REQUEST)?
     {
         let raw = field.file_name().unwrap_or("upload.bin").to_string();
-        let name = diarch_core::sanitize_upload_filename(&raw).map_err(|_| StatusCode::BAD_REQUEST)?;
-        let data = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+        let name =
+            diarch_core::sanitize_upload_filename(&raw).map_err(|_| StatusCode::BAD_REQUEST)?;
         let tmp = imports.join(format!("{id}-{name}"));
         // Ensure resolved path stays under imports/
         if !tmp.starts_with(&imports) {
             return Err(StatusCode::BAD_REQUEST);
         }
-        tokio::fs::write(&tmp, &data)
+        stream_multipart_to_file(field, &tmp)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| e.0)?;
         saved = Some((name, tmp));
     }
     let (name, path) = saved.ok_or(StatusCode::BAD_REQUEST)?;
@@ -887,16 +977,27 @@ async fn import_file(
 }
 
 /// Create a work and queue file import in one step (Library → Import).
-/// Accepts ebook (.epub/.pdf/.md) or audiobook (.m4b/.aax).
+/// Accepts ebook (.epub/.pdf/.md) or audiobook (.m4b/.m4a/.aax).
+/// The file is streamed to disk; audiobooks are too large to buffer.
 async fn library_import(
     AuthUser(user): AuthUser,
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
-    let mut saved: Option<(String, Vec<u8>)> = None;
+    let mut saved: Option<(String, PathBuf, u64)> = None;
     let mut primary_code: Option<i32> = None;
     let mut title_override: Option<String> = None;
     let mut authors_override: Option<String> = None;
+
+    // Id is known before the body so the upload can land in its final imports path.
+    let work_id = Uuid::new_v4();
+    let imports_dir = state.config.data_dir.join("imports");
+    tokio::fs::create_dir_all(&imports_dir).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "imports dir failed".into(),
+        )
+    })?;
 
     while let Some(field) = multipart
         .next_field()
@@ -906,14 +1007,44 @@ async fn library_import(
         let field_name = field.name().unwrap_or("").to_string();
         if field_name == "file" || field.file_name().is_some() {
             let raw = field.file_name().unwrap_or("book.epub").to_string();
-            let name = diarch_core::sanitize_upload_filename(&raw).map_err(|_| {
-                (StatusCode::BAD_REQUEST, "invalid filename".into())
-            })?;
-            let data = field
-                .bytes()
-                .await
-                .map_err(|_| (StatusCode::BAD_REQUEST, "bad file body".into()))?;
-            saved = Some((name, data.to_vec()));
+            let name = diarch_core::sanitize_upload_filename(&raw)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid filename".into()))?;
+            let lower = name.to_ascii_lowercase();
+            if lower.ends_with(".mp3") {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "MP3 is not supported; use .m4b or Audible .aax".into(),
+                ));
+            }
+            if lower.ends_with(".aax") {
+                if state.config.audible_key.as_deref().unwrap_or("").is_empty() {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "DIARCH_AUDIBLE_KEY is not set; cannot convert AAX".into(),
+                    ));
+                }
+                if !crate::audio::ffmpeg_available() {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "ffmpeg not found on PATH; required for AAX → M4B".into(),
+                    ));
+                }
+            }
+            let dest = imports_dir.join(format!("{work_id}-{name}"));
+            if !dest.starts_with(&imports_dir) {
+                return Err((StatusCode::BAD_REQUEST, "invalid import path".into()));
+            }
+            let nbytes = match stream_multipart_to_file(field, &dest).await {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&dest).await;
+                    return Err(e);
+                }
+            };
+            if let Some((_, prev, _)) = saved.take() {
+                let _ = tokio::fs::remove_file(prev).await;
+            }
+            saved = Some((name, dest, nbytes));
         } else if field_name == "primary_code" {
             let text = field.text().await.unwrap_or_default();
             primary_code = text.trim().parse().ok();
@@ -930,23 +1061,18 @@ async fn library_import(
         }
     }
 
-    let (name, data) = saved.ok_or((StatusCode::BAD_REQUEST, "file required".into()))?;
+    let (name, dest, _nbytes) = saved.ok_or((StatusCode::BAD_REQUEST, "file required".into()))?;
     let lower = name.to_ascii_lowercase();
-    if lower.ends_with(".mp3") {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "MP3 is not supported; use .m4b or Audible .aax".into(),
-        ));
-    }
     if lower.ends_with(".aax") || lower.ends_with(".m4b") || lower.ends_with(".m4a") {
         return library_import_audio(
             &state,
             &user,
             name,
-            data,
+            dest,
             title_override,
             authors_override,
             primary_code,
+            work_id,
         )
         .await;
     }
@@ -958,25 +1084,6 @@ async fn library_import(
         .replace('_', " ")
         .replace('-', " ");
 
-    // Generate the work id up front so we can write the upload straight to
-    // its final `imports/{id}-{name}` destination — no separate peek copy.
-    let work_id = Uuid::new_v4();
-    let imports_dir = state.config.data_dir.join("imports");
-    tokio::fs::create_dir_all(&imports_dir)
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "imports dir failed".into(),
-            )
-        })?;
-    let dest = imports_dir.join(format!("{work_id}-{name}"));
-    if !dest.starts_with(&imports_dir) {
-        return Err((StatusCode::BAD_REQUEST, "invalid import path".into()));
-    }
-    tokio::fs::write(&dest, &data)
-        .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "store import failed".into()))?;
     let meta = if lower.ends_with(".epub") {
         diarch_import::read_epub_metadata_async(&dest)
             .await
@@ -985,12 +1092,8 @@ async fn library_import(
         diarch_import::EpubMeta::default()
     };
 
-    let hint = crate::metadata::taxonomy_from_metadata(
-        &state,
-        meta.isbn.as_deref(),
-        &meta.subjects,
-    )
-    .await;
+    let hint =
+        crate::metadata::taxonomy_from_metadata(&state, meta.isbn.as_deref(), &meta.subjects).await;
 
     let now = Utc::now();
     let mut codes = hint.codes.clone();
@@ -1005,10 +1108,7 @@ async fn library_import(
     let is_manga = diarch_core::infer_manga(primary, &codes, false);
     let work = Work {
         id: work_id,
-        title: title_override
-            .or(meta.title)
-            .or(hint.title)
-            .unwrap_or(stem),
+        title: title_override.or(meta.title).or(hint.title).unwrap_or(stem),
         authors: authors_override
             .or(meta.authors)
             .or(hint.authors)
@@ -1020,11 +1120,7 @@ async fn library_import(
         year_list: None,
         rating: None,
         review: None,
-        reading_direction: if is_manga {
-            "rtl".into()
-        } else {
-            "ltr".into()
-        },
+        reading_direction: if is_manga { "rtl".into() } else { "ltr".into() },
         is_manga,
         needs_review: false,
         needs_cover: true,
@@ -1052,7 +1148,12 @@ async fn library_import(
         })?;
     tokio::fs::create_dir_all(state.config.work_dir(work.id))
         .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "mkdir work failed".into()))?;
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "mkdir work failed".into(),
+            )
+        })?;
     let svg = crate::metadata::placeholder_cover_svg(&work.title, &work.authors);
     let _ = tokio::fs::write(state.config.work_dir(work.id).join("cover.svg"), svg).await;
 
@@ -1060,7 +1161,12 @@ async fn library_import(
         .db
         .create_job("import", Some(work.id))
         .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "job create failed".into()))?;
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "job create failed".into(),
+            )
+        })?;
     let rel = format!("imports/{}-{}", work.id, name);
     let _ = state
         .db
@@ -1088,14 +1194,16 @@ async fn library_import(
 }
 
 /// Library Import for audiobook-only files: create work + attach M4B or queue AAX convert.
+/// `staged` is the upload already streamed under `imports/`.
 async fn library_import_audio(
     state: &Arc<AppState>,
     user: &User,
     name: String,
-    data: Vec<u8>,
+    staged: PathBuf,
     title_override: Option<String>,
     authors_override: Option<String>,
     primary_code: Option<i32>,
+    work_id: Uuid,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
     let lower = name.to_ascii_lowercase();
     let stem = FsPath::new(&name)
@@ -1108,12 +1216,14 @@ async fn library_import_audio(
     let is_aax = lower.ends_with(".aax");
     if is_aax {
         if state.config.audible_key.as_deref().unwrap_or("").is_empty() {
+            let _ = tokio::fs::remove_file(&staged).await;
             return Err((
                 StatusCode::BAD_REQUEST,
                 "DIARCH_AUDIBLE_KEY is not set; cannot convert AAX".into(),
             ));
         }
         if !crate::audio::ffmpeg_available() {
+            let _ = tokio::fs::remove_file(&staged).await;
             return Err((
                 StatusCode::BAD_REQUEST,
                 "ffmpeg not found on PATH; required for AAX → M4B".into(),
@@ -1125,7 +1235,7 @@ async fn library_import_audio(
     let codes = primary_code.map(|p| vec![p]).unwrap_or_default();
     let primary = primary_code.or_else(|| diarch_core::taxonomy::suggest_primary(&codes));
     let work = Work {
-        id: Uuid::new_v4(),
+        id: work_id,
         title: title_override.unwrap_or(stem),
         authors: authors_override.unwrap_or_default(),
         isbn: None,
@@ -1151,33 +1261,50 @@ async fn library_import_audio(
         created_at: now,
         updated_at: now,
     };
-    state
-        .db
-        .create_work(&work, &codes, Some(user.id))
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "create work failed".into(),
-            )
-        })?;
+    if let Err(err) = state.db.create_work(&work, &codes, Some(user.id)).await {
+        let _ = tokio::fs::remove_file(&staged).await;
+        tracing::warn!(error = %err, "create work failed");
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "create work failed".into(),
+        ));
+    }
     let work_dir = state.config.work_dir(work.id);
-    tokio::fs::create_dir_all(&work_dir)
-        .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "mkdir work failed".into()))?;
+    if let Err(err) = tokio::fs::create_dir_all(&work_dir).await {
+        let _ = tokio::fs::remove_file(&staged).await;
+        tracing::warn!(error = %err, "mkdir work failed");
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "mkdir work failed".into(),
+        ));
+    }
     let svg = crate::metadata::placeholder_cover_svg(&work.title, &work.authors);
     let _ = tokio::fs::write(work_dir.join("cover.svg"), svg).await;
 
+    let staged_len = tokio::fs::metadata(&staged)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+
     if is_aax {
         let aax_path = work_dir.join("import.aax");
-        tokio::fs::write(&aax_path, &data)
-            .await
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to store AAX".into()))?;
+        if let Err(err) = move_into_place(&staged, &aax_path).await {
+            tracing::warn!(error = %err, "failed to store AAX");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to store AAX".into(),
+            ));
+        }
         let job = state
             .db
             .create_job("aax_to_m4b", Some(work.id))
             .await
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "job create failed".into()))?;
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "job create failed".into(),
+                )
+            })?;
         let _ = state
             .db
             .update_job(job.id, "pending", Some("import.aax"))
@@ -1195,20 +1322,26 @@ async fn library_import_audio(
 
     // .m4b / .m4a → attach immediately as book.m4b
     let audio_dir = work_dir.join("audio");
-    tokio::fs::create_dir_all(&audio_dir)
-        .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "mkdir audio failed".into()))?;
-    let dest = audio_dir.join(crate::audio::BOOK_M4B);
-    tokio::fs::write(&dest, &data)
-        .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "write m4b failed".into()))?;
+    if let Err(err) = tokio::fs::create_dir_all(&audio_dir).await {
+        let _ = tokio::fs::remove_file(&staged).await;
+        tracing::warn!(error = %err, "mkdir audio failed");
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "mkdir audio failed".into(),
+        ));
+    }
+    let audio_dest = audio_dir.join(crate::audio::BOOK_M4B);
+    if let Err(err) = move_into_place(&staged, &audio_dest).await {
+        tracing::warn!(error = %err, "write m4b failed");
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "write m4b failed".into()));
+    }
     let asset = WorkAsset {
         id: Uuid::new_v4(),
         work_id: work.id,
         kind: AssetKind::Audio,
         relative_path: format!("audio/{}", crate::audio::BOOK_M4B),
         mime: Some("audio/mp4".into()),
-        bytes: Some(data.len() as i64),
+        bytes: Some(i64::try_from(staged_len).unwrap_or(i64::MAX)),
         created_at: Utc::now(),
     };
     let _ = state.db.add_asset(&asset).await;
@@ -1741,89 +1874,94 @@ async fn upload_audio(
         return Err((StatusCode::NOT_FOUND, "work not found".into()));
     }
 
-    let mut saved: Option<(String, Vec<u8>)> = None;
+    let work_dir = state.config.work_dir(id);
+    tokio::fs::create_dir_all(&work_dir).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "mkdir work failed".into(),
+        )
+    })?;
+
+    let mut saved: Option<(String, u64)> = None;
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|_| (StatusCode::BAD_REQUEST, "bad multipart".into()))?
     {
-        let name = field
-            .file_name()
-            .unwrap_or("book.m4b")
-            .to_string();
-        let data = field
-            .bytes()
-            .await
-            .map_err(|_| (StatusCode::BAD_REQUEST, "bad file body".into()))?;
-        saved = Some((name, data.to_vec()));
-    }
-    let (orig_name, data) = saved.ok_or((StatusCode::BAD_REQUEST, "file required".into()))?;
-    let lower = orig_name.to_ascii_lowercase();
-    let work_dir = state.config.work_dir(id);
-
-    if lower.ends_with(".mp3") {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "MP3 is not supported; upload .m4b or Audible .aax".into(),
-        ));
-    }
-
-    if lower.ends_with(".aax") {
-        if state.config.audible_key.as_deref().unwrap_or("").is_empty() {
+        if field.name() != Some("file") && field.file_name().is_none() {
+            // Drain text fields so the multipart parser can move on.
+            let _ = field.text().await;
+            continue;
+        }
+        let name = field.file_name().unwrap_or("book.m4b").to_string();
+        let lower = name.to_ascii_lowercase();
+        if lower.ends_with(".mp3") {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "DIARCH_AUDIBLE_KEY is not set; cannot convert AAX".into(),
+                "MP3 is not supported; upload .m4b or Audible .aax".into(),
             ));
         }
-        if !crate::audio::ffmpeg_available() {
+        if lower.ends_with(".aax") {
+            if state.config.audible_key.as_deref().unwrap_or("").is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "DIARCH_AUDIBLE_KEY is not set; cannot convert AAX".into(),
+                ));
+            }
+            if !crate::audio::ffmpeg_available() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "ffmpeg not found on PATH; required for AAX → M4B".into(),
+                ));
+            }
+            let aax_path = work_dir.join("import.aax");
+            stream_multipart_to_file(field, &aax_path).await?;
+            let job = state
+                .db
+                .create_job("aax_to_m4b", Some(id))
+                .await
+                .map_err(|_| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "job create failed".into(),
+                    )
+                })?;
+            let _ = state
+                .db
+                .update_job(job.id, "pending", Some("import.aax"))
+                .await;
+            return Ok(Json(serde_json::json!({
+                "job_id": job.id,
+                "kind": "aax_to_m4b",
+                "message": "Converting AAX → M4B"
+            })));
+        }
+        if !(lower.ends_with(".m4b") || lower.ends_with(".m4a")) {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "ffmpeg not found on PATH; required for AAX → M4B".into(),
+                "expected .m4b (preferred) or .aax; .m4a accepted as book.m4b".into(),
             ));
         }
-        let aax_path = work_dir.join("import.aax");
-        tokio::fs::write(&aax_path, &data)
-            .await
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to store AAX".into()))?;
-        let job = state
-            .db
-            .create_job("aax_to_m4b", Some(id))
-            .await
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "job create failed".into()))?;
-        let _ = state
-            .db
-            .update_job(job.id, "pending", Some("import.aax"))
-            .await;
-        return Ok(Json(serde_json::json!({
-            "job_id": job.id,
-            "kind": "aax_to_m4b",
-            "message": "Converting AAX → M4B"
-        })));
+        let audio_dir = work_dir.join("audio");
+        tokio::fs::create_dir_all(&audio_dir).await.map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "mkdir audio failed".into(),
+            )
+        })?;
+        let dest = audio_dir.join(crate::audio::BOOK_M4B);
+        let nbytes = stream_multipart_to_file(field, &dest).await?;
+        saved = Some((name, nbytes));
     }
-
-    if !(lower.ends_with(".m4b") || lower.ends_with(".m4a")) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "expected .m4b (preferred) or .aax; .m4a accepted as book.m4b".into(),
-        ));
-    }
-
-    let audio_dir = work_dir.join("audio");
-    tokio::fs::create_dir_all(&audio_dir)
-        .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "mkdir audio failed".into()))?;
+    let (_orig_name, nbytes) = saved.ok_or((StatusCode::BAD_REQUEST, "file required".into()))?;
     let filename = crate::audio::BOOK_M4B.to_string();
-    let dest = audio_dir.join(&filename);
-    tokio::fs::write(&dest, &data)
-        .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "write m4b failed".into()))?;
     let asset = WorkAsset {
         id: Uuid::new_v4(),
         work_id: id,
         kind: AssetKind::Audio,
         relative_path: format!("audio/{filename}"),
         mime: Some("audio/mp4".into()),
-        bytes: Some(data.len() as i64),
+        bytes: Some(i64::try_from(nbytes).unwrap_or(i64::MAX)),
         created_at: Utc::now(),
     };
     let _ = state.db.add_asset(&asset).await;
