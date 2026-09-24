@@ -1,11 +1,18 @@
 package app.diarch.android.data
 
+import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
-import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Request
+import okhttp3.RequestBody
+import okio.BufferedSink
 import retrofit2.HttpException
 import java.io.IOException
 
@@ -93,18 +100,32 @@ class LibraryRepository(
         }
     }
 
-    suspend fun importUri(uri: Uri, title: String?, authors: String?): ImportResponse {
-        val resolver = appContext.contentResolver
-        val name = queryDisplayName(uri) ?: "upload.bin"
-        val mime = resolver.getType(uri) ?: "application/octet-stream"
-        val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
-            ?: throw IOException("Could not read selected file")
-        val body = bytes.toRequestBody(mime.toMediaTypeOrNull())
-        val part = MultipartBody.Part.createFormData("file", name, body)
-        val titleBody = title?.takeIf { it.isNotBlank() }?.toRequestBody("text/plain".toMediaTypeOrNull())
-        val authorsBody = authors?.takeIf { it.isNotBlank() }?.toRequestBody("text/plain".toMediaTypeOrNull())
-        return apiClient.api().importFile(part, titleBody, authorsBody)
-    }
+    suspend fun importUri(uri: Uri, title: String?, authors: String?): ImportResponse =
+        withContext(Dispatchers.IO) {
+            val resolver = appContext.contentResolver
+            val name = queryDisplayName(uri) ?: "upload.bin"
+            val mime = resolver.getType(uri) ?: "application/octet-stream"
+            val length = querySize(uri)
+            // Stream the content URI. Audiobooks do not fit in the app heap, and
+            // reading them on the main thread ANRs the process.
+            val fileBody = ContentUriRequestBody(resolver, uri, mime.toMediaTypeOrNull(), length)
+            val multipart = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("file", name, fileBody)
+            title?.takeIf { it.isNotBlank() }?.let { multipart.addFormDataPart("title", it) }
+            authors?.takeIf { it.isNotBlank() }?.let { multipart.addFormDataPart("authors", it) }
+            val request = Request.Builder()
+                .url("${apiClient.baseUrl()}/api/library/import")
+                .post(multipart.build())
+                .build()
+            apiClient.uploadClient().newCall(request).execute().use { response ->
+                val text = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    throw IOException(text.ifBlank { "Import failed (${response.code})" })
+                }
+                importJson.decodeFromString(ImportResponse.serializer(), text)
+            }
+        }
 
     suspend fun getSettings(): UserSettings =
         runCatching { apiClient.api().getSettings() }.getOrElse {
@@ -173,6 +194,56 @@ class LibraryRepository(
             if (idx >= 0 && it.moveToFirst()) return it.getString(idx)
         }
         return null
+    }
+
+    private fun querySize(uri: Uri): Long {
+        val cursor = appContext.contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.SIZE),
+            null,
+            null,
+            null,
+        ) ?: return -1L
+        cursor.use {
+            val idx = it.getColumnIndex(OpenableColumns.SIZE)
+            if (idx >= 0 && it.moveToFirst() && !it.isNull(idx)) return it.getLong(idx)
+        }
+        return -1L
+    }
+
+    private companion object {
+        val importJson = Json {
+            ignoreUnknownKeys = true
+            isLenient = true
+        }
+    }
+}
+
+/**
+ * Reads a content URI straight into the request sink. [writeTo] may run more
+ * than once (retry), so each call reopens the stream instead of buffering.
+ */
+private class ContentUriRequestBody(
+    private val resolver: ContentResolver,
+    private val uri: Uri,
+    private val mime: MediaType?,
+    private val length: Long,
+) : RequestBody() {
+    override fun contentType(): MediaType? = mime
+
+    override fun contentLength(): Long = if (length > 0) length else -1L
+
+    override fun writeTo(sink: BufferedSink) {
+        val input = resolver.openInputStream(uri)
+            ?: throw IOException("Could not read selected file")
+        input.use { stream ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = stream.read(buf)
+                if (n < 0) break
+                if (n > 0) sink.write(buf, 0, n)
+            }
+        }
     }
 }
 
