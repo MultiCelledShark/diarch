@@ -6,12 +6,13 @@ import app.diarch.android.data.LibraryRepository
 import app.diarch.android.data.OfflineStore
 import app.diarch.android.data.SessionStore
 import app.diarch.android.data.UpdateChecker
-import coil.ImageLoader
-import coil.ImageLoaderFactory
-import coil.request.ImageRequest
+import coil3.ImageLoader
+import coil3.PlatformContext
+import coil3.SingletonImageLoader
+import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import okhttp3.OkHttpClient
 
-class DiarchApp : Application(), ImageLoaderFactory {
+class DiarchApp : Application(), SingletonImageLoader.Factory {
     lateinit var sessionStore: SessionStore
         private set
     lateinit var apiClient: ApiClient
@@ -33,7 +34,7 @@ class DiarchApp : Application(), ImageLoaderFactory {
         updateChecker = UpdateChecker(this)
     }
 
-    override fun newImageLoader(): ImageLoader {
+    override fun newImageLoader(context: PlatformContext): ImageLoader {
         val client = OkHttpClient.Builder()
             .addInterceptor { chain ->
                 val token = apiClient.authHeader()
@@ -45,8 +46,10 @@ class DiarchApp : Application(), ImageLoaderFactory {
                 chain.proceed(req)
             }
             .build()
-        return ImageLoader.Builder(this)
-            .okHttpClient(client)
+        return ImageLoader.Builder(context)
+            .components {
+                add(OkHttpNetworkFetcherFactory(callFactory = client))
+            }
             .build()
     }
 

@@ -24,8 +24,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.NavigateBefore
 import androidx.compose.material.icons.automirrored.filled.NavigateNext
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.FormatSize
-import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material3.Checkbox
@@ -310,7 +310,7 @@ fun ReaderScreen(
                         }
                         DropdownMenuItem(
                             text = { Text("Contents") },
-                            leadingIcon = { Icon(Icons.Default.List, null) },
+                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.List, null) },
                             onClick = {
                                 menuOpen = false
                                 showToc = true
@@ -730,17 +730,6 @@ private fun contentProxyResponse(request: WebResourceRequest): WebResourceRespon
         val okRequest = Request.Builder().url(url.toString()).build()
         val response = apiClient.httpClient().newCall(okRequest).execute()
         val body = response.body
-        if (body == null) {
-            response.close()
-            return WebResourceResponse(
-                "text/plain",
-                "utf-8",
-                502,
-                "Bad Gateway",
-                headers,
-                ByteArray(0).inputStream(),
-            )
-        }
         val mediaType = body.contentType()
         val mime = mediaType?.let { "${it.type}/${it.subtype}" } ?: "application/octet-stream"
         val charset = mediaType?.charset()?.name()

@@ -170,7 +170,7 @@ function loadCssOnce(href) {
 
 async function ensureEpubLibs() {
   await loadScriptOnce(
-    "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js",
+    "https://cdn.jsdelivr.net/npm/jszip@3.10.2/dist/jszip.min.js",
     () => typeof JSZip !== "undefined"
   );
   await loadScriptOnce(
@@ -181,24 +181,24 @@ async function ensureEpubLibs() {
 
 async function ensureMarkedLibs() {
   await loadScriptOnce(
-    "https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js",
+    "https://cdn.jsdelivr.net/npm/marked@18.0.14/lib/marked.umd.js",
     () => typeof marked !== "undefined"
   );
   await loadScriptOnce(
-    "https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js",
+    "https://cdn.jsdelivr.net/npm/dompurify@3.4.16/dist/purify.min.js",
     () => typeof DOMPurify !== "undefined"
   );
 }
 
 async function ensureVditor() {
-  const cdn = "https://cdn.jsdelivr.net/npm/vditor@3.10.9";
+  const cdn = "https://cdn.jsdelivr.net/npm/vditor@4.0.0";
   await loadCssOnce(`${cdn}/dist/index.css`);
   await loadScriptOnce(`${cdn}/dist/index.min.js`, () => typeof Vditor !== "undefined");
 }
 
 async function ensureZxing() {
   await loadScriptOnce(
-    "https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js",
+    "https://cdn.jsdelivr.net/npm/@zxing/library@0.23.0/umd/index.min.js",
     () => typeof ZXing !== "undefined"
   );
 }
@@ -1346,7 +1346,7 @@ let reviewSavedText = "";
 let reviewPreviewWin = null;
 let reviewVditor = null;
 let reviewFindFrom = 0;
-const VDITOR_CDN = "https://cdn.jsdelivr.net/npm/vditor@3.10.9";
+const VDITOR_CDN = "https://cdn.jsdelivr.net/npm/vditor@4.0.0";
 
 function destroyReviewEditor() {
   if (!reviewVditor) return;

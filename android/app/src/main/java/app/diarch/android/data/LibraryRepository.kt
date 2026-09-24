@@ -119,7 +119,7 @@ class LibraryRepository(
                 .post(multipart.build())
                 .build()
             apiClient.uploadClient().newCall(request).execute().use { response ->
-                val text = response.body?.string().orEmpty()
+                val text = response.body.string()
                 if (!response.isSuccessful) {
                     throw IOException(text.ifBlank { "Import failed (${response.code})" })
                 }

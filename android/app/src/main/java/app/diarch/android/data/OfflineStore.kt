@@ -250,7 +250,7 @@ class OfflineStore(
             if (!resp.isSuccessful) {
                 throw IOException("Download failed (${resp.code}) for ${dest.name}")
             }
-            val body = resp.body ?: throw IOException("Empty body for ${dest.name}")
+            val body = resp.body
             dest.parentFile?.mkdirs()
             val tmp = File(dest.parentFile, "${dest.name}.part")
             body.byteStream().use { input ->

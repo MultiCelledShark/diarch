@@ -119,7 +119,7 @@ class UpdateChecker(private val context: Context) {
             if (!resp.isSuccessful) {
                 throw IOException("Download failed (HTTP ${resp.code})")
             }
-            val body = resp.body ?: throw IOException("Empty APK response")
+            val body = resp.body
             val total = body.contentLength()
             body.byteStream().use { input ->
                 tmp.outputStream().use { output ->
@@ -193,7 +193,7 @@ class UpdateChecker(private val context: Context) {
             if (!resp.isSuccessful) {
                 throw IOException("Update check failed (HTTP ${resp.code})")
             }
-            val body = resp.body?.string() ?: return null
+            val body = resp.body.string()
             return json.decodeFromString(ForgejoRelease.serializer(), body)
         }
     }

@@ -25,7 +25,7 @@ Kotlin, Jetpack Compose, Material 3, Navigation, Retrofit/OkHttp, DataStore, Coi
 
 ## Build
 
-Requires JDK 17+ and Android SDK (compile/target 36). Builds **arm64-v8a only** (Fairphone 6 / modern phones).
+Requires JDK 21 and Android SDK (compile 37.2 / target 37). Builds **arm64-v8a only** (Fairphone 6 / modern phones).
 
 ```bash
 cd android

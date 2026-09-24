@@ -44,8 +44,9 @@ import app.diarch.android.data.Shelf
 import app.diarch.android.data.ShelfFullException
 import app.diarch.android.data.Work
 import app.diarch.android.data.WorkDetailResponse
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
+import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.request.crossfade
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)

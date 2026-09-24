@@ -588,10 +588,12 @@ mod tests {
 
     #[test]
     fn config_show_audio_gaps_env() {
-        std::env::set_var("DIARCH_SHOW_AUDIO_GAPS", "off");
+        // SAFETY: this test owns the process environment and does not run in parallel
+        // with other tests that read DIARCH_SHOW_AUDIO_GAPS.
+        unsafe { std::env::set_var("DIARCH_SHOW_AUDIO_GAPS", "off") };
         let c = Config::from_env();
         assert!(!c.show_audio_gaps);
-        std::env::remove_var("DIARCH_SHOW_AUDIO_GAPS");
+        unsafe { std::env::remove_var("DIARCH_SHOW_AUDIO_GAPS") };
     }
 
     #[test]
