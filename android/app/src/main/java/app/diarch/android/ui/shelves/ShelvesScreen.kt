@@ -23,8 +23,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.LibraryBooks
-import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.automirrored.filled.LibraryBooks
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
@@ -61,8 +61,9 @@ import app.diarch.android.DiarchApp
 import app.diarch.android.data.Shelf
 import app.diarch.android.data.Work
 import app.diarch.android.ui.update.UpdateCheckTrigger
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
+import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.request.crossfade
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -171,9 +172,9 @@ fun ShelvesScreen(
                         icon = {
                             Icon(
                                 when (s) {
-                                    Shelf.Reading -> Icons.Default.MenuBook
+                                    Shelf.Reading -> Icons.AutoMirrored.Filled.MenuBook
                                     Shelf.ToRead -> Icons.Default.Schedule
-                                    Shelf.Library -> Icons.Default.LibraryBooks
+                                    Shelf.Library -> Icons.AutoMirrored.Filled.LibraryBooks
                                     Shelf.Wishlist -> Icons.Default.FavoriteBorder
                                     Shelf.Finished -> Icons.Default.DoneAll
                                 },

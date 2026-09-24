@@ -9,7 +9,8 @@ use tower::ServiceExt;
 
 async fn test_app() -> (tempfile::TempDir, axum::Router, Arc<diarch_server::state::AppState>) {
     // Avoid hanging auth tests on outbound StoryGraph / Cloudflare.
-    std::env::set_var("DIARCH_STORYGRAPH_SKIP_LIVE_CHECK", "1");
+    // SAFETY: process-wide and only used by this test harness before the app starts.
+    unsafe { std::env::set_var("DIARCH_STORYGRAPH_SKIP_LIVE_CHECK", "1") };
     let dir = tempdir().unwrap();
     let config = Config {
         listen: "127.0.0.1:0".into(),
@@ -1038,7 +1039,7 @@ async fn cover_candidate_approve_and_discard() {
     let wid: uuid::Uuid = id.parse().unwrap();
 
     // Without LocalAI, generate reports not configured.
-    let (status, gen, _) = json_req(
+    let (status, generated, _) = json_req(
         &app,
         "POST",
         &format!("/api/works/{id}/cover/generate"),
@@ -1047,8 +1048,8 @@ async fn cover_candidate_approve_and_discard() {
     )
     .await;
     assert_eq!(status, 200);
-    assert_eq!(gen["ok"], false);
-    assert!(gen["prompt"].as_str().unwrap().contains("Cover Stage"));
+    assert_eq!(generated["ok"], false);
+    assert!(generated["prompt"].as_str().unwrap().contains("Cover Stage"));
 
     // Stage a candidate on disk as LocalAI would.
     let candidate = state

@@ -180,14 +180,16 @@ mod tests {
 
     #[test]
     fn client_ip_ignores_xff_unless_trust_proxy_set() {
-        std::env::remove_var("DIARCH_TRUST_PROXY");
+        // SAFETY: this test owns the process environment and does not run in parallel
+        // with other tests that read DIARCH_TRUST_PROXY.
+        unsafe { std::env::remove_var("DIARCH_TRUST_PROXY") };
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "9.9.9.9".parse().unwrap());
         let ip: IpAddr = "127.0.0.1".parse().unwrap();
         assert_eq!(client_ip(&headers, Some(ip)), "127.0.0.1");
 
-        std::env::set_var("DIARCH_TRUST_PROXY", "1");
+        unsafe { std::env::set_var("DIARCH_TRUST_PROXY", "1") };
         assert_eq!(client_ip(&headers, Some(ip)), "9.9.9.9");
-        std::env::remove_var("DIARCH_TRUST_PROXY");
+        unsafe { std::env::remove_var("DIARCH_TRUST_PROXY") };
     }
 }

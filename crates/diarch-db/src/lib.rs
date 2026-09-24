@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::phc::PasswordHash;
+use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::Argon2;
 use chrono::{Duration, Utc};
 use diarch_core::taxonomy::{flatten, SeedNode};
@@ -7,8 +8,8 @@ use diarch_core::{
     AssetKind, IntegrationHealth, Job, ReadingProgress, ReadingStatus, TaxonomyNode, User, Work,
     WorkAsset,
 };
-use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::rngs::SysRng;
+use rand::TryRng;
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -166,9 +167,8 @@ impl Db {
     }
 
     pub fn hash_password(password: &str) -> Result<String> {
-        let salt = SaltString::generate(&mut OsRng);
         let hash = Argon2::default()
-            .hash_password(password.as_bytes(), &salt)
+            .hash_password(password.as_bytes())
             .map_err(|e| anyhow!("hash: {e}"))?
             .to_string();
         Ok(hash)
@@ -253,7 +253,9 @@ impl Db {
 
     pub async fn create_session(&self, user_id: Uuid, days: i64) -> Result<String> {
         let mut raw = [0u8; 32];
-        OsRng.fill_bytes(&mut raw);
+        SysRng
+            .try_fill_bytes(&mut raw)
+            .map_err(|e| anyhow!("rng: {e}"))?;
         let token = hex::encode(raw);
         let now = Utc::now();
         let exp = now + Duration::days(days);
@@ -1022,7 +1024,7 @@ fn like_contains_pattern(q: &str) -> String {
     out
 }
 
-fn push_works_text_search(qb: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>, pattern: Option<&str>) {
+fn push_works_text_search(qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>, pattern: Option<&str>) {
     let Some(pat) = pattern else { return };
     qb.push(
         " AND (
