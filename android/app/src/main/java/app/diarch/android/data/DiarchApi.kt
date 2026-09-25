@@ -58,6 +58,9 @@ interface DiarchApi {
     @GET("api/works/{id}/audio/chapters")
     suspend fun audioChapters(@Path("id") id: String): AudioChaptersResponse
 
+    @GET("api/jobs/{id}")
+    suspend fun getJob(@Path("id") id: String): JobStatus
+
     @POST("api/wishlist")
     suspend fun addWishlist(@Body body: WishlistRequest): Work
 }

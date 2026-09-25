@@ -1,5 +1,8 @@
 package app.diarch.android.ui.detail
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -63,6 +66,7 @@ fun WorkDetailScreen(
     var offlineBusy by remember { mutableStateOf(false) }
     var offlineStatus by remember { mutableStateOf("") }
     var isOffline by remember { mutableStateOf(false) }
+    var coverBump by remember { mutableStateOf(0) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val repo = DiarchApp.instance.repository
@@ -88,6 +92,25 @@ fun WorkDetailScreen(
     }
 
     LaunchedEffect(workId) { reload() }
+
+    val coverPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { picked: Uri? ->
+        if (picked == null) return@rememberLauncherForActivityResult
+        busy = true
+        scope.launch {
+            try {
+                repo.uploadCover(workId, picked)
+                coverBump += 1
+                detail = repo.getWork(workId)
+                snackbar.showSnackbar("Cover updated")
+            } catch (e: Exception) {
+                snackbar.showSnackbar(e.message ?: "Cover upload failed")
+            } finally {
+                busy = false
+            }
+        }
+    }
 
     val work = detail?.work
     val hasEpub = detail?.resolvedHasEpub == true
@@ -123,7 +146,8 @@ fun WorkDetailScreen(
             return@Scaffold
         }
 
-        val offlineCover = remember(work.id) { offline.localCoverUri(work.id) }
+        val offlineCover = remember(work.id, coverBump) { offline.localCoverUri(work.id) }
+        val coverCacheKey = "${work.updatedAt}-$coverBump"
 
         Column(
             modifier = Modifier
@@ -135,7 +159,7 @@ fun WorkDetailScreen(
             Row(modifier = Modifier.fillMaxWidth()) {
                 AsyncImage(
                     model = ImageRequest.Builder(context)
-                        .data(offlineCover ?: repo.coverUrl(work.id, work.updatedAt))
+                        .data(offlineCover ?: repo.coverUrl(work.id, coverCacheKey))
                         .crossfade(true)
                         .build(),
                     contentDescription = null,
@@ -189,6 +213,19 @@ fun WorkDetailScreen(
                 }
                 Spacer(modifier = Modifier.height(8.dp))
             }
+
+            OutlinedButton(
+                onClick = {
+                    coverPicker.launch(
+                        arrayOf("image/jpeg", "image/png", "image/webp"),
+                    )
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !busy,
+            ) {
+                Text("Change cover…")
+            }
+            Spacer(modifier = Modifier.height(8.dp))
 
             if (hasEpub || hasMd || hasAudio) {
                 if (isOffline) {

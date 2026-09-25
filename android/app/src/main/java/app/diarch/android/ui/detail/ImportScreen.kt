@@ -43,9 +43,12 @@ fun ImportScreen(
 ) {
     var uri by remember { mutableStateOf<Uri?>(null) }
     var fileName by remember { mutableStateOf<String?>(null) }
+    var coverUri by remember { mutableStateOf<Uri?>(null) }
+    var coverName by remember { mutableStateOf<String?>(null) }
     var title by remember { mutableStateOf("") }
     var authors by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val repo = DiarchApp.instance.repository
@@ -55,6 +58,14 @@ fun ImportScreen(
     ) { picked ->
         uri = picked
         fileName = picked?.lastPathSegment
+        error = null
+    }
+
+    val coverPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { picked ->
+        coverUri = picked
+        coverName = picked?.lastPathSegment
         error = null
     }
 
@@ -105,6 +116,26 @@ fun ImportScreen(
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(fileName!!, style = MaterialTheme.typography.bodyLarge)
             }
+            Spacer(modifier = Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = {
+                    coverPicker.launch(
+                        arrayOf(
+                            "image/jpeg",
+                            "image/png",
+                            "image/webp",
+                        ),
+                    )
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !loading,
+            ) {
+                Text(if (coverUri == null) "Attach cover (optional)" else "Change cover")
+            }
+            if (coverName != null) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(coverName!!, style = MaterialTheme.typography.bodyMedium)
+            }
             Spacer(modifier = Modifier.height(16.dp))
             OutlinedTextField(
                 value = title,
@@ -121,6 +152,10 @@ fun ImportScreen(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
+            if (status != null && error == null) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(status!!, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             if (error != null) {
                 Spacer(modifier = Modifier.height(12.dp))
                 Text(error!!, color = MaterialTheme.colorScheme.error)
@@ -131,13 +166,15 @@ fun ImportScreen(
                     val picked = uri ?: return@Button
                     loading = true
                     error = null
+                    status = "Uploading…"
                     scope.launch {
                         try {
                             val res = repo.importUri(
                                 picked,
                                 title.takeIf { it.isNotBlank() },
                                 authors.takeIf { it.isNotBlank() },
-                            )
+                                coverUri,
+                            ) { status = it }
                             onImported(res.work.id)
                         } catch (e: HttpException) {
                             error = e.response()?.errorBody()?.string()
