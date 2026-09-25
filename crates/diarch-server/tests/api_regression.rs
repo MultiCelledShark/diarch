@@ -1849,3 +1849,236 @@ async fn storygraph_status_and_auth_save_credentials() {
     assert!(text.contains("cf_clearance=clearme1234"));
     assert!(text.contains("user_agent: Mozilla/5.0 TestAgent"));
 }
+
+/// Mobile content URIs often report `upload.bin` (or no extension) while still
+/// sending `Content-Type: application/epub+zip`. Import must resolve the format.
+#[tokio::test]
+async fn library_import_extensionless_epub_uses_mime() {
+    let dir = tempfile::tempdir().unwrap();
+    let epub_path = dir.path().join("sample.epub");
+    {
+        let file = std::fs::File::create(&epub_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file("mimetype", opts).unwrap();
+        use std::io::Write;
+        zip.write_all(b"application/epub+zip").unwrap();
+        zip.start_file("META-INF/container.xml", opts).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0"?><container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#,
+        )
+        .unwrap();
+        zip.start_file("content.opf", opts).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0"?>
+<package>
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Mobile Mime Sample</dc:title>
+    <dc:creator>Phone Author</dc:creator>
+  </metadata>
+  <manifest><item id="c1" href="chap.html" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#,
+        )
+        .unwrap();
+        zip.start_file("chap.html", opts).unwrap();
+        zip.write_all(b"<html><body><p>Hello mime.</p></body></html>")
+            .unwrap();
+        zip.finish().unwrap();
+    }
+
+    let (_td, app, state) = test_app().await;
+    let token = login(&app, "admin", "adminpass1234").await;
+    let bytes = std::fs::read(&epub_path).unwrap();
+    let boundary = "----mimeEpubBoundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"upload.bin\"\r\nContent-Type: application/epub+zip\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/library/import")
+        .header("cookie", format!("diarch_session={token}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), 201, "extensionless epub via MIME");
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let j: Value = serde_json::from_slice(&bytes).unwrap();
+    let job_id = j["job_id"].as_str().unwrap();
+    let work_id = j["work"]["id"].as_str().unwrap();
+    assert_eq!(j["work"]["title"], "Mobile Mime Sample");
+
+    for _ in 0..40 {
+        routes::jobs::process_one(&state).await.unwrap();
+        let job = state
+            .db
+            .get_job(uuid::Uuid::parse_str(job_id).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        if job.status == "done" || job.status == "failed" {
+            assert_eq!(job.status, "done", "{:?}", job.detail);
+            break;
+        }
+    }
+
+    let (status, detail, _) =
+        json_req(&app, "GET", &format!("/api/works/{work_id}"), Some(&token), None).await;
+    assert_eq!(status, 200);
+    let kinds: Vec<_> = detail["assets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["kind"].as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"epub"), "{kinds:?}");
+}
+
+#[tokio::test]
+async fn library_import_with_cover_and_direct_cover_upload() {
+    let dir = tempfile::tempdir().unwrap();
+    let epub_path = dir.path().join("sample.epub");
+    {
+        let file = std::fs::File::create(&epub_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file("mimetype", opts).unwrap();
+        use std::io::Write;
+        zip.write_all(b"application/epub+zip").unwrap();
+        zip.start_file("META-INF/container.xml", opts).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0"?><container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#,
+        )
+        .unwrap();
+        zip.start_file("content.opf", opts).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0"?>
+<package>
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Cover Attach Sample</dc:title>
+    <dc:creator>Cover Author</dc:creator>
+  </metadata>
+  <manifest><item id="c1" href="chap.html" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#,
+        )
+        .unwrap();
+        zip.start_file("chap.html", opts).unwrap();
+        zip.write_all(b"<html><body><p>Cover test.</p></body></html>")
+            .unwrap();
+        zip.finish().unwrap();
+    }
+
+    let (_td, app, state) = test_app().await;
+    let token = login(&app, "admin", "adminpass1234").await;
+    let epub_bytes = std::fs::read(&epub_path).unwrap();
+    let mut jpeg = vec![0xFFu8, 0xD8, 0xFF, 0xE0];
+    jpeg.extend_from_slice(b"user-attached-cover");
+
+    let boundary = "----coverImportBoundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"book.epub\"\r\nContent-Type: application/epub+zip\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&epub_bytes);
+    body.extend_from_slice(
+        format!(
+            "\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"cover\"; filename=\"cover.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&jpeg);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/library/import")
+        .header("cookie", format!("diarch_session={token}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), 201, "import with cover");
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let j: Value = serde_json::from_slice(&bytes).unwrap();
+    let job_id = j["job_id"].as_str().unwrap();
+    let work_id = j["work"]["id"].as_str().unwrap();
+    let wid = uuid::Uuid::parse_str(work_id).unwrap();
+
+    assert!(
+        state.config.work_dir(wid).join("cover.jpg").exists(),
+        "user cover should be written before the import job runs"
+    );
+    let on_disk = tokio::fs::read(state.config.work_dir(wid).join("cover.jpg"))
+        .await
+        .unwrap();
+    assert_eq!(on_disk, jpeg);
+
+    for _ in 0..40 {
+        routes::jobs::process_one(&state).await.unwrap();
+        let job = state
+            .db
+            .get_job(uuid::Uuid::parse_str(job_id).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        if job.status == "done" || job.status == "failed" {
+            assert_eq!(job.status, "done", "{:?}", job.detail);
+            break;
+        }
+    }
+
+    // User-attached cover must survive the import job (no clobber from EPUB extract).
+    let after = tokio::fs::read(state.config.work_dir(wid).join("cover.jpg"))
+        .await
+        .unwrap();
+    assert_eq!(after, jpeg);
+    assert!(!state.config.work_dir(wid).join(".user_cover").exists());
+
+    // Direct cover replace via POST /cover.
+    let mut jpeg2 = vec![0xFFu8, 0xD8, 0xFF, 0xE0];
+    jpeg2.extend_from_slice(b"replacement-cover");
+    let boundary2 = "----directCoverBoundary";
+    let mut body2 = Vec::new();
+    body2.extend_from_slice(
+        format!(
+            "--{boundary2}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"new.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body2.extend_from_slice(&jpeg2);
+    body2.extend_from_slice(format!("\r\n--{boundary2}--\r\n").as_bytes());
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("/api/works/{work_id}/cover"))
+        .header("cookie", format!("diarch_session={token}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary2}"),
+        )
+        .body(Body::from(body2))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), 204, "direct cover upload");
+    let replaced = tokio::fs::read(state.config.work_dir(wid).join("cover.jpg"))
+        .await
+        .unwrap();
+    assert_eq!(replaced, jpeg2);
+}

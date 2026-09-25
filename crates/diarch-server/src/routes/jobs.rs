@@ -99,9 +99,33 @@ async fn run_import(state: &Arc<AppState>, job: &diarch_core::Job) -> Result<Opt
         libc_nice(10);
     }
 
+    let work_dir = state.config.work_dir(work_id);
+    let user_cover_marker = work_dir.join(".user_cover");
+    let preserved_user_cover = if user_cover_marker.exists() {
+        let cover = work_dir.join("cover.jpg");
+        if cover.exists() {
+            tokio::fs::read(&cover).await.ok()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let result =
         diarch_import::ingest_file(&state.config.library_dir(), work_id, &path, &name)
             .await?;
+
+    // Prefer a cover the client attached during upload over any embedded EPUB art.
+    let cover_path = if let Some(bytes) = preserved_user_cover.filter(|b| !b.is_empty()) {
+        let dest = work_dir.join("cover.jpg");
+        tokio::fs::write(&dest, &bytes).await?;
+        let _ = tokio::fs::remove_file(&user_cover_marker).await;
+        Some(dest)
+    } else {
+        let _ = tokio::fs::remove_file(&user_cover_marker).await;
+        result.cover_path.clone()
+    };
 
     if let Some(ref p) = result.epub_path {
         register_asset(state, work_id, AssetKind::Epub, "book.epub", "application/epub+zip", p).await?;
@@ -109,13 +133,13 @@ async fn run_import(state: &Arc<AppState>, job: &diarch_core::Job) -> Result<Opt
     if let Some(ref p) = result.markdown_path {
         register_asset(state, work_id, AssetKind::Markdown, "book.md", "text/markdown", p).await?;
     }
-    if let Some(ref p) = result.cover_path {
+    if let Some(ref p) = cover_path {
         register_asset(state, work_id, AssetKind::Cover, "cover.jpg", "image/jpeg", p).await?;
     }
 
     if let Some(mut work) = state.db.get_work(work_id).await? {
         work.needs_review = result.needs_review;
-        if result.cover_path.is_some() {
+        if cover_path.is_some() {
             work.needs_cover = false;
         }
         if let Some(ref t) = result.title {

@@ -7,7 +7,8 @@ Thin Kotlin/Compose client against `http://<host>:8083` (LAN/VPN).
 - **Login** with editable **server URL**, username, and password (Bearer token; URL remembered after logout)
 - Browse shelves: Currently Reading, To Read, Library, Wishlist, Finished
 - Move works between shelves (server 409 when a capped shelf is full)
-- Import files via the system document picker → `POST /api/library/import`
+- Import files via the system document picker → `POST /api/library/import` (waits for the import job; optional cover attach)
+- **Cover art** — attach during import, or change from work detail
 - **Wishlist** add by ISBN/title + **camera barcode** scan (ML Kit)
 - **Offline copies** — Save EPUB / markdown / audiobook (+ cover, chapters) on-device from work detail; reader and player prefer local files; shelves fall back to downloaded titles when the server is unreachable
 - **In-app updates** — checks Forgejo `key/Diarch` releases on launch and offers download/install; **⋮ → Check for updates** on shelves
@@ -17,7 +18,7 @@ Thin Kotlin/Compose client against `http://<host>:8083` (LAN/VPN).
   - Typography + infinite-scroll preference synced via `/api/settings`
 - **Audiobook player** (Media3): stream or play local M4B, chapters, `mode=audio` progress; chapter changes jump the text TOC when titles match
 
-Not included: in-app document editing, KOReader sync, cover/admin tooling.
+Not included: in-app document editing, KOReader sync, admin tooling.
 
 ## Stack
 

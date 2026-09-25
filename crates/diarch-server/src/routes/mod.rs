@@ -913,6 +913,66 @@ async fn stream_multipart_to_file(
     Ok(total)
 }
 
+/// Mobile pickers often send extensionless / `.bin` names. Re-resolve the
+/// staged path using Content-Type and a few leading magic bytes, renaming on
+/// disk when the extension changes so the import job sees a known format.
+///
+/// Staged uploads are always stored as `{uuid}-{filename}` under `imports/`.
+async fn finalize_import_upload(
+    raw_name: &str,
+    mime: Option<&str>,
+    dest: PathBuf,
+) -> Result<(String, PathBuf), (StatusCode, String)> {
+    let mut head = [0u8; 256];
+    let n = match tokio::fs::File::open(&dest).await {
+        Ok(mut f) => {
+            use tokio::io::AsyncReadExt;
+            f.read(&mut head).await.unwrap_or(0)
+        }
+        Err(_) => 0,
+    };
+    let name = diarch_core::ensure_import_filename(raw_name, mime, &head[..n]).map_err(|msg| {
+        (
+            StatusCode::BAD_REQUEST,
+            msg.to_string(),
+        )
+    })?;
+    if name == raw_name {
+        return Ok((name, dest));
+    }
+    let parent = dest
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let file_name = dest
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(raw_name);
+    // `{uuid}-{name}` — UUID is always 36 chars; do not split on the first `-`
+    // inside the UUID itself.
+    let final_dest = if file_name.len() > 37 && file_name.as_bytes().get(36) == Some(&b'-') {
+        let prefix = &file_name[..36];
+        parent.join(format!("{prefix}-{name}"))
+    } else {
+        parent.join(&name)
+    };
+    if final_dest != dest {
+        if !final_dest.starts_with(&parent) {
+            return Err((StatusCode::BAD_REQUEST, "invalid import path".into()));
+        }
+        tokio::fs::rename(&dest, &final_dest)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "rename import failed".into(),
+                )
+            })?;
+        return Ok((name, final_dest));
+    }
+    Ok((name, dest))
+}
+
 async fn move_into_place(from: &FsPath, to: &FsPath) -> Result<(), std::io::Error> {
     if let Some(parent) = to.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -944,10 +1004,16 @@ async fn import_file(
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?
     {
+        // Skip text parts; only ingest a real file field.
+        if field.file_name().is_none() && field.name() != Some("file") {
+            let _ = field.bytes().await;
+            continue;
+        }
+        let mime = field.content_type().map(|m| m.to_string());
         let raw = field.file_name().unwrap_or("upload.bin").to_string();
-        let name =
+        let provisional =
             diarch_core::sanitize_upload_filename(&raw).map_err(|_| StatusCode::BAD_REQUEST)?;
-        let tmp = imports.join(format!("{id}-{name}"));
+        let tmp = imports.join(format!("{id}-{provisional}"));
         // Ensure resolved path stays under imports/
         if !tmp.starts_with(&imports) {
             return Err(StatusCode::BAD_REQUEST);
@@ -955,7 +1021,10 @@ async fn import_file(
         stream_multipart_to_file(field, &tmp)
             .await
             .map_err(|e| e.0)?;
-        saved = Some((name, tmp));
+        let (name, path) = finalize_import_upload(&provisional, mime.as_deref(), tmp)
+            .await
+            .map_err(|e| e.0)?;
+        saved = Some((name, path));
     }
     let (name, path) = saved.ok_or(StatusCode::BAD_REQUEST)?;
     let job = state
@@ -979,6 +1048,8 @@ async fn import_file(
 /// Create a work and queue file import in one step (Library → Import).
 /// Accepts ebook (.epub/.pdf/.md) or audiobook (.m4b/.m4a/.aax).
 /// The file is streamed to disk; audiobooks are too large to buffer.
+/// Optional multipart field `cover` (JPEG/PNG/WebP) is applied after the work
+/// row exists — useful for mobile clients that attach cover art during upload.
 async fn library_import(
     AuthUser(user): AuthUser,
     State(state): State<Arc<AppState>>,
@@ -988,6 +1059,7 @@ async fn library_import(
     let mut primary_code: Option<i32> = None;
     let mut title_override: Option<String> = None;
     let mut authors_override: Option<String> = None;
+    let mut cover_bytes: Option<Vec<u8>> = None;
 
     // Id is known before the body so the upload can land in its final imports path.
     let work_id = Uuid::new_v4();
@@ -1005,11 +1077,20 @@ async fn library_import(
         .map_err(|_| (StatusCode::BAD_REQUEST, "bad multipart".into()))?
     {
         let field_name = field.name().unwrap_or("").to_string();
-        if field_name == "file" || field.file_name().is_some() {
+        if field_name == "cover" {
+            let data = field
+                .bytes()
+                .await
+                .map_err(|_| (StatusCode::BAD_REQUEST, "bad cover body".into()))?;
+            if !data.is_empty() {
+                cover_bytes = Some(data.to_vec());
+            }
+        } else if field_name == "file" || field.file_name().is_some() {
+            let mime = field.content_type().map(|m| m.to_string());
             let raw = field.file_name().unwrap_or("book.epub").to_string();
-            let name = diarch_core::sanitize_upload_filename(&raw)
+            let provisional = diarch_core::sanitize_upload_filename(&raw)
                 .map_err(|_| (StatusCode::BAD_REQUEST, "invalid filename".into()))?;
-            let lower = name.to_ascii_lowercase();
+            let lower = provisional.to_ascii_lowercase();
             if lower.ends_with(".mp3") {
                 return Err((
                     StatusCode::BAD_REQUEST,
@@ -1030,7 +1111,7 @@ async fn library_import(
                     ));
                 }
             }
-            let dest = imports_dir.join(format!("{work_id}-{name}"));
+            let dest = imports_dir.join(format!("{work_id}-{provisional}"));
             if !dest.starts_with(&imports_dir) {
                 return Err((StatusCode::BAD_REQUEST, "invalid import path".into()));
             }
@@ -1041,6 +1122,31 @@ async fn library_import(
                     return Err(e);
                 }
             };
+            let (name, dest) = match finalize_import_upload(&provisional, mime.as_deref(), dest).await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(e);
+                }
+            };
+            // Re-check AAX after MIME/magic may have rewritten the extension.
+            let lower = name.to_ascii_lowercase();
+            if lower.ends_with(".aax") {
+                if state.config.audible_key.as_deref().unwrap_or("").is_empty() {
+                    let _ = tokio::fs::remove_file(&dest).await;
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "DIARCH_AUDIBLE_KEY is not set; cannot convert AAX".into(),
+                    ));
+                }
+                if !crate::audio::ffmpeg_available() {
+                    let _ = tokio::fs::remove_file(&dest).await;
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "ffmpeg not found on PATH; required for AAX → M4B".into(),
+                    ));
+                }
+            }
             if let Some((_, prev, _)) = saved.take() {
                 let _ = tokio::fs::remove_file(prev).await;
             }
@@ -1064,7 +1170,7 @@ async fn library_import(
     let (name, dest, _nbytes) = saved.ok_or((StatusCode::BAD_REQUEST, "file required".into()))?;
     let lower = name.to_ascii_lowercase();
     if lower.ends_with(".aax") || lower.ends_with(".m4b") || lower.ends_with(".m4a") {
-        return library_import_audio(
+        let result = library_import_audio(
             &state,
             &user,
             name,
@@ -1074,7 +1180,16 @@ async fn library_import(
             primary_code,
             work_id,
         )
-        .await;
+        .await?;
+        if let Some(bytes) = cover_bytes {
+            apply_cover_bytes(&state, work_id, &bytes).await.map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "unsupported cover image (expected JPEG, PNG, or WebP)".into(),
+                )
+            })?;
+        }
+        return Ok(result);
     }
 
     let stem = FsPath::new(&name)
@@ -1157,6 +1272,19 @@ async fn library_import(
     let svg = crate::metadata::placeholder_cover_svg(&work.title, &work.authors);
     let _ = tokio::fs::write(state.config.work_dir(work.id).join("cover.svg"), svg).await;
 
+    // User-supplied cover wins over the SVG placeholder. The import job may
+    // later extract an embedded EPUB cover; clients that care about their
+    // attached image should re-upload after the job, or we stash bytes for
+    // post-job apply. Prefer applying now so audiobook-less waits still show it.
+    if let Some(ref bytes) = cover_bytes {
+        if apply_cover_bytes(&state, work.id, bytes).await.is_err() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "unsupported cover image (expected JPEG, PNG, or WebP)".into(),
+            ));
+        }
+    }
+
     let job = state
         .db
         .create_job("import", Some(work.id))
@@ -1182,6 +1310,16 @@ async fn library_import(
             ),
         )
         .await;
+
+    // If the client attached a cover, tell the import job not to clobber it
+    // when an embedded EPUB cover is found — stash a marker file.
+    if cover_bytes.is_some() {
+        let _ = tokio::fs::write(
+            state.config.work_dir(work.id).join(".user_cover"),
+            b"1",
+        )
+        .await;
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -1609,11 +1747,23 @@ async fn upload_cover(
     if !state.db.user_can_access(&user, id).await.unwrap_or(false) {
         return Err(StatusCode::FORBIDDEN);
     }
+    let mut applied = false;
     while let Some(field) = multipart.next_field().await.map_err(|_| StatusCode::BAD_REQUEST)? {
+        let name = field.name().unwrap_or("").to_string();
+        // Only accept an image part — ignore trailing text fields so clients
+        // can safely send metadata alongside `file` / `cover`.
+        if name != "file" && name != "cover" && field.file_name().is_none() {
+            let _ = field.bytes().await;
+            continue;
+        }
         let data = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
         apply_cover_bytes(&state, id, &data)
             .await
             .map_err(|_| StatusCode::BAD_REQUEST)?;
+        applied = true;
+    }
+    if !applied {
+        return Err(StatusCode::BAD_REQUEST);
     }
     Ok(StatusCode::NO_CONTENT)
 }
