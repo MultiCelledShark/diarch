@@ -183,7 +183,6 @@ async fn acl_regression_grant_required() {
     )
     .await;
     assert_eq!(status, 204);
-    let _ = reader_id;
 
     let reader_tok = login(&app, "reader", "readerpass12").await;
     let (status, works, _) = json_req(&app, "GET", "/api/works", Some(&reader_tok), None).await;
@@ -200,6 +199,68 @@ async fn acl_regression_grant_required() {
     let (status, _, _) =
         json_req(&app, "GET", &format!("/api/works/{secret_id}"), Some(&reader_tok), None).await;
     assert_eq!(status, 403);
+
+    // List / revoke grants (admin only). Reader cannot manage grants.
+    let (status, grants, _) = json_req(
+        &app,
+        "GET",
+        &format!("/api/works/{shared_id}/grants"),
+        Some(&admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(grants.as_array().unwrap().len(), 1);
+    assert_eq!(grants[0]["username"], "reader");
+
+    let (status, _, _) = json_req(
+        &app,
+        "GET",
+        &format!("/api/works/{shared_id}/grants"),
+        Some(&reader_tok),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403);
+
+    let (status, _, _) = json_req(
+        &app,
+        "DELETE",
+        &format!("/api/works/{shared_id}/grants/{reader_id}"),
+        Some(&admin),
+        None,
+    )
+    .await;
+    assert_eq!(status, 204);
+
+    let (status, works, _) = json_req(&app, "GET", "/api/works", Some(&reader_tok), None).await;
+    assert_eq!(status, 200);
+    let titles: Vec<_> = works
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["title"].as_str().unwrap())
+        .collect();
+    assert!(!titles.contains(&"Shared"));
+
+    // Admin still sees every work after revoke (unfettered access).
+    let (status, _, _) =
+        json_req(&app, "GET", &format!("/api/works/{shared_id}"), Some(&admin), None).await;
+    assert_eq!(status, 200);
+    let (status, _, _) =
+        json_req(&app, "GET", &format!("/api/works/{secret_id}"), Some(&admin), None).await;
+    assert_eq!(status, 200);
+
+    // Granting to an admin is rejected — admins do not use work_grants.
+    let (status, body, _) = json_req(
+        &app,
+        "POST",
+        &format!("/api/works/{shared_id}/grants"),
+        Some(&admin),
+        Some(json!({ "username": "admin" })),
+    )
+    .await;
+    assert_eq!(status, 400, "grant-to-admin should fail: {body}");
 
     // Process one idle job loop shouldn't panic
     routes::jobs::process_one(&state).await.unwrap();
