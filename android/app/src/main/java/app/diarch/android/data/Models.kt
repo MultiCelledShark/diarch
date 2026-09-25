@@ -156,6 +156,18 @@ data class WishlistRequest(
     val isbn: String? = null,
 )
 
+@Serializable
+data class WorkGrant(
+    @SerialName("user_id") val userId: String,
+    val username: String,
+)
+
+@Serializable
+data class GrantRequest(
+    val username: String? = null,
+    @SerialName("user_id") val userId: String? = null,
+)
+
 enum class Shelf(val apiStatus: String, val label: String) {
     Reading("reading", "Currently Reading"),
     ToRead("to_read", "To Read"),

@@ -27,7 +27,7 @@ class LibraryRepository(
         apiClient.updateSession(normalized, "")
         val res = apiClient.api().login(LoginRequest(username, password))
         apiClient.updateSession(normalized, res.token)
-        sessionStore.saveLogin(normalized, res.token, res.user.username)
+        sessionStore.saveLogin(normalized, res.token, res.user.username, res.user.isAdmin)
         return res.user
     }
 
@@ -186,6 +186,29 @@ class LibraryRepository(
                 isbn = isbn?.takeIf { it.isNotBlank() },
             ),
         )
+
+    suspend fun listUsers(): List<User> = apiClient.api().listUsers()
+
+    suspend fun listGrants(workId: String): List<WorkGrant> =
+        apiClient.api().listGrants(workId)
+
+    suspend fun grantAccess(workId: String, username: String) {
+        val res = apiClient.api().addGrant(workId, GrantRequest(username = username))
+        if (!res.isSuccessful) {
+            val msg = res.errorBody()?.string()?.ifBlank { null }
+                ?: "Grant failed (${res.code()})"
+            throw IOException(msg)
+        }
+    }
+
+    suspend fun revokeAccess(workId: String, userId: String) {
+        val res = apiClient.api().revokeGrant(workId, userId)
+        if (!res.isSuccessful) {
+            val msg = res.errorBody()?.string()?.ifBlank { null }
+                ?: "Revoke failed (${res.code()})"
+            throw IOException(msg)
+        }
+    }
 
     private fun queryDisplayName(uri: Uri): String? {
         val cursor = appContext.contentResolver.query(uri, null, null, null, null) ?: return null

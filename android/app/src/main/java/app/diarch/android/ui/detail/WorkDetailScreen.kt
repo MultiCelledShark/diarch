@@ -35,15 +35,20 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.diarch.android.DiarchApp
+import app.diarch.android.data.Session
 import app.diarch.android.data.Shelf
 import app.diarch.android.data.ShelfFullException
+import app.diarch.android.data.User
 import app.diarch.android.data.Work
 import app.diarch.android.data.WorkDetailResponse
+import app.diarch.android.data.WorkGrant
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
@@ -63,11 +68,20 @@ fun WorkDetailScreen(
     var offlineBusy by remember { mutableStateOf(false) }
     var offlineStatus by remember { mutableStateOf("") }
     var isOffline by remember { mutableStateOf(false) }
+    var grants by remember { mutableStateOf<List<WorkGrant>>(emptyList()) }
+    var readers by remember { mutableStateOf<List<User>>(emptyList()) }
+    var grantMenu by remember { mutableStateOf(false) }
+    var grantBusy by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val repo = DiarchApp.instance.repository
     val offline = DiarchApp.instance.offlineStore
+    val sessionStore = DiarchApp.instance.sessionStore
     val context = LocalContext.current
+    val session by sessionStore.session.collectAsStateWithLifecycle(
+        initialValue = Session(),
+    )
+    var isAdmin by remember { mutableStateOf(session.isAdmin) }
 
     fun refreshOfflineFlag() {
         isOffline = offline.isDownloaded(workId)
@@ -87,7 +101,30 @@ fun WorkDetailScreen(
         }
     }
 
+    LaunchedEffect(session.token, session.isAdmin) {
+        isAdmin = session.isAdmin
+        if (session.isLoggedIn) {
+            runCatching { DiarchApp.instance.apiClient.api().me() }
+                .onSuccess { me ->
+                    isAdmin = me.isAdmin
+                    sessionStore.setIsAdmin(me.isAdmin)
+                }
+        }
+    }
     LaunchedEffect(workId) { reload() }
+    LaunchedEffect(workId, isAdmin) {
+        if (!isAdmin) {
+            grants = emptyList()
+            readers = emptyList()
+            return@LaunchedEffect
+        }
+        try {
+            grants = repo.listGrants(workId)
+            readers = repo.listUsers().filter { !it.isAdmin }
+        } catch (_: Exception) {
+            // Non-admin or offline — leave panel empty.
+        }
+    }
 
     val work = detail?.work
     val hasEpub = detail?.resolvedHasEpub == true
@@ -288,6 +325,93 @@ fun WorkDetailScreen(
                             }
                         },
                     )
+                }
+            }
+
+            if (isAdmin) {
+                Spacer(modifier = Modifier.height(24.dp))
+                Text("Shared access", style = MaterialTheme.typography.titleLarge)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "Grant library access to readers. Admins always see every book.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                val grantable = readers.filter { r -> grants.none { it.userId == r.id } }
+                OutlinedButton(
+                    onClick = { grantMenu = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !grantBusy && grantable.isNotEmpty(),
+                ) {
+                    Text(
+                        if (grantable.isEmpty()) "No readers to grant"
+                        else "Grant access…",
+                    )
+                }
+                DropdownMenu(expanded = grantMenu, onDismissRequest = { grantMenu = false }) {
+                    grantable.forEach { user ->
+                        DropdownMenuItem(
+                            text = { Text(user.username) },
+                            onClick = {
+                                grantMenu = false
+                                grantBusy = true
+                                scope.launch {
+                                    try {
+                                        repo.grantAccess(workId, user.username)
+                                        grants = repo.listGrants(workId)
+                                        snackbar.showSnackbar("Granted to ${user.username}")
+                                    } catch (e: Exception) {
+                                        snackbar.showSnackbar(e.message ?: "Grant failed")
+                                    } finally {
+                                        grantBusy = false
+                                    }
+                                }
+                            },
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                if (grants.isEmpty()) {
+                    Text(
+                        "No shared access yet.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    grants.forEach { grant ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                grant.username,
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                            OutlinedButton(
+                                onClick = {
+                                    grantBusy = true
+                                    scope.launch {
+                                        try {
+                                            repo.revokeAccess(workId, grant.userId)
+                                            grants = repo.listGrants(workId)
+                                            snackbar.showSnackbar("Revoked ${grant.username}")
+                                        } catch (e: Exception) {
+                                            snackbar.showSnackbar(e.message ?: "Revoke failed")
+                                        } finally {
+                                            grantBusy = false
+                                        }
+                                    }
+                                },
+                                enabled = !grantBusy,
+                            ) {
+                                Text("Revoke")
+                            }
+                        }
+                    }
                 }
             }
 
