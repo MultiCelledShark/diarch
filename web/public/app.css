@@ -40,6 +40,9 @@ input[type="text"], input[type="password"], input[type="number"], input:not([typ
   border-radius: 3px;
   background: var(--inset);
   color: var(--ink);
+  /* Keep focused fields clear of the mobile soft keyboard / browser chrome. */
+  scroll-margin-bottom: 30vh;
+  scroll-margin-top: 5rem;
 }
 button {
   border: 1px solid var(--accent);
@@ -93,6 +96,8 @@ main { padding: 1.25rem; }
   background: var(--panel);
   color: var(--ink);
   font: inherit;
+  scroll-margin-bottom: 30vh;
+  scroll-margin-top: 5rem;
 }
 .library-search input:focus {
   outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
@@ -133,6 +138,8 @@ main { padding: 1.25rem; }
   color: var(--ink);
   font: inherit;
   resize: vertical;
+  scroll-margin-bottom: 30vh;
+  scroll-margin-top: 5rem;
 }
 .meta-hits {
   display: flex;
