@@ -389,6 +389,16 @@ async function refreshGrantList(workId) {
   const el = document.getElementById("grant-list");
   if (!el) return;
   const grants = await api(`/api/works/${workId}/grants`);
+  const select = document.getElementById("grant-user");
+  if (select) {
+    const granted = new Set(grants.map((g) => g.username));
+    const readers = (state.users || []).filter((u) => !u.is_admin && !granted.has(u.username));
+    select.innerHTML =
+      `<option value="">Select user…</option>` +
+      readers
+        .map((u) => `<option value="${escapeHtml(u.username)}">${escapeHtml(u.username)}</option>`)
+        .join("");
+  }
   if (!grants.length) {
     el.textContent = "No shared access yet.";
     return;
@@ -1486,9 +1496,13 @@ async function openDetail(id) {
       msg("Pick a user", true);
       return;
     }
-    await api(`/api/works/${w.id}/grants`, { method: "POST", json: { username } });
-    msg(`Granted to ${username}`);
-    await refreshGrantList(w.id);
+    try {
+      await api(`/api/works/${w.id}/grants`, { method: "POST", json: { username } });
+      msg(`Granted to ${username}`);
+      await refreshGrantList(w.id);
+    } catch (e) {
+      msg(e.message || String(e), true);
+    }
   });
 
   if (state.user.is_admin) {

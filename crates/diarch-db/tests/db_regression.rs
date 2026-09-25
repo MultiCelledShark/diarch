@@ -105,6 +105,30 @@ async fn acl_hides_ungranted_works() {
 }
 
 #[tokio::test]
+async fn revoke_hides_from_reader_admin_stays() {
+    let (_dir, db) = fresh_db().await;
+    let admin = db.create_user("admin", "pw", true).await.unwrap();
+    let reader = db.create_user("reader", "pw", false).await.unwrap();
+
+    let mut shared = sample_work(Some(admin.id), ReadingStatus::Unread);
+    shared.title = "Shared".into();
+    db.create_work(&shared, &[8201], Some(reader.id))
+        .await
+        .unwrap();
+
+    // Creating as admin must not leave an admin grant row.
+    let grants = db.list_grants(shared.id).await.unwrap();
+    assert_eq!(grants, vec![reader.id]);
+
+    db.revoke_work(reader.id, shared.id).await.unwrap();
+    assert!(!db.user_can_access(&reader, shared.id).await.unwrap());
+    assert!(db.user_can_access(&admin, shared.id).await.unwrap());
+    let listed = db.list_works_for_user(&admin, None, None).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(db.list_works_for_user(&reader, None, None).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn multi_codes_and_attention_filters() {
     let (_dir, db) = fresh_db().await;
     let admin = db.create_user("admin", "pw", true).await.unwrap();

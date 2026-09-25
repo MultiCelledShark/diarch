@@ -63,6 +63,13 @@ class SessionStore(private val context: Context) {
         }
     }
 
+    /** Refresh admin flag without touching the auth token (e.g. after `/api/auth/me`). */
+    suspend fun setIsAdmin(isAdmin: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[isAdminKey] = if (isAdmin) "1" else "0"
+        }
+    }
+
     private fun readTokenSync(): String = encryptedPrefs.getString(tokenKey, "").orEmpty()
 
     private suspend fun writeToken(token: String) {

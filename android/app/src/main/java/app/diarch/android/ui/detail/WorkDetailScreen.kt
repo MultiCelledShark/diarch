@@ -76,26 +76,15 @@ fun WorkDetailScreen(
     val scope = rememberCoroutineScope()
     val repo = DiarchApp.instance.repository
     val offline = DiarchApp.instance.offlineStore
+    val sessionStore = DiarchApp.instance.sessionStore
     val context = LocalContext.current
-    val session by DiarchApp.instance.sessionStore.session.collectAsStateWithLifecycle(
+    val session by sessionStore.session.collectAsStateWithLifecycle(
         initialValue = Session(),
     )
     var isAdmin by remember { mutableStateOf(session.isAdmin) }
 
     fun refreshOfflineFlag() {
         isOffline = offline.isDownloaded(workId)
-    }
-
-    fun reloadGrants() {
-        if (!isAdmin) return
-        scope.launch {
-            try {
-                grants = repo.listGrants(workId)
-                readers = repo.listUsers().filter { !it.isAdmin }
-            } catch (_: Exception) {
-                // Non-admin or offline — leave panel empty.
-            }
-        }
     }
 
     fun reload() {
@@ -116,11 +105,26 @@ fun WorkDetailScreen(
         isAdmin = session.isAdmin
         if (session.isLoggedIn) {
             runCatching { DiarchApp.instance.apiClient.api().me() }
-                .onSuccess { isAdmin = it.isAdmin }
+                .onSuccess { me ->
+                    isAdmin = me.isAdmin
+                    sessionStore.setIsAdmin(me.isAdmin)
+                }
         }
     }
     LaunchedEffect(workId) { reload() }
-    LaunchedEffect(workId, isAdmin) { reloadGrants() }
+    LaunchedEffect(workId, isAdmin) {
+        if (!isAdmin) {
+            grants = emptyList()
+            readers = emptyList()
+            return@LaunchedEffect
+        }
+        try {
+            grants = repo.listGrants(workId)
+            readers = repo.listUsers().filter { !it.isAdmin }
+        } catch (_: Exception) {
+            // Non-admin or offline — leave panel empty.
+        }
+    }
 
     val work = detail?.work
     val hasEpub = detail?.resolvedHasEpub == true

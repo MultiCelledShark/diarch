@@ -223,6 +223,17 @@ async fn acl_regression_grant_required() {
     .await;
     assert_eq!(status, 403);
 
+    // Readers cannot grant either.
+    let (status, _, _) = json_req(
+        &app,
+        "POST",
+        &format!("/api/works/{shared_id}/grants"),
+        Some(&reader_tok),
+        Some(json!({ "username": "reader" })),
+    )
+    .await;
+    assert_eq!(status, 403);
+
     let (status, _, _) = json_req(
         &app,
         "DELETE",
