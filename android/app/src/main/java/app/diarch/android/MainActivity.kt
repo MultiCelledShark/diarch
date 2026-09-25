@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -36,7 +37,9 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             DiarchTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
+                // Edge-to-edge disables classic adjustResize window shrinking; pad
+                // for the IME so focused fields stay above the soft keyboard.
+                Surface(modifier = Modifier.fillMaxSize().imePadding()) {
                     DiarchNav()
                 }
             }

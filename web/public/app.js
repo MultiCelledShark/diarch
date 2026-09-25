@@ -3064,4 +3064,17 @@ document.getElementById("btn-probe").addEventListener("click", async () => {
   }
 });
 
+// Mobile soft keyboards often cover the focused field; scroll it into view after layout.
+document.addEventListener("focusin", (e) => {
+  const el = e.target;
+  if (!(el instanceof HTMLElement)) return;
+  if (!el.matches("input, textarea, select")) return;
+  if (el.closest("#view-reader")) return;
+  requestAnimationFrame(() => {
+    setTimeout(() => {
+      el.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+    }, 50);
+  });
+});
+
 boot();
