@@ -217,7 +217,7 @@ fun WorkDetailScreen(
             OutlinedButton(
                 onClick = {
                     coverPicker.launch(
-                        arrayOf("image/jpeg", "image/png", "image/webp", "image/*"),
+                        arrayOf("image/jpeg", "image/png", "image/webp"),
                     )
                 },
                 modifier = Modifier.fillMaxWidth(),

@@ -2026,6 +2026,11 @@ async fn library_import_with_cover_and_direct_cover_upload() {
         state.config.work_dir(wid).join("cover.jpg").exists(),
         "user cover should be written before the import job runs"
     );
+    assert!(
+        state.config.work_dir(wid).join(".user_cover").exists(),
+        "user cover marker must exist before the job is drained"
+    );
+    assert_eq!(j["work"]["needs_cover"], false);
     let on_disk = tokio::fs::read(state.config.work_dir(wid).join("cover.jpg"))
         .await
         .unwrap();
@@ -2081,4 +2086,91 @@ async fn library_import_with_cover_and_direct_cover_upload() {
         .await
         .unwrap();
     assert_eq!(replaced, jpeg2);
+}
+
+#[tokio::test]
+async fn library_import_rejects_bad_cover_before_creating_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let epub_path = dir.path().join("sample.epub");
+    {
+        let file = std::fs::File::create(&epub_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file("mimetype", opts).unwrap();
+        use std::io::Write;
+        zip.write_all(b"application/epub+zip").unwrap();
+        zip.start_file("META-INF/container.xml", opts).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0"?><container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#,
+        )
+        .unwrap();
+        zip.start_file("content.opf", opts).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0"?>
+<package>
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Bad Cover Sample</dc:title>
+    <dc:creator>Author</dc:creator>
+  </metadata>
+  <manifest><item id="c1" href="chap.html" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#,
+        )
+        .unwrap();
+        zip.start_file("chap.html", opts).unwrap();
+        zip.write_all(b"<html><body><p>x</p></body></html>").unwrap();
+        zip.finish().unwrap();
+    }
+
+    let (_td, app, state) = test_app().await;
+    let token = login(&app, "admin", "adminpass1234").await;
+    let epub_bytes = std::fs::read(&epub_path).unwrap();
+    // HEIC-like payload is not JPEG/PNG/WebP.
+    let bad_cover = b"heic-not-really-but-not-raster";
+
+    let boundary = "----badCoverBoundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"book.epub\"\r\nContent-Type: application/epub+zip\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&epub_bytes);
+    body.extend_from_slice(
+        format!(
+            "\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"cover\"; filename=\"cover.heic\"\r\nContent-Type: image/heic\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(bad_cover);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let (status_before, works_before, _) =
+        json_req(&app, "GET", "/api/works", Some(&token), None).await;
+    assert_eq!(status_before, 200);
+    let before = works_before.as_array().unwrap().len();
+
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/library/import")
+        .header("cookie", format!("diarch_session={token}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), 400, "bad cover must not create a work");
+    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let msg = String::from_utf8_lossy(&body_bytes);
+    assert!(msg.contains("cover"), "{msg}");
+
+    let (status_after, works_after, _) =
+        json_req(&app, "GET", "/api/works", Some(&token), None).await;
+    assert_eq!(status_after, 200);
+    let after = works_after.as_array().unwrap().len();
+    assert_eq!(before, after, "no orphan work on bad cover");
+    let _ = state;
 }

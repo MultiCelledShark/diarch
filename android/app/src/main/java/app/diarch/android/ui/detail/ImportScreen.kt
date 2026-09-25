@@ -124,7 +124,6 @@ fun ImportScreen(
                             "image/jpeg",
                             "image/png",
                             "image/webp",
-                            "image/*",
                         ),
                     )
                 },

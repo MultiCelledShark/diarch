@@ -1168,6 +1168,19 @@ async fn library_import(
     }
 
     let (name, dest, _nbytes) = saved.ok_or((StatusCode::BAD_REQUEST, "file required".into()))?;
+
+    // Reject unsupported cover formats before creating a work row, so a HEIC
+    // (or other phone-gallery format) cannot leave an orphan import.
+    if let Some(ref bytes) = cover_bytes {
+        if diarch_core::sniff_image_mime(bytes).is_none() {
+            let _ = tokio::fs::remove_file(&dest).await;
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "unsupported cover image (expected JPEG, PNG, or WebP)".into(),
+            ));
+        }
+    }
+
     let lower = name.to_ascii_lowercase();
     if lower.ends_with(".aax") || lower.ends_with(".m4b") || lower.ends_with(".m4a") {
         let result = library_import_audio(
@@ -1181,13 +1194,11 @@ async fn library_import(
             work_id,
         )
         .await?;
+        // Cover is optional polish — import already succeeded.
         if let Some(bytes) = cover_bytes {
-            apply_cover_bytes(&state, work_id, &bytes).await.map_err(|_| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    "unsupported cover image (expected JPEG, PNG, or WebP)".into(),
-                )
-            })?;
+            if let Err(err) = apply_cover_bytes(&state, work_id, &bytes).await {
+                tracing::warn!(%work_id, error = %err, "library import cover apply failed");
+            }
         }
         return Ok(result);
     }
@@ -1221,7 +1232,7 @@ async fn library_import(
         .or(hint.primary)
         .or_else(|| diarch_core::taxonomy::suggest_primary(&codes));
     let is_manga = diarch_core::infer_manga(primary, &codes, false);
-    let work = Work {
+    let mut work = Work {
         id: work_id,
         title: title_override.or(meta.title).or(hint.title).unwrap_or(stem),
         authors: authors_override
@@ -1261,27 +1272,35 @@ async fn library_import(
                 "create work failed".into(),
             )
         })?;
-    tokio::fs::create_dir_all(state.config.work_dir(work.id))
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "mkdir work failed".into(),
-            )
-        })?;
+    let work_dir = state.config.work_dir(work.id);
+    tokio::fs::create_dir_all(&work_dir).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "mkdir work failed".into(),
+        )
+    })?;
     let svg = crate::metadata::placeholder_cover_svg(&work.title, &work.authors);
-    let _ = tokio::fs::write(state.config.work_dir(work.id).join("cover.svg"), svg).await;
+    let _ = tokio::fs::write(work_dir.join("cover.svg"), svg).await;
 
-    // User-supplied cover wins over the SVG placeholder. The import job may
-    // later extract an embedded EPUB cover; clients that care about their
-    // attached image should re-upload after the job, or we stash bytes for
-    // post-job apply. Prefer applying now so audiobook-less waits still show it.
+    // Apply user cover + marker BEFORE queueing the import job, otherwise a
+    // fast worker can extract an embedded EPUB cover and clobber the attach.
     if let Some(ref bytes) = cover_bytes {
-        if apply_cover_bytes(&state, work.id, bytes).await.is_err() {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "unsupported cover image (expected JPEG, PNG, or WebP)".into(),
-            ));
+        match apply_cover_bytes(&state, work.id, bytes).await {
+            Ok(()) => {
+                tokio::fs::write(work_dir.join(".user_cover"), b"1")
+                    .await
+                    .map_err(|_| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "cover marker failed".into(),
+                        )
+                    })?;
+                work.needs_cover = false;
+            }
+            Err(err) => {
+                // Format was already sniffed; IO failure should not abort import.
+                tracing::warn!(%work_id, error = %err, "library import cover apply failed");
+            }
         }
     }
 
@@ -1310,16 +1329,6 @@ async fn library_import(
             ),
         )
         .await;
-
-    // If the client attached a cover, tell the import job not to clobber it
-    // when an embedded EPUB cover is found — stash a marker file.
-    if cover_bytes.is_some() {
-        let _ = tokio::fs::write(
-            state.config.work_dir(work.id).join(".user_cover"),
-            b"1",
-        )
-        .await;
-    }
 
     Ok((
         StatusCode::CREATED,
