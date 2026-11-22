@@ -137,6 +137,15 @@ data class ImportResponse(
 )
 
 @Serializable
+data class JobStatus(
+    val id: String,
+    val kind: String = "",
+    @SerialName("work_id") val workId: String? = null,
+    val status: String,
+    val detail: String? = null,
+)
+
+@Serializable
 data class AudioChapter(
     val index: Int,
     val title: String = "",

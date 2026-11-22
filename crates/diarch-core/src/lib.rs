@@ -438,6 +438,95 @@ pub fn sniff_image_mime(data: &[u8]) -> Option<&'static str> {
     None
 }
 
+/// Known library-import extensions (lowercase, no leading dot).
+pub fn import_extension(name: &str) -> Option<&'static str> {
+    let lower = name.to_ascii_lowercase();
+    for (suffix, ext) in [
+        (".epub", "epub"),
+        (".pdf", "pdf"),
+        (".markdown", "md"),
+        (".md", "md"),
+        (".m4b", "m4b"),
+        (".m4a", "m4a"),
+        (".aax", "aax"),
+    ] {
+        if lower.ends_with(suffix) {
+            return Some(ext);
+        }
+    }
+    None
+}
+
+/// Map a multipart Content-Type to an import extension. Mobile pickers often
+/// send a correct MIME with a display name that has no (or a useless) extension.
+pub fn import_extension_from_mime(mime: &str) -> Option<&'static str> {
+    let base = mime
+        .split(';')
+        .next()
+        .unwrap_or(mime)
+        .trim()
+        .to_ascii_lowercase();
+    match base.as_str() {
+        "application/epub+zip" => Some("epub"),
+        "application/pdf" => Some("pdf"),
+        "text/markdown" | "text/x-markdown" => Some("md"),
+        "audio/m4b" | "audio/x-m4b" => Some("m4b"),
+        "audio/m4a" | "audio/x-m4a" | "audio/mp4" | "audio/aac" => Some("m4a"),
+        "audio/vnd.audible.aax" | "audio/aax" => Some("aax"),
+        _ => None,
+    }
+}
+
+/// Sniff leading bytes of a staged upload when the filename/MIME are unhelpful.
+pub fn import_extension_from_bytes(head: &[u8]) -> Option<&'static str> {
+    if head.starts_with(b"%PDF") {
+        return Some("pdf");
+    }
+    // EPUB is a ZIP whose first entry is the `mimetype` file.
+    if head.len() >= 4 && &head[0..2] == b"PK" {
+        let window = if head.len() > 256 { &head[..256] } else { head };
+        if window.windows(20).any(|w| w == b"application/epub+zip") {
+            return Some("epub");
+        }
+    }
+    // ISO Base Media (`ftyp…`) used by M4A/M4B/AAX — prefer m4a when ambiguous.
+    if head.len() >= 12 && &head[4..8] == b"ftyp" {
+        let brand = &head[8..12];
+        if brand == b"M4B " || brand.starts_with(b"M4B") {
+            return Some("m4b");
+        }
+        if brand == b"aax " || brand == b"aaxc" || brand == b"AAX " {
+            return Some("aax");
+        }
+        return Some("m4a");
+    }
+    None
+}
+
+/// Ensure a sanitized upload name carries a known import extension.
+/// Mobile content URIs frequently report `upload.bin` / extensionless names
+/// while still providing `application/epub+zip` (or recognizable magic bytes).
+pub fn ensure_import_filename(
+    name: &str,
+    mime: Option<&str>,
+    head: &[u8],
+) -> Result<String, &'static str> {
+    let sanitized = sanitize_upload_filename(name)?;
+    if import_extension(&sanitized).is_some() {
+        return Ok(sanitized);
+    }
+    let ext = mime
+        .and_then(import_extension_from_mime)
+        .or_else(|| import_extension_from_bytes(head))
+        .ok_or("unsupported or unknown import format")?;
+    let stem = std::path::Path::new(&sanitized)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("upload");
+    sanitize_upload_filename(&format!("{stem}.{ext}"))
+}
+
 /// `Content-Disposition: attachment` value using a sanitized SQLite title.
 /// Header values must be ASCII; non-ASCII title chars become `_`.
 pub fn content_disposition_attachment(title: &str, extension: &str) -> String {
@@ -775,6 +864,31 @@ mod tests {
         assert_eq!(sniff_image_mime(b"<svg xmlns=..."), None);
         assert_eq!(sniff_image_mime(b"not an image"), None);
         assert_eq!(sniff_image_mime(&[]), None);
+    }
+
+    #[test]
+    fn ensure_import_filename_uses_mime_when_extension_missing() {
+        assert_eq!(
+            ensure_import_filename("upload.bin", Some("application/epub+zip"), &[]).unwrap(),
+            "upload.epub"
+        );
+        assert_eq!(
+            ensure_import_filename("document", Some("application/pdf"), &[]).unwrap(),
+            "document.pdf"
+        );
+        // Existing extension wins over MIME.
+        assert_eq!(
+            ensure_import_filename("Book.epub", Some("application/pdf"), &[]).unwrap(),
+            "Book.epub"
+        );
+        let mut epub_head = b"PK\x03\x04".to_vec();
+        epub_head.extend_from_slice(&[0; 20]);
+        epub_head.extend_from_slice(b"application/epub+zip");
+        assert_eq!(
+            ensure_import_filename("upload.bin", None, &epub_head).unwrap(),
+            "upload.epub"
+        );
+        assert!(ensure_import_filename("upload.bin", None, b"????").is_err());
     }
 
     #[test]
