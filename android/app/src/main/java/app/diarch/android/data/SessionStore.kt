@@ -25,6 +25,7 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 class SessionStore(private val context: Context) {
     private val baseUrlKey = stringPreferencesKey("base_url")
     private val usernameKey = stringPreferencesKey("username")
+    private val isAdminKey = stringPreferencesKey("is_admin")
     private val tokenKey = "token"
 
     private val encryptedPrefs: SharedPreferences by lazy { buildEncryptedPrefs(context) }
@@ -36,14 +37,16 @@ class SessionStore(private val context: Context) {
             baseUrl = prefs[baseUrlKey].orEmpty(),
             token = token,
             username = prefs[usernameKey].orEmpty(),
+            isAdmin = prefs[isAdminKey] == "1",
         )
     }
 
-    suspend fun saveLogin(baseUrl: String, token: String, username: String) {
+    suspend fun saveLogin(baseUrl: String, token: String, username: String, isAdmin: Boolean = false) {
         writeToken(token)
         context.dataStore.edit { prefs ->
             prefs[baseUrlKey] = normalizeBaseUrl(baseUrl)
             prefs[usernameKey] = username
+            prefs[isAdminKey] = if (isAdmin) "1" else "0"
         }
     }
 
@@ -55,6 +58,16 @@ class SessionStore(private val context: Context) {
 
     suspend fun clearToken() {
         writeToken("")
+        context.dataStore.edit { prefs ->
+            prefs.remove(isAdminKey)
+        }
+    }
+
+    /** Refresh admin flag without touching the auth token (e.g. after `/api/auth/me`). */
+    suspend fun setIsAdmin(isAdmin: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[isAdminKey] = if (isAdmin) "1" else "0"
+        }
     }
 
     private fun readTokenSync(): String = encryptedPrefs.getString(tokenKey, "").orEmpty()
@@ -94,6 +107,7 @@ data class Session(
     val baseUrl: String = "",
     val token: String = "",
     val username: String = "",
+    val isAdmin: Boolean = false,
 ) {
     val isLoggedIn: Boolean get() = token.isNotBlank() && baseUrl.isNotBlank()
 }

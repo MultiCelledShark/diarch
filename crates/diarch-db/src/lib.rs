@@ -360,8 +360,16 @@ impl Db {
                 .execute(&self.pool)
                 .await?;
         }
+        // Persist ACL rows for readers only — admins bypass work_grants entirely.
         if let Some(uid) = grant_user {
-            self.grant_work(uid, work.id).await?;
+            let grantee_is_admin = self
+                .get_user(uid)
+                .await?
+                .map(|u| u.is_admin)
+                .unwrap_or(false);
+            if !grantee_is_admin {
+                self.grant_work(uid, work.id).await?;
+            }
         }
         // Personal shelf for the creator (and grantee if different).
         if let Some(uid) = work.created_by {

@@ -1,12 +1,13 @@
 package app.diarch.android.ui.login
 
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -71,14 +72,18 @@ fun LoginScreen(
         }
     }
 
+    // Top-aligned + scroll so BringIntoView can keep the focused field above the IME
+    // (Arrangement.Center fights that when the keyboard shrinks the viewport).
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
             .verticalScroll(rememberScrollState())
             .padding(24.dp),
-        verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        Spacer(modifier = Modifier.height(48.dp))
         Text("Diarch", style = MaterialTheme.typography.displayLarge)
         Spacer(modifier = Modifier.height(8.dp))
         Text(
@@ -141,5 +146,6 @@ fun LoginScreen(
                 color = MaterialTheme.colorScheme.onPrimary,
             ) else Text("Sign in")
         }
+        Spacer(modifier = Modifier.height(24.dp))
     }
 }

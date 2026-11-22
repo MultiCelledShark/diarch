@@ -761,6 +761,16 @@ async fn list_grants(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
+    // 404 if the work is missing so admins don't manage grants on ghosts.
+    if state
+        .db
+        .get_work(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
     let rows = state
         .db
         .list_grants_detailed(id)
@@ -789,25 +799,46 @@ async fn add_grant(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
     Json(body): Json<GrantReq>,
-) -> Result<StatusCode, StatusCode> {
-    let user_id = if let Some(uid) = body.user_id {
-        uid
+) -> Result<StatusCode, (StatusCode, String)> {
+    if state
+        .db
+        .get_work(id)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "db error".into()))?
+        .is_none()
+    {
+        return Err((StatusCode::NOT_FOUND, "work not found".into()));
+    }
+    let grantee = if let Some(uid) = body.user_id {
+        state
+            .db
+            .get_user(uid)
+            .await
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "db error".into()))?
+            .ok_or((StatusCode::NOT_FOUND, "user not found".into()))?
     } else if let Some(name) = body.username.as_deref() {
         state
             .db
             .get_user_by_username(name)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .ok_or(StatusCode::NOT_FOUND)?
-            .id
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "db error".into()))?
+            .ok_or((StatusCode::NOT_FOUND, "user not found".into()))?
     } else {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err((StatusCode::BAD_REQUEST, "user_id or username required".into()));
     };
+    // Admins always see every work via is_admin; grants are for readers only.
+    if grantee.is_admin {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "admins already have unfettered access; grant readers only".into(),
+        ));
+    }
+    let user_id = grantee.id;
     state
         .db
         .grant_work(user_id, id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "db error".into()))?;
     // New grantees start on Library (unread). Don't clobber an existing personal shelf
     // if the grant is re-applied.
     if state
@@ -831,6 +862,15 @@ async fn revoke_grant(
     State(state): State<Arc<AppState>>,
     Path((id, user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, StatusCode> {
+    if state
+        .db
+        .get_work(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
     state
         .db
         .revoke_work(user_id, id)

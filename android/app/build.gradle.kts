@@ -18,9 +18,14 @@ android {
         targetSdk = 37
         versionCode = 4
         versionName = "0.4.0"
-        // Fairphone 6 / modern phones: ship arm64 only (drops unused ABIs from ML Kit etc.)
+        // Fairphone 6 / modern phones: ship arm64 only (drops unused ABIs from ML Kit etc.).
+        // Emulator smoke: ./gradlew :app:assembleDebug -PemulatorAbi
         ndk {
-            abiFilters += listOf("arm64-v8a")
+            val abis = mutableListOf("arm64-v8a")
+            if (project.hasProperty("emulatorAbi")) {
+                abis += "x86_64"
+            }
+            abiFilters += abis
         }
         // Forgejo releases API. SSH remote is git@forgejo; HTTP is on :3000.
         // Override: ./gradlew :app:assembleDebug -PforgejoUrl=https://git.example.com

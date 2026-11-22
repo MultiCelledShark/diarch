@@ -3,6 +3,7 @@ package app.diarch.android.data
 import okhttp3.ResponseBody
 import retrofit2.Response
 import retrofit2.http.Body
+import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.POST
 import retrofit2.http.PUT
@@ -20,6 +21,9 @@ interface DiarchApi {
     @GET("api/auth/me")
     suspend fun me(): User
 
+    @GET("api/users")
+    suspend fun listUsers(): List<User>
+
     @GET("api/works")
     suspend fun listWorks(
         @Query("status") status: String? = null,
@@ -31,6 +35,18 @@ interface DiarchApi {
 
     @PUT("api/works/{id}")
     suspend fun updateWork(@Path("id") id: String, @Body body: UpdateWorkRequest): Work
+
+    @GET("api/works/{id}/grants")
+    suspend fun listGrants(@Path("id") id: String): List<WorkGrant>
+
+    @POST("api/works/{id}/grants")
+    suspend fun addGrant(@Path("id") id: String, @Body body: GrantRequest): Response<Unit>
+
+    @DELETE("api/works/{id}/grants/{userId}")
+    suspend fun revokeGrant(
+        @Path("id") id: String,
+        @Path("userId") userId: String,
+    ): Response<Unit>
 
     @GET("api/settings")
     suspend fun getSettings(): UserSettings
